@@ -18,6 +18,20 @@ It is meant for one-operator deployments managing tens to low hundreds of peers 
 
 ---
 
+## Screenshots
+
+**Everything you need.**
+
+<img width="700" height="470" alt="image" src="https://github.com/user-attachments/assets/c4095156-6002-448a-81ed-ba6d3288ef10" />
+
+<img width="765" height="470" alt="image" src="https://github.com/user-attachments/assets/bffe2a6a-abde-409f-8307-045669cefc16" />
+
+<img width="828" height="872" alt="image" src="https://github.com/user-attachments/assets/525cb922-4b83-488d-9a98-1cf8ac5c60d0" />
+
+<img width="990" height="927" alt="image" src="https://github.com/user-attachments/assets/b5b4a260-8922-43ab-9a5d-cc38b0fbd11a" />
+
+---
+
 ## Why you might want this
 
 - You already understand WireGuard and don't want a full-stack SaaS layer (Tailscale, Twingate) on top of it
@@ -191,7 +205,7 @@ Kernel state (WireGuard config, iptables chains) is **rebuilt from sqlite on eve
 
 When you open `http://127.0.0.1:8080`, you get:
 
-**Top bar** — brand + version + author link + ◆ matrix-replay · internet status pill (public IP + last speedtest, click for diagnostics) · uptime · connection state · theme toggle · logout
+**Top bar** — brand + version + author link + ◆ · internet status pill (public IP + last speedtest, click for diagnostics) · uptime · connection state · theme toggle · logout
 
 **Stats row** — total peers · online · online sparkline · rx rate + Σ cumulative · tx rate + Σ cumulative (with ↺ reset) · cpu · mem · load
 
