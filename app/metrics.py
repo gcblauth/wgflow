@@ -68,6 +68,7 @@ class ACLHit:
     proto: Optional[str]
     pkts: int
     bytes: int
+    action: str = "allow"    # "allow" (ACCEPT) or "deny" (DROP)
 
 
 @dataclass
@@ -201,7 +202,7 @@ _IPT_ROW_RE = re.compile(
     ^\s*
     (?P<pkts>\d+)\s+
     (?P<bytes>\d+)\s+
-    ACCEPT\s+
+    (?P<target>ACCEPT|DROP)\s+
     (?P<proto>\S+)\s+
     \S+\s+                                # opt
     \S+\s+                                # in
@@ -225,15 +226,20 @@ def _parse_iptables_chain(output: str) -> List[ACLHit]:
             dest = f"{dest}/32"
         port = m.group("port")
         proto = m.group("proto2")
-        # When no dport is specified and proto is "all", set proto to None.
         if proto is None and m.group("proto") != "all":
             proto = m.group("proto") if m.group("proto") in ("tcp", "udp") else None
+        target = m.group("target")      # "ACCEPT" or "DROP"
+        # Skip the catch-all ACCEPT that ends full-tunnel chains (dest = 0.0.0.0/0
+        # with no port/proto). It's not a meaningful rule to surface in the UI.
+        if dest in ("0.0.0.0/0", "::/0") and port is None and proto is None and target == "ACCEPT":
+            continue
         hits.append(ACLHit(
             cidr=dest,
             port=int(port) if port else None,
             proto=proto,
             pkts=int(m.group("pkts")),
             bytes=int(m.group("bytes")),
+            action="deny" if target == "DROP" else "allow",
         ))
     return hits
 

@@ -1505,7 +1505,7 @@
     <div>
       <div class="brand">
         <span class="bracket">[</span>wgflow<span class="bracket">]</span>
-        <span class="sub">wireguard control panel · v3.0 · <span id="brand-author" class="brand-author" title="about wgflow">gcblauth</span> <span id="matrix-replay" class="matrix-replay-btn" title="replay matrix intro">◆</span></span>
+        <span class="sub">wireguard control panel · v3.1 · <span id="brand-author" class="brand-author" title="about wgflow">gcblauth</span> <span id="matrix-replay" class="matrix-replay-btn" title="replay matrix intro">◆</span></span>
       </div>
     </div>
     <div class="header-right">
@@ -1717,8 +1717,8 @@
           </div>
           <div class="field">
             <label for="single-acl">acl override (optional)</label>
-            <textarea id="single-acl" rows="3" placeholder="blank = use server default&#10;10.0.5.22&#10;10.0.5.0/24&#10;10.0.5.22:5432/tcp"></textarea>
-            <div class="hint">one entry per line · ip / cidr / ip:port/proto</div>
+            <textarea id="single-acl" rows="3" placeholder="blank = use server default&#10;10.0.5.22&#10;10.0.5.0/24&#10;10.0.5.22:5432/tcp&#10;!192.168.1.0/24  ← deny (full-tunnel)"></textarea>
+            <div class="hint">one entry per line · ip / cidr / ip:port/proto · prefix <code>!</code> to deny (e.g. <code>!192.168.1.0/24</code>) — any deny triggers full-tunnel mode</div>
           </div>
           <div class="field dns-field-row">
             <label class="dns-field-row-label">
@@ -1738,7 +1738,7 @@
           </div>
           <div class="field">
             <label for="names-acl">acl override (optional)</label>
-            <textarea id="names-acl" rows="3" placeholder="blank = use server default"></textarea>
+            <textarea id="names-acl" rows="3" placeholder="blank = use server default&#10;prefix ! to deny (e.g. !192.168.1.0/24)"></textarea>
           </div>
           <div class="field dns-field-row">
             <label class="dns-field-row-label">
@@ -1764,7 +1764,7 @@
           </div>
           <div class="field">
             <label for="count-acl">acl override (optional)</label>
-            <textarea id="count-acl" rows="3" placeholder="blank = use server default"></textarea>
+            <textarea id="count-acl" rows="3" placeholder="blank = use server default&#10;prefix ! to deny (e.g. !192.168.1.0/24)"></textarea>
           </div>
           <div class="field dns-field-row">
             <label class="dns-field-row-label">
@@ -1817,15 +1817,30 @@
 
         <div class="tab-pane" data-pane="server" style="display:none">
           <div id="server-info" style="font-size: 12px; line-height: 1.7;">loading…</div>
+
+          <!-- DB export / import — grouped before the danger zone so the
+               layout reads: info → safe ops → destructive ops. -->
+          <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border);">
+            <div style="font-size: 10px; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.14em; margin-bottom: 10px;">database</div>
+            <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
+              <button class="ghost" id="btn-export-db" title="download wgflow.sqlite as a backup">export db ↓</button>
+              <button class="ghost" id="btn-import-db" title="restore from a previously exported wgflow.sqlite">import db ↑</button>
+              <input type="file" id="import-db-file" accept=".sqlite,.sqlite3,.db" style="display:none">
+            </div>
+            <div class="hint" style="margin-top: 8px;">
+              export saves a snapshot of the entire database — peers, ACLs, DNS overrides, speedtest history, settings.
+              import replaces the running database and rebuilds all kernel state (WireGuard peers + iptables chains) from the imported file.
+            </div>
+          </div>
+
+          <!-- Danger zone — only inside the server tab, not visible from
+               other tabs. Extra spacing so it can't be muscle-memory-clicked. -->
+          <div class="danger-zone" style="margin-top: 24px;">
+            <div class="dz-label">danger zone</div>
+            <button class="danger" id="btn-delete-all" title="delete every peer + their iptables chains + dns history">delete all peers</button>
+          </div>
         </div>
 
-        <!-- Danger zone — always visible regardless of active tab.
-             Sits below the tab content with extra spacing so it can't be
-             muscle-memory-clicked instead of a regular action. -->
-        <div class="danger-zone">
-          <div class="dz-label">danger zone</div>
-          <button class="danger" id="btn-delete-all" title="delete every peer + their iptables chains + dns history">delete all peers</button>
-        </div>
       </div>
     </div>
   </div>
@@ -1975,7 +1990,7 @@
     <div class="about-brand">
       <span class="bracket">[</span>wgflow<span class="bracket">]</span>
     </div>
-    <div class="about-version">v3.0</div>
+    <div class="about-version">v3.1</div>
     <div class="about-line">wireguard control panel</div>
     <a class="about-link" href="https://github.com/gcblauth/wgflow" target="_blank" rel="noopener">
       github.com/gcblauth/wgflow
@@ -2247,7 +2262,9 @@ function render() {
       });
       const aclChips = p.acl.length
         ? p.acl.map(entry => {
-            const m = entry.match(/^([\d./]+)(?::(\d+)\/(tcp|udp))?$/);
+            const isDeny = entry.startsWith('!');
+            const display = entry;  // keep ! prefix in the chip text
+            const m = entry.replace(/^!/, '').match(/^([\d./]+)(?::(\d+)\/(tcp|udp))?$/);
             let hit = null;
             if (m) {
               const key = m[1] + ':' + (m[2] ?? '') + '/' + (m[3] ?? '');
@@ -2256,7 +2273,11 @@ function render() {
             const pkts = hit ? hit.pkts : 0;
             const bytes = hit ? hit.bytes : 0;
             const cls = pkts > 0 ? '' : 'zero';
-            return `<span class="chip hit">${escape(entry)}<span class="count ${cls}">${fmtCount(pkts)}pk · ${fmtBytes(bytes)}</span></span>`;
+            // Deny chips get danger color; allow chips get accent color.
+            const chipStyle = isDeny
+              ? 'border-color: var(--danger); color: var(--danger);'
+              : 'border-color: var(--accent); color: var(--accent);';
+            return `<span class="chip hit" style="${chipStyle}" title="${isDeny ? 'DENY' : 'ALLOW'}">${escape(display)}<span class="count ${cls}">${fmtCount(pkts)}pk · ${fmtBytes(bytes)}</span></span>`;
           }).join('')
         : '<span class="mono-dim">(none)</span>';
 
@@ -2277,10 +2298,19 @@ function render() {
         <td><span class="status-dot ${dotClass}" title="${escape(dotTitle)}"></span></td>
         <td>
           <div style="font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escape(p.name)}">${escape(p.name)}</div>
-          <details class="acl-detail">
-            <summary>acl (${p.acl.length})</summary>
-            <div class="acl-chips">${aclChips}</div>
-          </details>
+          <div style="font-size: 11px; margin-top: 2px; white-space: nowrap;">
+            ${(() => {
+              const denies = p.acl.filter(e => e.startsWith('!')).length;
+              const allows = p.acl.length - denies;
+              const tip = denies > 0
+                ? `${allows} allow · ${denies} deny`
+                : `${allows} rule${allows === 1 ? '' : 's'}`;
+              if (denies > 0) {
+                return `<span title="${tip}" style="cursor:default; color: var(--accent); font-family: var(--f-body);">${allows}</span><span style="color: var(--fg-muted); margin: 0 2px;">/</span><span title="${tip}" style="cursor:default; color: var(--danger); font-family: var(--f-body);">${denies}</span>`;
+              }
+              return `<span title="${tip}" style="cursor:default; color: var(--accent); font-family: var(--f-body);">${allows}</span>`;
+            })()}
+          </div>
         </td>
         <td class="mono-dim" style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escape(p.address)}</td>
         <td class="mono-dim" style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escape(l.endpoint || '')}">${escape(l.endpoint || '—')}</td>
@@ -2890,6 +2920,104 @@ $('#btn-delete-all').onclick = () => {
 };
 
 // peer-row action buttons (delegated)
+
+// ---------------------------------------------------------------------------
+// DB export / import
+// ---------------------------------------------------------------------------
+
+$('#btn-export-db').onclick = () => {
+  // Trigger a download by navigating to the export endpoint. This works
+  // because the endpoint sets Content-Disposition: attachment so the browser
+  // downloads rather than navigating away. No JS fetch needed.
+  const a = document.createElement('a');
+  a.href = '/api/db/export';
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  a.download = `wgflow-backup-${ts}.sqlite`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  toast('export started — check your downloads');
+};
+
+$('#btn-import-db').onclick = () => {
+  // Open a confirm modal with strong warnings before even showing the file
+  // picker. We don't want operators to accidentally click import and lose data.
+  openModal('import database', `
+    <div style="font-size: 13px; line-height: 1.6;">
+      <p style="margin-top: 0; color: var(--danger); font-weight: 600;">
+        ⚠ this will completely replace the running database.
+      </p>
+      <p style="font-size: 12px; color: var(--fg-dim);">
+        Importing a database will:
+      </p>
+      <ul style="color: var(--fg-dim); font-size: 12px; padding-left: 18px; margin: 8px 0 14px;">
+        <li>replace all peers, ACLs, DNS overrides, speedtest history, and settings with the contents of the imported file</li>
+        <li>disconnect every currently-connected peer</li>
+        <li>rebuild all WireGuard and iptables state from the imported data</li>
+        <li>pause the metrics collector briefly during the swap (~2s gap)</li>
+        <li>keep a <code>.pre-import.bak</code> copy of the current database in the data directory as a safety net</li>
+      </ul>
+      <p style="color: var(--warn); font-size: 12px; margin-bottom: 14px;">
+        The imported file must be a wgflow sqlite database (exported from this or another wgflow instance).
+        The current running configuration is <em>not</em> recoverable after import unless you exported it first.
+      </p>
+      <div class="field" style="margin-bottom: 14px;">
+        <label for="import-confirm-text">type <strong style="color: var(--danger); letter-spacing: 0.2em;">IMPORT</strong> to continue</label>
+        <input id="import-confirm-text" class="confirm-input" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="type IMPORT">
+      </div>
+      <div style="display: flex; gap: 10px; justify-content: flex-end;">
+        <button class="ghost" id="import-cancel">cancel</button>
+        <button class="danger" id="import-choose-file" disabled>choose file…</button>
+      </div>
+    </div>
+  `);
+
+  const input = $('#import-confirm-text');
+  const go    = $('#import-choose-file');
+  input.focus();
+  input.addEventListener('input', () => { go.disabled = input.value !== 'IMPORT'; });
+  $('#import-cancel').onclick = () => $('#modal').classList.remove('show');
+
+  go.onclick = () => {
+    // Only now (after typed confirmation) do we open the file picker.
+    $('#modal').classList.remove('show');
+    $('#import-db-file').click();
+  };
+};
+
+$('#import-db-file').addEventListener('change', async (ev) => {
+  const file = ev.target.files[0];
+  if (!file) return;
+  // Reset the input so the same file can be picked again after a failure.
+  ev.target.value = '';
+
+  const btn = $('#btn-import-db');
+  btn.disabled = true;
+  btn.textContent = 'importing…';
+  const form = new FormData();
+  form.append('file', file);
+
+  try {
+    const resp = await fetch('/api/db/import?confirm=IMPORT', {
+      method: 'POST',
+      body: form,
+      credentials: 'same-origin',
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+      throw new Error(err.detail || 'import failed');
+    }
+    toast('database imported and kernel state rebuilt — reloading…');
+    // Give the server a moment to finish rebuilding state, then reload
+    // the page so all in-memory caches (peers, ws, cumulative) refresh.
+    setTimeout(() => location.reload(), 1500);
+  } catch (e) {
+    toast('import failed: ' + e.message, 'error');
+    btn.disabled = false;
+    btn.textContent = 'import db ↑';
+  }
+});
+
 $('#peers-tbody').addEventListener('click', async (ev) => {
   const t = ev.target.closest('button');
   if (!t) return;
@@ -2973,13 +3101,91 @@ function openActionsMenu(peer) {
 // reuse it. Behaviour is unchanged.
 function openAclEditor(peer) {
   openModal(`edit acl · ${escape(peer.name)}`, `
-    <div class="field">
+    <div class="field" style="margin-bottom: 8px;">
       <label>acl entries (one per line)</label>
-      <textarea id="acl-editor" rows="8">${peer.acl.join('\n')}</textarea>
-      <div class="hint">empty = peer can reach nothing</div>
+      <textarea id="acl-editor" rows="8" style="font-family: var(--f-body); font-size: 12px;">${peer.acl.join('\n')}</textarea>
+      <div class="hint" style="margin-top: 4px;">
+        ip / cidr / ip:port/proto · prefix <code>!</code> to
+        <span style="color: var(--danger); font-weight: 600;">deny</span>
+        (e.g. <code>!192.168.1.0/24</code>) — any deny triggers full-tunnel mode (AllowedIPs = 0.0.0.0/0)
+      </div>
     </div>
+    <div id="acl-preview" style="margin-bottom: 12px; display: flex; flex-wrap: wrap; gap: 4px; min-height: 24px;"></div>
+    <div id="acl-mode-hint" style="font-size: 11px; margin-bottom: 12px; color: var(--fg-muted);"></div>
     <button class="primary" id="acl-save">save acl</button>
   `);
+
+  function renderAclPreview(val) {
+    const lines = val.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    const preview = $('#acl-preview');
+    const modeEl  = $('#acl-mode-hint');
+    if (!preview) return;
+
+    const dc = lines.filter(l => l.startsWith('!')).length;
+    const denyLines = lines.filter(l => l.startsWith('!'));
+
+    preview.innerHTML = lines.map(line => {
+      const isDeny = line.startsWith('!');
+      const style  = isDeny
+        ? 'border: 1px solid var(--danger); color: var(--danger); background: transparent; padding: 2px 8px; font-size: 11px; font-family: var(--f-body);'
+        : 'border: 1px solid var(--accent); color: var(--accent); background: transparent; padding: 2px 8px; font-size: 11px; font-family: var(--f-body);';
+      return `<span style="${style}">${escape(line)}</span>`;
+    }).join('');
+
+    if (modeEl) {
+      const hints = [];
+
+      if (dc > 0) {
+        hints.push(`<span style="color: var(--warn)">⚠ full-tunnel mode — ${dc} deny rule${dc > 1 ? 's' : ''} · client config will use AllowedIPs = 0.0.0.0/0</span>`);
+      } else if (lines.length > 0) {
+        hints.push(`<span style="color: var(--fg-muted)">split-tunnel mode — only allow-list destinations route through the VPN</span>`);
+      }
+
+      // Warn if any deny entry covers the server's wg address — this blocks
+      // the peer from reaching the admin dashboard on port 8080.
+      if (dc > 0 && serverConfig && serverConfig.server_address) {
+        // Extract bare IP from server_address (e.g. "10.1.68.1/24" → "10.1.68.1").
+        const serverIp = serverConfig.server_address.split('/')[0];
+        const coversDashboard = denyLines.some(line => {
+          // Strip leading ! and any port/proto suffix to get the CIDR/IP.
+          const cidr = line.replace(/^!/, '').replace(/:[^/]+\/.*$/, '').replace(/:.*$/, '');
+          // Exact IP match, or /0 catch-all, or matching /24 subnet heuristic.
+          // We do a simple prefix check which is correct for typical cases.
+          // Full CIDR containment would need a library; the common cases are:
+          //   !10.1.68.1          → exact match
+          //   !10.1.68.0/24       → subnet containing server
+          //   !0.0.0.0/0          → everything
+          if (cidr === serverIp) return true;
+          if (cidr === '0.0.0.0/0') return true;
+          if (cidr.includes('/')) {
+            // Check if serverIp falls within the denied CIDR.
+            // Simple approach: compare network prefix.
+            const [net, bits] = cidr.split('/');
+            const mask = bits ? parseInt(bits) : 32;
+            if (mask === 0) return true;
+            const ipToInt = ip => ip.split('.').reduce((a, b) => (a << 8) | parseInt(b), 0) >>> 0;
+            const m = (0xFFFFFFFF << (32 - mask)) >>> 0;
+            return (ipToInt(net) & m) === (ipToInt(serverIp) & m);
+          }
+          return false;
+        });
+        if (coversDashboard) {
+          hints.push(`<span style="color: var(--danger)">⚠ this deny rule covers the server's wg address (${escape(serverIp)}) — the peer will be blocked from reaching the wgflow admin panel</span>`);
+        }
+      }
+
+      modeEl.innerHTML = hints.join('<br>');
+    }
+  }
+
+  // Render on open with existing entries.
+  renderAclPreview($('#acl-editor').value);
+
+  // Update live as the operator types.
+  $('#acl-editor').addEventListener('input', (ev) => {
+    renderAclPreview(ev.target.value);
+  });
+
   $('#acl-save').onclick = async () => {
     const entries = parseAclText($('#acl-editor').value) || [];
     try {
@@ -3598,16 +3804,22 @@ function renderInspect(d) {
           <h4>acl rule hits</h4>
           <div class="hint" style="margin-bottom: 8px;">how much traffic each acl rule has matched (per-rule, not per-destination).</div>
           <table class="flows">
-            <thead><tr><th>rule</th><th>proto</th><th class="num">packets</th><th class="num">bytes</th></tr></thead>
+            <thead><tr><th>rule</th><th>action</th><th>proto</th><th class="num">packets</th><th class="num">bytes</th></tr></thead>
             <tbody>
-              ${meaningful.slice(0, 10).map(h => `
+              ${meaningful.slice(0, 10).map(h => {
+                const isDeny = h.action === 'deny';
+                const actionChip = isDeny
+                  ? `<span style="color: var(--danger); font-family: var(--f-body); font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em;">deny</span>`
+                  : `<span style="color: var(--accent); font-family: var(--f-body); font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em;">allow</span>`;
+                return `
                 <tr>
                   <td>${renderClickableDest(h.cidr, h.port)}</td>
+                  <td>${actionChip}</td>
                   <td class="mono-dim">${h.proto || 'any'}</td>
                   <td class="num">${fmtCount(h.pkts)}</td>
                   <td class="num">${fmtBytes(h.bytes)}</td>
-                </tr>
-              `).join('')}
+                </tr>`;
+              }).join('')}
             </tbody>
           </table>
         </div>`;

@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS peer_acls (
     cidr        TEXT NOT NULL,         -- always normalised to CIDR form
     port        INTEGER,               -- NULL = any
     proto       TEXT,                  -- NULL = any, else 'tcp' or 'udp'
-    UNIQUE(peer_id, cidr, port, proto)
+    action      TEXT NOT NULL DEFAULT 'allow',   -- 'allow' or 'deny'
+    UNIQUE(peer_id, cidr, port, proto, action)
 );
 
 CREATE INDEX IF NOT EXISTS idx_peer_acls_peer ON peer_acls(peer_id);
@@ -175,6 +176,20 @@ class DB:
             # (preserves legacy behavior). New peers can opt in to a custom
             # DNS or disable it via the empty-string sentinel.
             conn.execute("ALTER TABLE peers ADD COLUMN dns TEXT")
+
+        # peer_acls.action added when deny-rule support landed.
+        # Existing rows get DEFAULT 'allow' — fully backward compatible.
+        acl_cols = {r[1] for r in conn.execute("PRAGMA table_info(peer_acls)").fetchall()}
+        if acl_cols and "action" not in acl_cols:
+            conn.execute(
+                "ALTER TABLE peer_acls ADD COLUMN action TEXT NOT NULL DEFAULT 'allow'"
+            )
+        # Backfill any NULL action values that snuck in before the column
+        # existed or from the ALTER TABLE add (SQLite doesn't retroactively
+        # fill existing rows with the DEFAULT, only new inserts get it).
+        conn.execute(
+            "UPDATE peer_acls SET action = 'allow' WHERE action IS NULL"
+        )
 
         # speedtest_history.endpoint added when multi-endpoint support landed.
         # Existing rows get NULL → the UI treats them as "unknown endpoint",

@@ -4,6 +4,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
+import sqlite3
+import tempfile
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -11,8 +14,10 @@ from typing import List, Optional
 
 from fastapi import (
     FastAPI,
+    File,
     HTTPException,
     Response,
+    UploadFile,
     WebSocket,
     WebSocketDisconnect,
 )
@@ -56,17 +61,18 @@ def get_db() -> DB:
 
 def _row_to_peer_out(conn, row) -> PeerOut:
     acl_rows = conn.execute(
-        "SELECT cidr, port, proto FROM peer_acls WHERE peer_id = ? ORDER BY id",
+        "SELECT cidr, port, proto, action FROM peer_acls WHERE peer_id = ? ORDER BY id",
         (row["id"],),
     ).fetchall()
     entries = [
-        acl_mod.ACLEntry(cidr=r["cidr"], port=r["port"], proto=r["proto"])
+        acl_mod.ACLEntry(
+            cidr=r["cidr"],
+            port=r["port"],
+            proto=r["proto"],
+            action=r["action"] if (r["action"] in ("allow", "deny")) else "allow",
+        )
         for r in acl_rows
     ]
-    # Older rows may not have the dns column populated. sqlite Row supports
-    # subscript access; guard with a keys() check so we don't KeyError on
-    # databases that haven't been migrated yet (the migration runs on app
-    # boot, but defensive read is cheap).
     dns_val = row["dns"] if "dns" in row.keys() else None
     return PeerOut(
         id=row["id"],
@@ -97,11 +103,19 @@ def _load_all_peers_for_sync() -> List[wg.PeerConfig]:
 
 def _load_peer_acls(peer_id: int) -> List[acl_mod.ACLEntry]:
     rows = get_db().conn.execute(
-        "SELECT cidr, port, proto FROM peer_acls WHERE peer_id = ? ORDER BY id",
+        "SELECT cidr, port, proto, action FROM peer_acls WHERE peer_id = ? ORDER BY id",
         (peer_id,),
     ).fetchall()
     return [
-        acl_mod.ACLEntry(cidr=r["cidr"], port=r["port"], proto=r["proto"])
+        acl_mod.ACLEntry(
+            cidr=r["cidr"],
+            port=r["port"],
+            proto=r["proto"],
+            # action can be NULL in pre-migration rows (SQLite ALTER TABLE
+            # ADD COLUMN only sets DEFAULT for new inserts, not existing rows).
+            # Treat NULL as "allow" to preserve the row's original intent.
+            action=r["action"] if (r["action"] in ("allow", "deny")) else "allow",
+        )
         for r in rows
     ]
 
@@ -121,7 +135,8 @@ def _replay_state_to_kernel() -> None:
     rows = conn.execute("SELECT id, address FROM peers WHERE enabled = 1").fetchall()
     for row in rows:
         ipt.create_peer_chain(row["id"], row["address"])
-        ipt.apply_peer_acls(row["id"], _load_peer_acls(row["id"]))
+        ipt.apply_peer_acls(row["id"], _load_peer_acls(row["id"]),
+                            peer_address=row["address"])
 
 
 def _peer_id_for_ip(peer_ip: str) -> Optional[int]:
@@ -375,8 +390,8 @@ def _create_peer_row(
         peer_id = cur.lastrowid
         for e in acl_entries:
             conn.execute(
-                "INSERT INTO peer_acls (peer_id, cidr, port, proto) VALUES (?, ?, ?, ?)",
-                (peer_id, e.cidr, e.port, e.proto),
+                "INSERT INTO peer_acls (peer_id, cidr, port, proto, action) VALUES (?, ?, ?, ?, ?)",
+                (peer_id, e.cidr, e.port, e.proto, e.action),
             )
     return peer_id
 
@@ -386,7 +401,8 @@ def _apply_peer_to_kernel(peer_id: int) -> None:
         "SELECT address FROM peers WHERE id = ?", (peer_id,)
     ).fetchone()
     ipt.create_peer_chain(peer_id, row["address"])
-    ipt.apply_peer_acls(peer_id, _load_peer_acls(peer_id))
+    ipt.apply_peer_acls(peer_id, _load_peer_acls(peer_id),
+                        peer_address=row["address"])
 
 
 def _sync_wg() -> None:
@@ -586,11 +602,13 @@ def update_peer_acl(peer_id: int, body: ACLUpdate):
         c.execute("DELETE FROM peer_acls WHERE peer_id = ?", (peer_id,))
         for e in entries:
             c.execute(
-                "INSERT INTO peer_acls (peer_id, cidr, port, proto) VALUES (?, ?, ?, ?)",
-                (peer_id, e.cidr, e.port, e.proto),
+                "INSERT INTO peer_acls (peer_id, cidr, port, proto, action) VALUES (?, ?, ?, ?, ?)",
+                (peer_id, e.cidr, e.port, e.proto, e.action),
             )
 
-    ipt.apply_peer_acls(peer_id, entries)
+    peer_row = conn.execute("SELECT address FROM peers WHERE id = ?", (peer_id,)).fetchone()
+    ipt.apply_peer_acls(peer_id, entries,
+                        peer_address=peer_row["address"] if peer_row else "")
 
     row = conn.execute("SELECT * FROM peers WHERE id = ?", (peer_id,)).fetchone()
     return _row_to_peer_out(conn, row)
@@ -621,13 +639,25 @@ def _peer_client_conf(
     if not row:
         raise HTTPException(404, "peer not found")
     entries = _load_peer_acls(peer_id)
-    allowed = [e.cidr for e in entries] if entries else ["0.0.0.0/32"]
+
+    # AllowedIPs in the client config controls what the CLIENT routes
+    # through the tunnel. Two cases:
+    #   - Split-tunnel (allow-only ACL): use the allow-entry CIDRs so
+    #     only whitelisted traffic goes through the VPN
+    #   - Full-tunnel (any deny entry present): use 0.0.0.0/0 so ALL
+    #     traffic goes through the tunnel; the server-side deny rules
+    #     then block specific destinations. Without 0.0.0.0/0 on the
+    #     client side, traffic to denied destinations would bypass the
+    #     tunnel entirely and the deny rules would never fire.
+    if acl_mod.has_any_deny(entries):
+        allowed = ["0.0.0.0/0"]
+    else:
+        allowed = [e.cidr for e in entries if not e.is_deny] if entries else ["0.0.0.0/32"]
+
     # Pick the dns value to render.
     if dns_override_provided:
         effective_dns = dns_override
     else:
-        # Use the peer's stored value; fall back to None (server default)
-        # if the column doesn't exist (legacy DBs being read pre-migration).
         effective_dns = row["dns"] if "dns" in row.keys() else None
     conf = wg.render_client_conf(
         peer_private_key=row["private_key"],
@@ -854,6 +884,155 @@ def server_info():
         "public_key": wg.server_public_key(),
         "uptime_seconds": _container_uptime_seconds(),
     }
+
+
+@app.get("/api/db/export")
+def db_export():
+    """Download the live sqlite database as a binary file.
+
+    We use sqlite's built-in backup API to get a consistent snapshot without
+    locking writes or needing to pause the metrics collector. The backup
+    stream is written to a temp file first, then served — FastAPI can't stream
+    a sqlite backup directly since it needs a destination connection object.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False) as tmp:
+        tmp_path = tmp.name
+
+    try:
+        # sqlite backup API: consistent snapshot even with concurrent writes.
+        src = get_db().conn
+        dst = sqlite3.connect(tmp_path)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+
+        data = Path(tmp_path).read_bytes()
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+    return Response(
+        content=data,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": "attachment; filename=\"wgflow.sqlite\""},
+    )
+
+
+@app.post("/api/db/import")
+async def db_import(
+    file: UploadFile = File(...),
+    confirm: str = "",
+):
+    """Replace the running database with an uploaded sqlite file.
+
+    Guarded by ?confirm=IMPORT so a stray browser request can't trigger it.
+    The upload is validated before the swap so a corrupt file can't take down
+    the running instance. After the swap, all kernel state (WireGuard peers +
+    iptables chains) is rebuilt from the imported DB.
+
+    The metrics collector is paused during the swap to release DB file
+    handles. The ~2s metrics gap is acceptable; the collector resumes
+    automatically after the swap.
+    """
+    if confirm != "IMPORT":
+        raise HTTPException(400, "must pass ?confirm=IMPORT")
+
+    # Read the upload into memory first. Typical DB is a few MB — even
+    # a large one with lots of history is unlikely to exceed ~100 MB, which
+    # is well within FastAPI's default body limit.
+    data = await file.read()
+
+    # Validate: is this actually a sqlite file?
+    if len(data) < 16 or data[:16] != b"SQLite format 3\x00":
+        raise HTTPException(422, "uploaded file is not a sqlite database")
+
+    # Write to a temp file so we can open it and inspect the schema.
+    with tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False) as tmp:
+        tmp.write(data)
+        tmp_path = tmp.name
+
+    try:
+        # Validate: does it have at minimum the `peers` and `peer_acls` tables?
+        test_conn = sqlite3.connect(tmp_path)
+        test_conn.row_factory = sqlite3.Row
+        try:
+            tables = {r[0] for r in test_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()}
+            required = {"peers", "peer_acls"}
+            missing = required - tables
+            if missing:
+                raise HTTPException(
+                    422,
+                    f"database is missing required tables: {', '.join(sorted(missing))}. "
+                    "This doesn't look like a wgflow database.",
+                )
+            # Quick sanity: peers table should have the core columns.
+            peer_cols = {r[1] for r in test_conn.execute(
+                "PRAGMA table_info(peers)"
+            ).fetchall()}
+            core_cols = {"id", "name", "public_key", "private_key", "preshared_key", "address"}
+            missing_cols = core_cols - peer_cols
+            if missing_cols:
+                raise HTTPException(
+                    422,
+                    f"peers table is missing columns: {', '.join(sorted(missing_cols))}. "
+                    "This may be a database from an incompatible version.",
+                )
+        finally:
+            test_conn.close()
+
+        # Pause the metrics collector — it holds a persistent read connection
+        # to the DB and would conflict with overwriting the file.
+        await metrics.stop()
+
+        try:
+            # Atomic swap: rename is atomic on Linux (same filesystem).
+            db_path = str(SETTINGS.db_path)
+            # Backup the current DB just in case. Silently skip if it fails
+            # (disk full, permissions) — we still proceed.
+            backup_path = db_path + ".pre-import.bak"
+            try:
+                shutil.copy2(db_path, backup_path)
+            except OSError:
+                pass
+
+            shutil.move(tmp_path, db_path)
+            tmp_path = None           # mark as consumed so finally doesn't delete it
+
+            # Re-open the DB layer with the new file. This reinitialises the
+            # global db instance and runs migrations so older-version imports
+            # get the new columns they might be missing.
+            global db
+            db = DB(SETTINGS.db_path)
+
+            # Rebuild kernel state from the imported DB. This is the same
+            # logic that runs on container startup.
+            _replay_state_to_kernel()
+
+            # Restart the metrics collector against the new DB.
+            metrics.start(db)
+
+        except Exception:
+            # If anything went wrong during the swap, try to restart metrics
+            # with whatever DB state we're in so the app stays alive.
+            try:
+                metrics.start(db)
+            except Exception:
+                pass
+            raise
+
+    finally:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    return {"ok": True, "message": "database replaced and kernel state rebuilt"}
 
 
 # ---------------------------------------------------------------------------
@@ -1210,7 +1389,7 @@ async def peer_inspect(peer_id: int):
         },
         "acl_top": [
             {"cidr": h.cidr, "port": h.port, "proto": h.proto,
-             "pkts": h.pkts, "bytes": h.bytes}
+             "pkts": h.pkts, "bytes": h.bytes, "action": h.action}
             for h in hits_sorted
         ],
         "flows": flows,

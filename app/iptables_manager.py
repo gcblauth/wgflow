@@ -122,6 +122,73 @@ def ensure_base_chain() -> None:
             _run(["-D"] + log_rule)
 
 
+def _input_deny_args(src_ip: str, e: ACLEntry) -> List[str]:
+    """Build the iptables args for one INPUT DROP rule for a deny entry.
+
+    The rule is scoped to: interface wg0, source = peer tunnel IP, destination
+    and port/proto from the ACL entry. This ensures it only blocks this
+    specific peer, not all VPN peers.
+    """
+    args = [
+        "INPUT",
+        "-i", SETTINGS.interface,
+        "-s", src_ip,
+        "-d", e.cidr,
+    ]
+    if e.proto is not None:
+        args += ["-p", e.proto]
+        if e.port is not None:
+            args += ["--dport", str(e.port)]
+    args += ["-j", "DROP"]
+    return args
+
+
+def _flush_input_deny_rules(src_ip: str, entries: List[ACLEntry] = None) -> None:
+    """Remove INPUT DROP rules for a specific peer source IP.
+
+    If `entries` is provided (the exact rules we installed), we delete by
+    full rule spec using -C/-D — precise and reliable.
+
+    If `entries` is None (destroy path or unknown state), we use iptables-save
+    to find all INPUT DROP rules for this source IP and delete them by spec.
+    This is more reliable than line-number deletion which is sensitive to
+    concurrent changes.
+    """
+    if entries is not None:
+        # Fast path: delete exactly what we know we installed.
+        for e in entries:
+            if not e.is_deny:
+                continue
+            args = _input_deny_args(src_ip, e)
+            while _exists(args):
+                subprocess.run(["iptables", "-D"] + args,
+                               capture_output=True, check=False)
+        return
+
+    # Fallback: use iptables-save which gives us full rule specs, not the
+    # display-format output of -L. Each line is in the format:
+    #   -A INPUT -i wg0 -s 10.1.69.3 -d ... -j DROP
+    # We can delete directly using -D with those args.
+    out = subprocess.run(
+        ["iptables-save", "-t", "filter"],
+        capture_output=True, text=True, check=False,
+    ).stdout
+
+    for line in out.splitlines():
+        line = line.strip()
+        # Match: INPUT chain, DROP target, source matches this peer.
+        if (line.startswith("-A INPUT ") and
+                f"-s {src_ip}" in line and
+                line.endswith("-j DROP")):
+            # Convert -A to -D and run.
+            delete_line = line.replace("-A INPUT ", "-D INPUT ", 1)
+            parts = delete_line.split()
+            subprocess.run(
+                ["iptables"] + parts,
+                capture_output=True, check=False,
+            )
+
+
 def create_peer_chain(peer_id: int, address: str) -> None:
     """Create the per-peer chain and hook it up by source IP.
 
@@ -144,36 +211,79 @@ def create_peer_chain(peer_id: int, address: str) -> None:
 
 
 def destroy_peer_chain(peer_id: int, address: str) -> None:
-    """Tear down a peer's chain and all references."""
+    """Tear down a peer's chain, all FORWARD references, and INPUT deny rules."""
     chain = _chain_name(peer_id)
     src = _strip_mask(address)
 
-    # Remove jump.
+    # Remove FORWARD jump.
     while _exists(["WGFLOW_FORWARD", "-s", src, "-j", chain]):
         _run(["-D", "WGFLOW_FORWARD", "-s", src, "-j", chain])
+
+    # Remove any INPUT deny rules for this peer.
+    _flush_input_deny_rules(src, entries=None)
 
     # Flush and drop chain.
     subprocess.run(["iptables", "-F", chain], capture_output=True)
     subprocess.run(["iptables", "-X", chain], capture_output=True)
 
 
-def apply_peer_acls(peer_id: int, entries: List[ACLEntry]) -> None:
+def apply_peer_acls(
+    peer_id: int,
+    entries: List[ACLEntry],
+    peer_address: str = "",
+) -> None:
     """Atomically replace this peer's ACL with the given entries.
 
-    Flushes the peer's chain then appends allow rules. Packets that do not
-    match any rule in this chain fall back to WGFLOW_FORWARD which drops them.
+    Builds the per-peer FORWARD chain in the correct iptables order:
+
+      1. DENY rules first  (-j DROP)
+      2. ALLOW rules after (-j ACCEPT)
+      3. Catch-all ACCEPT  (-j ACCEPT) if ANY deny rule is present
+
+    For each deny entry, also adds a matching INPUT DROP rule scoped to
+    this peer's source IP and the wg0 interface. This ensures deny rules
+    also block traffic destined for the server itself (e.g. the admin
+    panel), not just forwarded traffic.
+
+    `peer_address` must be the peer's tunnel address (e.g. "10.1.69.3/32").
+    When empty, INPUT rules are skipped (safe fallback — FORWARD rules still
+    apply; INPUT rules are the new addition).
     """
     chain = _chain_name(peer_id)
+    src = _strip_mask(peer_address) if peer_address else ""
+
+    # Flush the FORWARD chain for this peer.
     _run(["-F", chain])
 
-    for e in entries:
+    # Flush any existing INPUT deny rules for this peer before replacing them.
+    # Pass None so _flush_input_deny_rules uses iptables-save to find the
+    # actual installed rules — we don't know what was there before this call.
+    if src:
+        _flush_input_deny_rules(src, entries=None)
+
+    # Sort: deny first, then allow.
+    denies  = [e for e in entries if e.is_deny]
+    allows  = [e for e in entries if not e.is_deny]
+    ordered = denies + allows
+
+    for e in ordered:
+        # FORWARD chain rule (unchanged behaviour).
         args = ["-A", chain, "-d", e.cidr]
         if e.proto is not None:
             args += ["-p", e.proto]
             if e.port is not None:
                 args += ["--dport", str(e.port)]
-        args += ["-j", "ACCEPT"]
+        args += ["-j", "DROP" if e.is_deny else "ACCEPT"]
         _run(args)
+
+        # INPUT chain rule — only for deny entries and only when we have
+        # the peer's source IP.
+        if e.is_deny and src:
+            _run(["-I"] + _input_deny_args(src, e))
+
+    # Catch-all ACCEPT for full-tunnel mode.
+    if denies:
+        _run(["-A", chain, "-j", "ACCEPT"])
 
 
 def dump_all() -> str:

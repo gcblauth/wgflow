@@ -5,20 +5,11 @@
 Run WireGuard, generate peer configs, manage per-peer ACLs, monitor live throughput, run network diagnostics, and serve everything from a self-contained web UI — all from one Docker container.
 
 ```
-[ wgflow ]   wireguard control panel · v3.0
+[ wgflow ]   wireguard control panel · v3.1
 ```
 
----
+## Screenshots:
 
-## What it is
-
-wgflow is a WireGuard server with the missing operator interface. You define what each peer can reach, hand them a `.conf` file or QR code, and watch the connection from a dashboard that streams live data over a WebSocket. ACLs are enforced via per-peer iptables chains with a default-deny policy. Optional dnsmasq integration gives you DNS query logging and override rules for split-horizon scenarios.
-
-It is meant for one-operator deployments managing tens to low hundreds of peers — homelab gateways, small office VPNs, family-and-friends nodes. It is **not** a multi-tenant, multi-server, web-scale product.
-
----
-
-## Screenshots
 
 **Everything you need.**
 
@@ -29,6 +20,17 @@ It is meant for one-operator deployments managing tens to low hundreds of peers 
 <img width="828" height="872" alt="image" src="https://github.com/user-attachments/assets/525cb922-4b83-488d-9a98-1cf8ac5c60d0" />
 
 <img width="990" height="927" alt="image" src="https://github.com/user-attachments/assets/b5b4a260-8922-43ab-9a5d-cc38b0fbd11a" />
+
+> See also: [CHANGELOG.md](CHANGELOG.md) for full version history.
+
+---
+
+## What it is
+
+wgflow is a WireGuard server with the missing operator interface. You define what each peer can reach, hand them a `.conf` file or QR code, and watch the connection from a dashboard that streams live data over a WebSocket. ACLs are enforced via per-peer iptables chains with a default-deny policy. Optional dnsmasq integration gives you DNS query logging and override rules for split-horizon scenarios.
+I've had my own cli interface to help me with. With the help of AI I'm trying to make it look cool and more customizable.
+
+It is meant for one-operator deployments managing tens to low hundreds of peers — homelab gateways, small office VPNs, family-and-friends nodes. It is **not** a multi-tenant, multi-server, web-scale product.
 
 ---
 
@@ -85,7 +87,6 @@ Four on-demand log streams via WebSocket — opened only when you switch to that
 
 ### UI niceties
 - Light + dark themes with persistent selection (no FOUC on theme load)
-- Matrix-rain boot animation (replayable via the ◆ button next to the brand)
 - Authentication: full-page login overlay, `bcrypt`-hashed `PANEL_PASSWORD` env var, 24h cookie session
 - Pagination, search, and column sorting on the peer table
 - Custom inline SVG charts everywhere (no chart.js dependency at runtime)
@@ -99,7 +100,9 @@ Four on-demand log streams via WebSocket — opened only when you switch to that
 # 1. Get the code
 git clone https://github.com/gcblauth/wgflow.git
 cd wgflow
+bash setup.sh
 
+# or
 # 2. Edit docker-compose.yml — at minimum:
 #    - WG_ENDPOINT       your public hostname:port (e.g. vpn.example.com:51820)
 #    - WG_DEFAULT_ACL    what new peers can reach by default
@@ -205,7 +208,7 @@ Kernel state (WireGuard config, iptables chains) is **rebuilt from sqlite on eve
 
 When you open `http://127.0.0.1:8080`, you get:
 
-**Top bar** — brand + version + author link + ◆ · internet status pill (public IP + last speedtest, click for diagnostics) · uptime · connection state · theme toggle · logout
+**Top bar** — brand + version + author link + ◆ matrix-replay · internet status pill (public IP + last speedtest, click for diagnostics) · uptime · connection state · theme toggle · logout
 
 **Stats row** — total peers · online · online sparkline · rx rate + Σ cumulative · tx rate + Σ cumulative (with ↺ reset) · cpu · mem · load
 
@@ -225,12 +228,16 @@ When you open `http://127.0.0.1:8080`, you get:
 
 ## ACL syntax
 
-| Form                  | Meaning                                |
-|-----------------------|----------------------------------------|
-| `10.0.5.22`           | single host, any port/proto            |
-| `10.0.5.0/24`         | CIDR network, any port/proto           |
-| `10.0.5.22:5432/tcp`  | single host, specific port + protocol  |
-| `10.0.5.0/24:443/tcp` | CIDR network, specific port + protocol |
+| Form                  | Meaning                                   |
+|-----------------------|-------------------------------------------|
+| `!10.0.5.22`          | DENY single host, any port/proto          |
+| `10.0.5.22`           | single host, any port/proto               |
+| `10.0.5.0/24`         | CIDR network, any port/proto              |
+| `!10.0.5.22:5432/tcp` | DENY single host, specific port + protocol|
+| `10.0.5.22:5432/tcp`  | single host, specific port + protocol     |
+| `10.0.5.0/24:443/tcp` | CIDR network, specific port + protocol    |
+| `0.0.0.0/0`           | Full tunnel                               |
+
 
 Multiple entries: comma-separated in `WG_DEFAULT_ACL`, one-per-line in the UI textarea.
 

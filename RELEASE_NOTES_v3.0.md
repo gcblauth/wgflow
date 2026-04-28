@@ -158,9 +158,9 @@ These were considered for v3.0 but deferred:
 
 - **Per-peer bandwidth limits** (would need `tc` HTB classes per peer; ~1 week of work; viable up to ~50 peers before classifier complexity hurts)
 - **Per-axis cumulative reset** (currently rx + tx zero together; would need separate offset rows)
-- **iperf3 button in the peer inspect modal** (currently only in diagnostics panel; would auto-target the peer's tunnel IP)
-- **Real Ookla speedtest CLI** as an opt-in (more accurate, but +30MB image and Ookla telemetry)
+- **Better speedtest servers** todo. maybe iperf for internal networks.
 - **Multi-interface support** (one wgflow → multiple wg interfaces; significant refactor)
+- **Multi-server support** (many wgflow → multiple management; significant refactor)
 
 See the README's "Roadmap" section for the full list.
 
