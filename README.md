@@ -13,13 +13,7 @@ Run WireGuard, generate peer configs, manage per-peer ACLs, monitor live through
 
 **Everything you need.**
 
-<img width="700" height="470" alt="image" src="https://github.com/user-attachments/assets/c4095156-6002-448a-81ed-ba6d3288ef10" />
-
-<img width="765" height="470" alt="image" src="https://github.com/user-attachments/assets/bffe2a6a-abde-409f-8307-045669cefc16" />
-
-<img width="828" height="872" alt="image" src="https://github.com/user-attachments/assets/525cb922-4b83-488d-9a98-1cf8ac5c60d0" />
-
-<img width="990" height="927" alt="image" src="https://github.com/user-attachments/assets/b5b4a260-8922-43ab-9a5d-cc38b0fbd11a" />
+<img src="https://wgflow.2ps.in/stats.svg" />
 
 > See also: [CHANGELOG.md](CHANGELOG.md) for full version history.
 
