@@ -5,6 +5,252 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.0.0-alpha] — 2026-05-01
+
+First v4 release. Introduces **multi-site federation** — the ability to
+pair two or more wgflow instances together over WireGuard, so each
+instance's panel becomes reachable from the others over a private
+overlay network.
+
+### Fixed (post-initial-pack)
+
+- **"Add to home screen" affordance for mobile.** The live popover now
+  shows an `+ add to home screen` button when the layout is mobile
+  (detected via the existing `_formFactor` helper). Tapping it opens a
+  platform-aware instructions modal: iOS gets the Share → Add to Home
+  Screen sequence, Android Chrome gets the ⋮-menu → Install App
+  sequence, other browsers get a generic message. There is no
+  cross-platform install API; the button is essentially a guide. To
+  support the gesture we also added:
+  - `apple-touch-icon.png` (180×180), `icon-192.png`, `icon-512.png`
+    rendered from the `[w]` SVG via `scripts/render-favicon-png.py`
+    (Pillow-based; no rsvg dependency). Theme-fixed at the phosphor-
+    on-dark default — home-screen icons are brand-stable, not
+    tracking the user's panel theme.
+  - `manifest.json` for Android's PWA install flow with `theme_color`,
+    `background_color`, `display: standalone`, and an icons array.
+  - iOS-specific meta tags: `apple-mobile-web-app-title`,
+    `apple-mobile-web-app-capable`, status-bar style.
+  - Server routes for each new asset under a small dispatch table in
+    `main.py`. Auth-bypassed so the icons load on the login page too.
+  - `beforeinstallprompt` listener captured eagerly so a future
+    service-worker addition (v4.1+ backlog) immediately unlocks the
+    one-tap install path on Android Chrome — no re-plumbing.
+
+- **"Add to home screen": iOS-non-Safari path.** First pass detected
+  iOS by user agent and showed Safari's Share → Add to Home Screen
+  steps. Apple restricts the install capability to Safari only —
+  Chrome (CriOS), Firefox (FxiOS), Edge (EdgiOS), Opera, Yandex, and
+  GSA on iOS all use WebKit under the hood but have no equivalent
+  menu item. Detection now distinguishes iOS-Safari from iOS-other
+  browsers via the non-Safari UA tokens (CriOS/FxiOS/EdgiOS/etc),
+  and the iOS-other track tells the user to open the page in Safari
+  first via their browser's Share → Open in Safari, then continue
+  with Safari's home-screen flow.
+- **"Add to home screen": iOS-non-Safari one-tap shortcut.** Building
+  on the detection above, the iOS-non-Safari instructions now lead
+  with a primary "open this page in safari" button using the
+  `x-safari-https://` URL scheme. Tapping the button triggers iOS's
+  confirmation dialog and switches the user to Safari at the site
+  root, saving them ~2 taps of menu navigation. The manual 5-step
+  fallback is still present below in a collapsed `<details>`
+  expander, so if the URL scheme is ever blocked or removed (it's
+  undocumented but has been stable across recent iOS versions) the
+  user has a path. The Safari URL points to the site origin, not the
+  current page URL — home-screen icons remember the install URL,
+  and a deep path / query string would otherwise be baked into the
+  installed app.
+
+
+- **Favicon tracks the active theme.** Previously the favicon was a
+  static SVG with phosphor-green (`#8bff6a`) baked in, so changing the
+  panel's color theme — light/dark, or any of the 9 instance-theme
+  swatches (amber/cyan/magenta/ice/lime/pink/purple/gold/mint) — left
+  the tab-strip icon mismatched against the panel chrome. Now the
+  favicon is regenerated client-side as a base64 SVG data URL whenever
+  `applyInstanceTheme` or `setTheme` runs. The runtime read pulls the
+  live `--accent` and `--bg` values via `getComputedStyle`, so the
+  match is exact regardless of which of the 10×2 = 20 theme/mode
+  combinations the operator picked. Browser favicons run in a chrome
+  context that doesn't see document CSS variables, so the data-URL
+  swap is the standard workaround. The static `app/static/favicon.svg`
+  remains as the fallback for contexts that don't run our JS
+  (bookmarks, PWA install snapshots).
+
+- **Favicon added.** `app/static/favicon.svg` carries the bracket-`[w]`
+  mark — the panel's `[wgflow]` brand distilled to a single character.
+  Phosphor-green strokes on a dark rounded square, sized to read at
+  16px in a tab strip. Served from a dedicated `/favicon.svg` route
+  with a 24h `Cache-Control` header (the icon changes only on
+  releases). The route is auth-bypassed so unauthenticated visitors
+  see the icon on the login page rather than a generic browser
+  default.
+
+- **Live-icon popover: removed right-click contextmenu, added gear
+  button.** Previously the polling-config popup was reachable only via
+  right-click on the indicator. That had two problems: it was
+  undiscoverable (no UI affordance pointed to it) and it didn't work
+  on touch devices at all. Reports also surfaced that the contextmenu
+  had stopped firing in some browser/OS combinations after the
+  click-to-pin change. The fix moves all the configuration controls
+  (polling interval, clipboard auto-clear, layout override) into the
+  live popover itself. The popover now has a header with a gear button
+  that swaps the popover into config mode and a back arrow that
+  returns to info mode. The legacy `liveIconShowPollingPopup` function
+  is retained as dead code in case any external caller references it,
+  but no UI path reaches it.
+- **DNS-recent panel: line-count selector.** New `<select>` in the
+  panel toolbar with options 25 / 50 / 100 / 250 / 500. Default 100,
+  preference persists in `localStorage` (per-browser, like the
+  live-peers page-size). Both the regular `loadDns()` and the
+  filter-aware monkey-patched override now read the limit from the
+  same helper, so changing the dropdown takes effect on the next
+  refresh tick.
+- **DNS-recent panel: cells wrap on mobile.** With longer line counts
+  the table needed to be readable on phones. Cells now wrap (`white-
+  space: normal; word-break: break-all`) so a long FQDN or multi-A
+  answer stacks onto multiple lines instead of forcing horizontal
+  scroll. The short, predictable columns (`when`, `type`, `source`)
+  stay on one line. The fixed colgroup widths are also relaxed to
+  `auto` on mobile so the browser distributes space proportionally.
+- **DNS line-count selector visible on mobile.** The previous mobile
+  CSS hid every `.table-toolbar select` because the live-peers
+  page-size dropdown is meaningless when its panel uses cards. That
+  rule was scoped to `[data-panel-id="live-peers"]` so the DNS
+  selector stays visible (DNS doesn't swap to cards).
+
+- **Dashboard version still showed v3.8.3.** The version string was
+  bumped in `telemetry.py` (so the heartbeat payload reported v4.0.0-
+  alpha correctly) but two hardcoded references in `index.html` were
+  missed: the brand subtitle in the header and the version line in
+  the about modal. Both updated. Worth noting that `WGFLOW_VERSION`
+  in `telemetry.py` is the canonical source — the HTML strings should
+  ideally be templated from it, but the current architecture has no
+  build step for HTML, so the duplication is tracked as a small
+  follow-up to inject via Jinja or a runtime endpoint.
+- **Live-icon tooltip is now click-to-pin instead of hover-to-peek.**
+  The hover semantics didn't work on touch (no tooltip ever surfaced
+  on phones/tablets) and hover-with-jitter caused flicker for users
+  with shaky pointers on the small indicator target. Click toggles
+  the popover; click outside or press Escape dismisses; right-click
+  still opens the polling-config popup. The popover gained an
+  explicit close button so the dismiss action is discoverable.
+- **Live-icon popover now shows the WS endpoint URL.** The popover
+  body now includes the `/ws/status` URL the browser is connected
+  to and its readyState (open/connecting/closing/closed, color-
+  coded). Useful for debugging reverse-proxy + WSS setups — operator
+  can confirm at a glance that the connection upgraded to `wss://`
+  behind the proxy. The state refreshes when the WS opens or closes
+  while the popover is pinned, so reconnects are visible live.
+- **DNS-recent panel was empty on mobile.** The mobile media query had
+  a global `body:not(.force-desktop) table.peers { display: none }`
+  rule that hid every `.peers` table on mobile, intended only for the
+  live-peers swap. The DNS-recent panel reuses the `.peers` class but
+  has no card layout to fall back to, so on mobile its stats line
+  rendered correctly while the table itself was hidden — the symptom
+  the operator saw as "totals show but list is empty." Selectors are
+  now scoped by `[data-panel-id]` to the panels that actually opt
+  into the cards swap (`live-peers`, `federation`). DNS-recent's
+  table now stays visible on mobile (horizontally scrollable, 11px
+  font, readable). Same fix applied to the `body.force-mobile`
+  override block which had the identical bug.
+- **Federation panel cards were also being hidden on mobile** by the
+  same root cause — the swap-in selector was `#peers-cards` (id),
+  matching only the live-peers cards container. Broadened to
+  `.peers-cards` (class) so any panel using the cards pattern gets
+  the swap automatically.
+
+### Added
+
+- **Federation panel** (`data-panel-id="federation"`). Hidden by default
+  on instances where `WG_MULTISITE=0`. Lists every paired remote
+  wgflow with a colored status dot:
+  - green   = WG handshake fresh (within 180s)
+  - amber   = link created, no handshake observed yet
+  - red     = had a handshake then lost it (or initial connect failed)
+  - gray    = operator-disabled
+- **Pair-token flow.** Operator on the responder side generates a
+  one-time `wgflow-pair://host:port/code` URL (10-minute TTL, single-
+  use, replaceable). Operator on the initiator side pastes the URL,
+  picks a local label, and the synchronous handshake runs over HTTPS
+  with WebPKI verification. On success both sides have a federation
+  link row, a per-link WireGuard keypair + PSK, and an allocated /32
+  on the federation overlay subnet (default 10.99.0.0/24).
+- **Per-link WG identity.** Each federation link uses its own keypair,
+  not the server-wide WG identity. Revoking one link doesn't ripple to
+  others.
+- **iptables hard backstop.** Federation peers can reach this box's
+  panel ports (HTTPS, WebSocket) over the tunnel, but FORWARD-through
+  to client peers is blocked at iptables in a dedicated `WGFLOW_FED_<id>`
+  chain. Even with full panel-trust between paired operators, a
+  compromised remote wgflow cannot transit our client traffic.
+- **`/api/federation/status`** endpoint surfacing local overlay
+  address, configured subnet, links-by-status counts, and pending-
+  token state. Used by the panel header line and the pending banner.
+- **Telemetry: `federation_peer_count`.** Number of currently-
+  established links is included in the existing 30-minute heartbeat.
+  Telemetry-server can aggregate this into "how many wgflows are
+  talking to each other right now."
+- **Pairing-code rate limit.** The inbound handshake endpoint applies
+  a 10-attempts-per-minute-per-source-IP limit during active pairing
+  windows. Outside a window the endpoint returns 401 regardless of
+  body, so the public attack surface is small.
+
+### Changed
+
+- **`PeerConfig`** in `wg_manager.py` gained optional `endpoint` and
+  `persistent_keepalive` fields. Existing peers (clients) leave both
+  None and the rendered `[Peer]` block is byte-identical to v3.8.3.
+  Federation peers set both so the local wgflow actively dials out
+  and keeps the tunnel alive through NAT on either end.
+- **`_replay_state_to_kernel`** now also iterates enabled
+  federation_links and creates per-link drop chains.
+- **Telemetry version string** bumped to `4.0.0-alpha`.
+
+### Configuration
+
+Three new environment variables (all default to safe values; existing
+deployments upgrade with no required changes):
+
+- `WG_MULTISITE` (default `1`). Master switch for the feature.
+- `WG_FEDERATION_SUBNET` (default `10.99.0.0/24`). The overlay
+  address space. Must not overlap with `WG_SUBNET`.
+- `WG_FEDERATION_ENDPOINT` (default = `WG_ENDPOINT`). Public
+  host:port other wgflows should send WG traffic to. Override only
+  if you split federation onto a different UDP port.
+
+### Trust model (v4.0)
+
+Full panel-trust between paired wgflows: once a link is established,
+the federated peer can reach our panel's HTTPS+WS ports on the
+overlay address and authenticate with `PANEL_PASSWORD` like any other
+operator session. This is intended for the case where one operator
+owns both wgflow boxes. The iptables backstop still prevents
+FORWARD-through to client peers, so even a compromised remote can
+only reach this box's services.
+
+A tighter trust model (federation-scoped RPC API instead of full
+panel access) is on the v5 backlog.
+
+### Limitations / known gaps
+
+- TLS verification uses **WebPKI only**. Pairing wgflows behind
+  self-signed certs requires a reverse proxy with a real public
+  cert. Per-link SPKI pinning is on the v5 backlog.
+- The responder side cannot reliably know the initiator's panel
+  endpoint (the initiator dialed in; the source IP may be NATed).
+  The displayed `remote_panel_endpoint` on responder rows is a
+  best-effort source-IP guess. The probe still works correctly
+  because it goes via `remote_fed_addr` over the tunnel.
+- Deletion is local-only. The remote wgflow notices via missing
+  handshakes and transitions its mirror row to `failed` after the
+  fresh-handshake window expires. A polite "I'm leaving" RPC is
+  on the v5 backlog.
+- No NAT traversal. At least one side of every link must be reachable
+  on its WG endpoint from the other side.
+
+---
+
 ## [3.8.3] — 2026-05-01
 
 ### Fixed

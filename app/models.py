@@ -171,3 +171,59 @@ class MigrationToggle(BaseModel):
     container restarts.
     """
     enabled: bool
+
+
+# ---------------------------------------------------------------------------
+# v4.0: federation
+# ---------------------------------------------------------------------------
+
+class FederationPairCreate(BaseModel):
+    """Body of POST /api/federation/links/pair.
+
+    Operator on the responder side clicks "Generate pairing token". The
+    server generates a one-time code, holds it in memory for 10 minutes,
+    and returns it bundled into a wgflow-pair:// URL.
+
+    `panel_endpoint` is the host:port the *other* wgflow should connect
+    to — usually the operator's public DNS name + panel HTTPS port. We
+    can't auto-detect this reliably (the request might come through a
+    reverse proxy with X-Forwarded-Host headers we can't trust by
+    default), so the operator supplies it. We embed it into the URL
+    so the initiator's side knows where to POST the handshake.
+
+    `name_hint` is a soft suggestion for what to call the link on the
+    other end. The other operator can rename it freely; we don't enforce
+    matching names across both sides.
+    """
+    panel_endpoint: str = Field(..., min_length=3, max_length=200)
+    name_hint: str = Field(default="", max_length=64)
+
+
+class FederationConnectRequest(BaseModel):
+    """Body of POST /api/federation/links/connect.
+
+    Operator on the initiator side pastes a wgflow-pair:// URL and
+    chooses a local label for the link. The handshake runs synchronously
+    inside this request — on success a federation_links row is
+    persisted and the WG peer is installed via _replay_state_to_kernel.
+    """
+    pair_url: str = Field(..., min_length=20, max_length=400)
+    name: str = Field(..., min_length=1, max_length=64)
+
+
+class FederationLinkOut(BaseModel):
+    """One federation link as surfaced to the UI."""
+    id: int
+    name: str
+    role: str                      # 'initiator' | 'responder'
+    status: str                    # 'pending' | 'established' | 'failed' | 'disabled'
+    enabled: bool
+    local_fed_addr: str            # "x.x.x.x/32"
+    remote_fed_addr: str           # "x.x.x.x/32"
+    remote_wg_endpoint: str        # "host:port"
+    remote_panel_endpoint: str     # "host:port"
+    remote_instance_id: Optional[str] = None
+    remote_instance_name: Optional[str] = None
+    last_handshake_ts: Optional[int] = None
+    last_error: Optional[str] = None
+    created_at: str

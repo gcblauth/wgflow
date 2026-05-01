@@ -3,7 +3,3 @@ data/
 __pycache__/
 .DS_Store
 *.swp
-tmp
-release-tarballs
-.env
-commit.sh

@@ -38,6 +38,13 @@ PUBLIC_PATHS = {
     "/api/auth/login",
     "/api/auth/status",     # so the UI can ask "is auth required?"
     "/healthz",
+    # v4.0: the federation handshake endpoint is called by another
+    # wgflow which has no panel session of ours. It carries its own
+    # state machine — gated by an in-memory one-time pairing code that
+    # only exists inside an active 10-minute pairing window — so the
+    # only way to get a non-401 response out of it is to know a code
+    # the operator just generated. See app/federation.py.
+    "/api/federation/handshake",
 }
 
 

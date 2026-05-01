@@ -400,6 +400,18 @@ class MetricsState:
                             self._persist_handshakes, handshakes_to_persist
                         )
 
+                    # v4.0: reconcile federation link statuses. Same
+                    # cadence as the persist tick; kept lightweight (one
+                    # SELECT + at most N UPDATEs where N = total link
+                    # rows). We import locally to avoid a module-level
+                    # cycle (federation imports config which may import
+                    # other things in future).
+                    if SETTINGS.multisite_enabled:
+                        from . import federation as _fed
+                        await asyncio.to_thread(
+                            self._reconcile_federation, _fed, peers
+                        )
+
                 # Prune hourly.
                 if now - last_prune > PRUNE_EVERY and self._db is not None:
                     await asyncio.to_thread(
@@ -448,6 +460,22 @@ class MetricsState:
                 (ts, point.rx_rate, point.tx_rate, point.peers_online,
                  point.peers_total, host.cpu_pct, host.mem_pct, host.load1),
             )
+
+    def _reconcile_federation(self, fed_module, peers: Dict[str, PeerMetric]) -> None:
+        """Sync federation link statuses based on the current peers dict.
+
+        Cheap when no federation links exist (single SELECT returning
+        empty). Called from the same persist tick that already touches
+        the DB so we don't add a separate write transaction.
+        """
+        assert self._db is not None
+        try:
+            with self._db.write() as conn:
+                fed_module.reconcile_link_status(conn, peers)
+        except Exception as e:
+            # Don't let a federation reconcile failure break the metrics
+            # tick. The next tick will retry.
+            print(f"[metrics] federation reconcile error: {e!r}", flush=True)
 
     def _update_cumulative(self, ts: int, raw_rx: int, raw_tx: int) -> None:
         """Accumulate sum-of-peer raw counters into cumulative_traffic.

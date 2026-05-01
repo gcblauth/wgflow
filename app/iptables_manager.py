@@ -364,6 +364,78 @@ def destroy_peer_chain(peer_id: int, address: str) -> None:
     subprocess.run(["iptables", "-X", chain], capture_output=True)
 
 
+# ---------------------------------------------------------------------------
+# Federation chains (v4.0)
+# ---------------------------------------------------------------------------
+# Each federation_links row gets its own FORWARD-side chain. The chain
+# does ONE thing: drop everything. Federation peers can talk to THIS box
+# (handled implicitly by INPUT — we don't add a default-drop on INPUT for
+# fed addresses, so the panel listener accepts them naturally) but cannot
+# transit through this box to reach client peers or other fed peers.
+#
+# The trust model is "operators paired this link, they can panel-into us"
+# — but even so, we don't want a compromised remote wgflow to be able to
+# pivot into our client tunnels. So FORWARD from the federation overlay
+# is hard-blocked at iptables, regardless of what any peer ACL might say.
+#
+# Naming: WGFLOW_FED_<link_id>. Stays out of WGFLOW_PEER_<id> namespace
+# so the existing dump/stats code doesn't pick them up as ACL chains.
+
+def _fed_chain_name(link_id: int) -> str:
+    return f"WGFLOW_FED_{link_id}"
+
+
+def create_federation_chain(link_id: int, remote_fed_addr: str) -> None:
+    """Hook a federation peer's source address into a drop-everything chain.
+
+    Idempotent. The chain only contains a DROP — we don't expose any
+    ACCEPT rules from federation peers into the client subnet. INPUT
+    traffic (panel access etc.) is unaffected; this is FORWARD-only.
+
+    Note: we deliberately do NOT add this jump to WGFLOW_FORWARD's
+    chain-of-jumps for client peers. WGFLOW_FORWARD's structure is
+    "client source IP → that client's chain → DROP at end". Federation
+    sources don't match any client chain. Without this addition, fed
+    traffic falls through to the trailing DROP — which is the right
+    behavior! So why have a dedicated chain at all?
+    Two reasons:
+    1. Visibility: `iptables -L WGFLOW_FED_<id>` with packet counters
+       lets the operator confirm the rule is in the path.
+    2. Future-proofing: when v4.1 adds opt-in cross-site routing, the
+       chain is where the ACCEPT rules will land. Today it's a DROP-only
+       no-op layered on top of the WGFLOW_FORWARD trailing DROP, but
+       it's where the policy hook will live.
+    """
+    chain = _fed_chain_name(link_id)
+    src = _strip_mask(remote_fed_addr)
+
+    subprocess.run(["iptables", "-N", chain], capture_output=True)
+    # Idempotent install of the trailing DROP.
+    if not _exists([chain, "-j", "DROP"]):
+        _run(["-A", chain, "-j", "DROP"])
+
+    # Hook into WGFLOW_FORWARD via a source-IP jump, just like client peers.
+    # Insert at position 2 (after the conntrack ESTABLISHED rule). We
+    # intentionally place fed jumps at the same position as client peers —
+    # ordering between fed jumps and client jumps doesn't matter because
+    # they have disjoint source-IP matches.
+    while _exists(["WGFLOW_FORWARD", "-s", src, "-j", chain]):
+        _run(["-D", "WGFLOW_FORWARD", "-s", src, "-j", chain])
+    _run(["-I", "WGFLOW_FORWARD", "2", "-s", src, "-j", chain])
+
+
+def destroy_federation_chain(link_id: int, remote_fed_addr: str) -> None:
+    """Tear down a federation chain. Idempotent."""
+    chain = _fed_chain_name(link_id)
+    src = _strip_mask(remote_fed_addr)
+
+    while _exists(["WGFLOW_FORWARD", "-s", src, "-j", chain]):
+        _run(["-D", "WGFLOW_FORWARD", "-s", src, "-j", chain])
+
+    subprocess.run(["iptables", "-F", chain], capture_output=True)
+    subprocess.run(["iptables", "-X", chain], capture_output=True)
+
+
 def apply_peer_acls(
     peer_id: int,
     entries: List[ACLEntry],

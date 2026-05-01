@@ -60,6 +60,28 @@ class Settings:
     # directly or rely on the runtime API.
     migration_default_enabled: bool
 
+    # v4.0: multi-site federation. When enabled, the panel exposes a
+    # Federation section where the operator can pair this wgflow with
+    # one or more other wgflow instances over WireGuard. Each pairing
+    # produces a per-link WG keypair + PSK, allocated addresses on a
+    # dedicated overlay subnet (federation_subnet), and a kernel peer
+    # entry on wg0 distinct from client peers. The HTTPS+WS panel ports
+    # become reachable over the resulting tunnel — federated wgflows
+    # can browse each other's panels privately.
+    #
+    # Note: the inbound /api/federation/handshake endpoint is gated by
+    # a per-pairing one-time code that only exists during an active
+    # 10-minute pairing window. Outside that window the endpoint
+    # returns 401 to anyone who hits it, so the public attack surface
+    # is small even with the feature on by default.
+    multisite_enabled: bool
+    federation_subnet: ipaddress.IPv4Network
+    # The host:port other wgflows should send WireGuard traffic to in
+    # order to reach our federation peer. Usually identical to the
+    # client-facing WG_ENDPOINT (same UDP port, same public host), but
+    # operators with split-port setups can override.
+    federation_wg_endpoint: str
+
     @property
     def server_public_key_path(self) -> Path:
         return self.keys_dir / "server_public.key"
@@ -89,6 +111,29 @@ def load() -> Settings:
     migration_raw = _env("WGFLOW_MIGRATION_DEFAULT_ENABLED", "1").strip().lower()
     migration_default_enabled = migration_raw in ("1", "true", "yes", "on")
 
+    # v4.0: multisite/federation. Default ON. The receiving handshake
+    # endpoint is still gated by a per-pairing one-time code window,
+    # so leaving the feature on by default does not by itself create
+    # an unauthenticated control path — see app/federation.py for the
+    # state machine.
+    multisite_raw = _env("WG_MULTISITE", "1").strip().lower()
+    multisite_enabled = multisite_raw in ("1", "true", "yes", "on")
+
+    # Federation overlay subnet. Must not overlap with the client WG
+    # subnet (WG_SUBNET); we don't enforce this at parse time because
+    # operators may legitimately use private ranges that look adjacent
+    # — we just document the requirement. Default 10.99.0.0/24 picked
+    # to be far from the typical 10.13.13.0/24 client default.
+    federation_subnet = ipaddress.IPv4Network(
+        _env("WG_FEDERATION_SUBNET", "10.99.0.0/24")
+    )
+
+    # Where remote wgflows should send WG traffic to reach us. Falls
+    # back to the regular endpoint, which is what most single-port
+    # deployments want.
+    fed_wg_endpoint = _env("WG_FEDERATION_ENDPOINT",
+                           _env("WG_ENDPOINT", "vpn.example.com:51820"))
+
     # peer_dns default depends on whether local DNS is on:
     #   - local DNS on  → server's wg address (peers query wgflow's dnsmasq)
     #   - local DNS off → 1.1.1.1 (Cloudflare public resolver)
@@ -116,6 +161,9 @@ def load() -> Settings:
         telemetry_enabled=telemetry_enabled,
         telemetry_secret=_env("WGFLOW_TELEMETRY_SECRET", ""),
         migration_default_enabled=migration_default_enabled,
+        multisite_enabled=multisite_enabled,
+        federation_subnet=federation_subnet,
+        federation_wg_endpoint=fed_wg_endpoint,
     )
 
 

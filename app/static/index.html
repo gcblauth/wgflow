@@ -3,6 +3,23 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<!-- v4.0.1: Apple iOS home-screen support. Safari ignores SVG favicons
+     and most manifest fields; these tags carry that platform.
+     apple-touch-icon: the 180x180 icon shown on the home screen.
+     apple-mobile-web-app-title: the label shown beneath the icon.
+     apple-mobile-web-app-capable: hides Safari chrome when launched
+       from the home screen (standalone-app feel). -->
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-title" content="wgflow">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<!-- Web app manifest. Enables Android Chrome's richer "Add to Home
+     Screen" flow with a proper icon and standalone display mode.
+     A real one-tap install affordance also requires a service worker;
+     that's on the v4.1+ backlog. -->
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#0a0d0b">
 <title>wgflow // control</title>
 <script>
   /* Apply the saved theme BEFORE any CSS is parsed so the page doesn't
@@ -2268,10 +2285,12 @@
     margin-left: 16px;
   }
 
-  /* Live indicator + tooltip (v3.6 in-place patch).
-     The existing live indicator already exists in the header; we
-     just add a hover-tooltip and a right-click context menu. The
-     tooltip is a small fixed-position div positioned by JS. */
+  /* Live indicator + popover (v3.6 in-place patch; v4.0.1: hover→click).
+     The existing live indicator already exists in the header; clicking
+     it opens a small pinned popover with WS counters and the WS endpoint
+     URL. The popover is interactive (close button, copy-endpoint), so
+     pointer-events stays default. Right-click on the indicator opens
+     the polling-config popup (separate element, see .polling-popup). */
   .live-indicator-tooltip {
     position: fixed;
     z-index: 9999;
@@ -2282,8 +2301,13 @@
     font-size: 11px;
     color: var(--fg);
     white-space: nowrap;
-    pointer-events: none;
     box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
+    min-width: 260px;
+    /* v4.0.1: config mode renders sliders inside the same popover.
+       We allow the popover to grow vertically as needed (no fixed
+       height), but cap the width at 320px so it doesn't dominate
+       the viewport on narrow screens. */
+    max-width: 320px;
   }
   .live-indicator-tooltip .ws-row {
     display: flex; justify-content: space-between; gap: 16px;
@@ -2294,7 +2318,193 @@
     margin-bottom: 4px;
     padding-bottom: 4px;
     border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between; align-items: center;
+    gap: 8px;
   }
+  .live-indicator-tooltip .ws-close {
+    background: transparent;
+    border: none;
+    color: var(--fg-muted);
+    cursor: pointer;
+    font-size: 14px;
+    padding: 0 2px;
+    line-height: 1;
+  }
+  .live-indicator-tooltip .ws-close:hover { color: var(--fg); }
+  .live-indicator-tooltip .ws-actions {
+    display: inline-flex; align-items: center; gap: 4px;
+  }
+  .live-indicator-tooltip .ws-gear,
+  .live-indicator-tooltip .ws-back {
+    background: transparent;
+    border: none;
+    color: var(--fg-muted);
+    cursor: pointer;
+    font-size: 13px;
+    padding: 0 2px;
+    line-height: 1;
+  }
+  .live-indicator-tooltip .ws-gear:hover,
+  .live-indicator-tooltip .ws-back:hover { color: var(--accent); }
+
+  /* Config mode (v4.0.1: replaces the right-click polling-popup).
+     Same controls — polling slider, clipboard slider, layout toggle —
+     rendered inside the same popover body. We set min-width on the
+     popover container so config mode has room for the sliders without
+     resizing the popover when transitioning between modes. */
+  .live-indicator-tooltip .ws-config { padding-top: 4px; }
+  .live-indicator-tooltip .ws-cfg-label {
+    display: block;
+    color: var(--fg-muted);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-top: 8px;
+    margin-bottom: 4px;
+  }
+  .live-indicator-tooltip .ws-cfg-row {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 4px;
+  }
+  .live-indicator-tooltip .ws-cfg-row input[type="range"] {
+    flex: 1;
+    accent-color: var(--accent);
+  }
+  .live-indicator-tooltip .ws-cfg-value {
+    color: var(--accent);
+    font-size: 11px;
+    min-width: 44px;
+    text-align: right;
+  }
+  .live-indicator-tooltip .ws-cfg-hint {
+    color: var(--fg-muted);
+    font-size: 10px;
+    line-height: 1.4;
+    margin-bottom: 4px;
+  }
+  .live-indicator-tooltip .ws-ff-btn {
+    flex: 1; font-size: 11px; padding: 4px 8px;
+  }
+
+  /* v4.0.1: install-to-home-screen affordance inside the live popover.
+     Mobile-only (the JS gates it on _formFactor.detect()). The button
+     is a full-width primary action; the modal body styles are below. */
+  .live-indicator-tooltip .ws-install {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid var(--border);
+  }
+  .live-indicator-tooltip .ws-install-btn {
+    width: 100%;
+    background: transparent;
+    border: 1px solid var(--accent-d);
+    color: var(--accent);
+    font-family: var(--f-mono);
+    font-size: 11px;
+    padding: 6px 10px;
+    cursor: pointer;
+    text-align: center;
+  }
+  .live-indicator-tooltip .ws-install-btn:hover {
+    background: var(--bg-3);
+  }
+
+  /* Install instructions modal. Numbered list with breathing room
+     since users on mobile will be following along step-by-step. */
+  .install-steps .install-intro {
+    font-size: 12px;
+    margin: 0 0 12px 0;
+    line-height: 1.5;
+  }
+  .install-steps .install-list {
+    margin: 0;
+    padding-left: 22px;
+    font-size: 13px;
+    line-height: 1.7;
+  }
+  .install-steps .install-list li {
+    margin-bottom: 4px;
+  }
+  .install-steps .install-list strong {
+    color: var(--accent);
+    font-weight: 500;
+  }
+
+  /* v4.0.1: Open-in-Safari shortcut for iOS-non-Safari users.
+     Renders as a primary CTA button so it's visually distinct from
+     the manual-instructions fallback below. The `x-safari-https://`
+     URL scheme is undocumented but stable across recent iOS
+     versions — if it ever stops working, the manual fallback is
+     visible directly below. */
+  .install-shortcut-btn {
+    display: block;
+    width: 100%;
+    text-align: center;
+    background: var(--accent);
+    color: var(--bg);
+    font-family: var(--f-mono);
+    font-size: 13px;
+    font-weight: 500;
+    padding: 12px 16px;
+    margin: 8px 0;
+    text-decoration: none;
+    border: 1px solid var(--accent);
+  }
+  .install-shortcut-btn:hover,
+  .install-shortcut-btn:active {
+    background: var(--accent-d);
+    border-color: var(--accent-d);
+    color: var(--fg);
+  }
+  /* The manual-fallback expander. Collapsed by default — most users
+     who tap the shortcut button will succeed and never need this. */
+  .install-manual-fallback {
+    margin-top: 4px;
+    border-top: 1px solid var(--border);
+    padding-top: 12px;
+  }
+  .install-manual-fallback summary {
+    cursor: pointer;
+    color: var(--fg-dim);
+    font-size: 12px;
+    list-style: none;
+    padding: 4px 0;
+  }
+  .install-manual-fallback summary::-webkit-details-marker {
+    display: none;
+  }
+  .install-manual-fallback summary::before {
+    content: '▸ ';
+    display: inline-block;
+    transition: transform 0.15s ease;
+    margin-right: 4px;
+  }
+  .install-manual-fallback[open] summary::before {
+    transform: rotate(90deg);
+  }
+  .install-manual-fallback summary:hover {
+    color: var(--fg);
+  }
+  .live-indicator-tooltip .ws-endpoint {
+    color: var(--fg-dim);
+    font-size: 10px;
+    margin-top: 4px;
+    padding-top: 4px;
+    border-top: 1px solid var(--border);
+    word-break: break-all;
+    white-space: normal;
+  }
+  .live-indicator-tooltip .ws-endpoint .ep-label {
+    color: var(--fg-muted);
+    display: block;
+    margin-bottom: 2px;
+  }
+  .live-indicator-tooltip .ws-endpoint .ep-state {
+    color: var(--fg-muted);
+    font-style: italic;
+  }
+  .live-indicator-tooltip .ws-endpoint .ep-state.open    { color: var(--accent); font-style: normal; }
+  .live-indicator-tooltip .ws-endpoint .ep-state.closed  { color: var(--danger); font-style: normal; }
   .live-indicator-tooltip .ws-hint {
     color: var(--fg-muted);
     font-size: 10px;
@@ -2480,33 +2690,96 @@
       height: 140px !important;
     }
 
-    /* Live peers: hide table, show cards */
-    body:not(.force-desktop) table.peers,
-    body:not(.force-desktop) .pagination {
+    /* Live peers + federation: hide the table, show cards.
+       v4.0.1: previously this selector matched every `table.peers`
+       on the page, which silently broke the DNS-recent panel (it
+       reuses the .peers class but has no cards layout, so on mobile
+       the table was hidden and the panel showed only its stats line
+       with no rows). Scope by data-panel-id so other panels that
+       use the .peers table class — DNS-recent today, anything else
+       in future — render their tables on mobile (horizontally
+       scrollable; readable at 11px). */
+    body:not(.force-desktop) [data-panel-id="live-peers"] table.peers,
+    body:not(.force-desktop) [data-panel-id="live-peers"] .pagination,
+    body:not(.force-desktop) [data-panel-id="federation"] table.peers {
       display: none !important;
     }
-    body:not(.force-desktop) #peers-cards {
+    /* Cards container — broadened from #peers-cards (id, only the
+       live-peers panel) to .peers-cards (class, also matches the
+       federation panel's #fed-cards). One rule covers every panel
+       that opts into the cards swap. */
+    body:not(.force-desktop) .peers-cards {
       display: block !important;
     }
-    /* The toolbar (search + page-size) stays — search is useful on
-       mobile, page-size we can hide since cards don't paginate. */
-    body:not(.force-desktop) .table-toolbar select,
-    body:not(.force-desktop) .table-toolbar .count-label {
+    /* On mobile we hide the page-size dropdown ONLY in the live-peers
+       panel — that panel uses cards on mobile and cards don't paginate,
+       so the dropdown is meaningless there. Other panels that share
+       the .table-toolbar markup (DNS-recent has its own line-count
+       selector) keep theirs visible. v4.0.1: scoped from a global
+       rule that was hiding the DNS line-count selector too. */
+    body:not(.force-desktop) [data-panel-id="live-peers"] .table-toolbar select,
+    body:not(.force-desktop) [data-panel-id="live-peers"] .table-toolbar .count-label {
       display: none;
+    }
+
+    /* DNS-recent on mobile: allow long cells to wrap onto multiple
+       lines. Without this rule, a long FQDN in the query column or a
+       multi-A-record answer pushes the table wider than the viewport
+       and the operator gets a horizontal scrollbar with cramped text.
+       We scope the wrap to the DNS panel only because the live-peers
+       and federation panels swap to a card layout on mobile and
+       wouldn't benefit from this anyway. */
+    body:not(.force-desktop) [data-panel-id="dns-recent"] table.peers td {
+      white-space: normal;
+      word-break: break-all;
+      vertical-align: top;
+    }
+    /* Keep the short, predictable columns (when, type, source) on a
+       single line — they don't need to wrap and look cleaner stacked
+       narrowly. nth-child(1)=when, (4)=type, (6)=source. */
+    body:not(.force-desktop) [data-panel-id="dns-recent"] table.peers td:nth-child(1),
+    body:not(.force-desktop) [data-panel-id="dns-recent"] table.peers td:nth-child(4),
+    body:not(.force-desktop) [data-panel-id="dns-recent"] table.peers td:nth-child(6) {
+      white-space: nowrap;
     }
   }
 
-  /* Force-mobile equivalent of the live-peers swap (toggle override) */
-  body.force-mobile table.peers,
-  body.force-mobile .pagination {
+  /* Force-mobile equivalent of the live-peers + federation swap (toggle
+     override). Same scoping fix as the @media block above. */
+  body.force-mobile [data-panel-id="live-peers"] table.peers,
+  body.force-mobile [data-panel-id="live-peers"] .pagination,
+  body.force-mobile [data-panel-id="federation"] table.peers {
     display: none !important;
   }
-  body.force-mobile #peers-cards {
+  body.force-mobile .peers-cards {
     display: block !important;
   }
-  body.force-mobile .table-toolbar select,
-  body.force-mobile .table-toolbar .count-label {
+  body.force-mobile [data-panel-id="live-peers"] .table-toolbar select,
+  body.force-mobile [data-panel-id="live-peers"] .table-toolbar .count-label {
     display: none;
+  }
+  body.force-mobile [data-panel-id="dns-recent"] table.peers td {
+    white-space: normal;
+    word-break: break-all;
+    vertical-align: top;
+  }
+  body.force-mobile [data-panel-id="dns-recent"] table.peers td:nth-child(1),
+  body.force-mobile [data-panel-id="dns-recent"] table.peers td:nth-child(4),
+  body.force-mobile [data-panel-id="dns-recent"] table.peers td:nth-child(6) {
+    white-space: nowrap;
+  }
+  /* Mobile: relax the colgroup widths on the DNS table — the fixed
+     widths sum to ~325px which is wider than a phone in portrait.
+     The wrap rules above let cells stack vertically when needed; the
+     auto width here lets the browser distribute the remaining space
+     proportionally. Applies to both detected-mobile and force-mobile. */
+  @media (max-width: 768px) {
+    body:not(.force-desktop) [data-panel-id="dns-recent"] table.peers col {
+      width: auto !important;
+    }
+  }
+  body.force-mobile [data-panel-id="dns-recent"] table.peers col {
+    width: auto !important;
   }
 
   /* When the toggle forces mobile on a wide viewport, apply the same
@@ -2623,7 +2896,7 @@
         <span class="instance-chrome" id="instance-chrome">
           <span class="instance-sep">⟫</span><span class="instance-name" id="instance-name"></span><span class="instance-edit-btn" id="instance-edit-btn" title="edit instance name and color">⚙</span>
         </span>
-        <span class="sub">wireguard control panel · v3.8.3 · <span id="brand-author" class="brand-author" title="about wgflow">gcblauth</span> <span id="matrix-replay" class="matrix-replay-btn" title="replay matrix intro">◆</span></span>
+        <span class="sub">wireguard control panel · v4.0.0-alpha · <span id="brand-author" class="brand-author" title="about wgflow">gcblauth</span> <span id="matrix-replay" class="matrix-replay-btn" title="replay matrix intro">◆</span></span>
       </div>
     </div>
     <div class="header-right">
@@ -2635,7 +2908,7 @@
       </button>
       <div class="server-meta" id="server-meta">
         <span class="k">uptime</span><span class="v" id="uptime-display">—</span>
-        <span class="k">status</span><span class="v" id="conn-state" title="hover for WS detail · right-click to configure polling">connecting<span class="cursor"></span></span>
+        <span class="k">status</span><span class="v" id="conn-state" title="click for connection details + config">connecting<span class="cursor"></span></span>
       </div>
       <button class="ghost icon" id="theme-toggle" title="toggle theme">◐</button>
       <button class="ghost" id="logout-btn" title="log out" style="display:none">logout</button>
@@ -2740,6 +3013,14 @@
         <div class="search">
           <input id="dns-search" placeholder="filter by query, peer, or answer…" autocomplete="off">
         </div>
+        <span class="count-label">show</span>
+        <select id="dns-page-size">
+          <option value="25">25</option>
+          <option value="50">50</option>
+          <option value="100" selected>100</option>
+          <option value="250">250</option>
+          <option value="500">500</option>
+        </select>
       </div>
       <div style="max-height: 280px; overflow-y: auto;">
         <table class="peers" style="font-size: 11px;">
@@ -3233,7 +3514,60 @@
       </div>
     </div>
 
-<!-- Logs panel — on-demand streaming from four sources. Only the active
+<!-- v4.0: federation panel. Hidden until /api/federation/status reports
+     enabled=true, so legacy single-site deployments don't see UI for a
+     feature they aren't using. Status colors map to:
+       green  → established (recent WG handshake within 180s)
+       yellow → pending (link created, no handshake observed yet)
+       red    → failed (had handshake, lost it; or initial connect failed)
+       gray   → disabled (operator-paused) -->
+  <div class="panel panel-reorderable" id="federation-panel" data-panel-id="federation"
+       style="margin-bottom: 20px; display: none;">
+    <div class="head">
+      <h2>federation</h2>
+      <div style="display:flex; gap: 12px; align-items: center;">
+        <span class="mono-dim" style="font-size: 11px;" id="fed-local-meta">—</span>
+        <button class="primary" id="fed-pair-btn" title="generate a pairing token for another wgflow to connect">+ pair</button>
+        <button class="primary" id="fed-connect-btn" title="paste a pairing URL from another wgflow">+ connect</button>
+      </div>
+    </div>
+    <div class="body" style="padding: 0;">
+      <div id="fed-pending-banner" style="display:none; padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--bg-3); font-size: 12px;">
+        <span class="mono-dim">pairing window open — </span>
+        <span id="fed-pending-meta">—</span>
+        <button class="ghost" id="fed-pending-cancel" style="margin-left: 8px;">cancel</button>
+      </div>
+      <table class="peers" id="fed-table">
+        <colgroup>
+          <col style="width: 18px;">
+          <col>
+          <col>
+          <col>
+          <col style="width: 130px;">
+          <col style="width: 90px;">
+          <col style="width: 110px;">
+        </colgroup>
+        <thead>
+          <tr>
+            <th></th>
+            <th>name</th>
+            <th>remote</th>
+            <th>fed addr</th>
+            <th class="num">last handshake</th>
+            <th>role</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="fed-tbody">
+          <tr><td colspan="7" class="empty">no federation links</td></tr>
+        </tbody>
+      </table>
+      <!-- Mobile cards. Same data as the table; render() populates both. -->
+      <div class="peers-cards" id="fed-cards" style="display: none;"></div>
+    </div>
+  </div>
+
+  <!-- Logs panel — on-demand streaming from four sources. Only the active
      tab's WebSocket is open; switching/stopping closes it.
      v3.6 reorder/Design A: previously in its own <div class="wrap">; now
      a sibling of the other reorderable panels so it can drag-reorder
@@ -3403,7 +3737,7 @@
     <div class="about-brand">
       <span class="bracket">[</span>wgflow<span class="bracket">]</span>
     </div>
-    <div class="about-version">v3.8.3</div>
+    <div class="about-version">v4.0.0-alpha</div>
     <div class="about-line">wireguard control panel</div>
     <a class="about-link" href="https://github.com/gcblauth/wgflow" target="_blank" rel="noopener">
       github.com/gcblauth/wgflow
@@ -4199,12 +4533,50 @@ function renderDns(list) {
 
 async function loadDns() {
   try {
-    dnsRecent = await api('GET', '/api/dns/recent?limit=100');
+    const limit = _dnsLimitGet();
+    dnsRecent = await api('GET', `/api/dns/recent?limit=${limit}`);
     renderDns(dnsRecent);
   } catch (e) { /* quiet on cold start */ }
 }
 
+// v4.0.1: persist DNS line-count selection in localStorage so it survives
+// reloads. Mirrors the live-peers page-size pattern. We don't go through
+// /api/server because the choice is per-browser, not server-wide
+// (different operators on different devices may want different defaults).
+const _DNS_LIMIT_KEY = 'wgflow_dns_limit';
+const _DNS_LIMIT_DEFAULT = 100;
+const _DNS_LIMIT_VALID = [25, 50, 100, 250, 500];
+
+function _dnsLimitGet() {
+  try {
+    const v = parseInt(localStorage.getItem(_DNS_LIMIT_KEY) || '', 10);
+    if (_DNS_LIMIT_VALID.includes(v)) return v;
+  } catch (_) {}
+  return _DNS_LIMIT_DEFAULT;
+}
+
+function _dnsLimitSet(v) {
+  try { localStorage.setItem(_DNS_LIMIT_KEY, String(v)); } catch (_) {}
+}
+
 $('#dns-refresh').onclick = loadDns;
+
+// Wire the line-count selector. On change we persist + reload. We hydrate
+// the <select> value from localStorage so the dropdown reflects the saved
+// preference on first paint.
+(function wireDnsLimit() {
+  const sel = document.getElementById('dns-page-size');
+  if (!sel) return;
+  const saved = _dnsLimitGet();
+  // The HTML defaults to selected="100"; only override if saved is different.
+  if (saved !== _DNS_LIMIT_DEFAULT) sel.value = String(saved);
+  sel.addEventListener('change', () => {
+    const v = parseInt(sel.value, 10);
+    if (!_DNS_LIMIT_VALID.includes(v)) return;
+    _dnsLimitSet(v);
+    loadDns();
+  });
+})();
 
 // Range picker
 $$('.range-picker button').forEach(b => {
@@ -4228,6 +4600,11 @@ function connectWS() {
     wsRetry = 1000;
     $('#conn-state').innerHTML = 'live<span class="cursor"></span>';
     $('#conn-state').style.color = 'var(--accent)';
+    // v4.0.1: if the live-icon popover is open while we reconnect,
+    // refresh its endpoint state (open vs closed) immediately.
+    if (typeof _liveIconState !== 'undefined' && _liveIconState.tooltipEl) {
+      liveIconRenderTooltip(_liveIconState.tooltipEl);
+    }
   };
   ws.onmessage = (ev) => {
     wsPayload = JSON.parse(ev.data);
@@ -4260,6 +4637,11 @@ function connectWS() {
   ws.onclose = () => {
     $('#conn-state').innerHTML = 'reconnecting';
     $('#conn-state').style.color = 'var(--warn)';
+    // v4.0.1: same refresh when the connection drops — popover should
+    // reflect the closed state without waiting for a re-render trigger.
+    if (typeof _liveIconState !== 'undefined' && _liveIconState.tooltipEl) {
+      liveIconRenderTooltip(_liveIconState.tooltipEl);
+    }
     setTimeout(connectWS, wsRetry);
     wsRetry = Math.min(wsRetry * 2, 15000);
   };
@@ -6163,6 +6545,9 @@ function setTheme(t) {
   // for the next WS tick.
   if (currentRange === 'live') drawThroughput(throughputSeries);
   drawSessionStrip(sessionSeries);
+  // v4.0.1: the favicon also tracks the dark/light split — update so
+  // the tab-strip icon matches the panel after the toggle.
+  if (typeof refreshFavicon === 'function') refreshFavicon();
 }
 $('#theme-toggle').onclick = () => setTheme(currentTheme() === 'dark' ? 'light' : 'dark');
 // Apply the icon for the current theme on first load (the actual data-theme
@@ -6237,14 +6622,16 @@ $('#dns-search').addEventListener('input', (ev) => {
 
 // Wrap the existing renderDns invocations: anywhere we call renderDns(dnsRecent),
 // it now needs to apply the filter. We monkey-patch loadDns to pass through
-// the filter automatically.
+// the filter automatically. v4.0.1: also reads the line-count from
+// _dnsLimitGet() so the user's selection survives this wrap.
 const _origLoadDns = loadDns;
 loadDns = async function () {
   // Skip the round-trip entirely when we know local DNS is off. The
   // server returns [] anyway but there's no point paying for it every 5s.
   if (serverConfig && !serverConfig.local_dns_enabled) return;
   try {
-    dnsRecent = await api('GET', '/api/dns/recent?limit=100');
+    const limit = _dnsLimitGet();
+    dnsRecent = await api('GET', `/api/dns/recent?limit=${limit}`);
     renderDns(filterDns(dnsRecent, dnsFilter));
   } catch (e) { /* quiet on cold start */ }
 };
@@ -8483,6 +8870,73 @@ function applyInstanceTheme(themeId) {
   // override block — set the attribute regardless so the bookkeeping is
   // consistent even if it's a no-op visually.
   document.documentElement.setAttribute('data-instance-theme', themeId);
+  // v4.0.1: the favicon's silhouette is brand-fixed (the [w] mark from
+  // the panel header) but its colors track the active theme. Refresh
+  // the inlined data-URL favicon so the tab strip matches the panel.
+  refreshFavicon();
+}
+
+// v4.0.1: theme-aware favicon.
+//
+// Browsers render favicons in a chrome context that doesn't see the
+// document's CSS variables — currentColor, var(--accent), and inherited
+// stylesheets all fail. The standard workaround is a data-URL favicon:
+// build the SVG as a JS string with literal hex colors, base64-encode,
+// and swap the <link rel="icon"> href. Updates instantly with no server
+// roundtrip and no cache-control fight.
+//
+// We track --accent (the phosphor stroke color) and --bg (the dark
+// rounded-square backdrop). Both are CSS variables on <html>, set by
+// the data-theme + data-instance-theme combination. Reading them via
+// getComputedStyle gives the resolved value the user actually sees.
+//
+// The static `/favicon.svg` file remains as the fallback for contexts
+// that don't run our JS — bookmarks, PWA install icons, browsers that
+// snapshot before parsing. It carries the dark-phosphor default.
+
+function refreshFavicon() {
+  // Resolve the live colors. getComputedStyle returns whatever the
+  // active theme + instance-theme cascade yielded.
+  const root = document.documentElement;
+  const css = getComputedStyle(root);
+  const accent = (css.getPropertyValue('--accent') || '#8bff6a').trim();
+  const bg     = (css.getPropertyValue('--bg')     || '#0a0d0b').trim();
+
+  // Compose the SVG using template literals. Same geometry as the
+  // static favicon.svg file; only the two colors are interpolated.
+  // The SVG is intentionally compact — every byte ends up base64-
+  // encoded and inlined into the document.
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">`
+    + `<rect width="64" height="64" rx="8" fill="${bg}"/>`
+    + `<path d="M 16 16 L 11 16 L 11 48 L 16 48" fill="none" stroke="${accent}" stroke-width="3" stroke-linecap="square"/>`
+    + `<path d="M 48 16 L 53 16 L 53 48 L 48 48" fill="none" stroke="${accent}" stroke-width="3" stroke-linecap="square"/>`
+    + `<path d="M 19 24 L 25 42 L 32 30 L 39 42 L 45 24" fill="none" stroke="${accent}" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>`
+    + `</svg>`;
+
+  // Base64 encode. btoa works on ASCII; our SVG is pure ASCII so this
+  // is safe without encodeURIComponent gymnastics.
+  let dataUrl;
+  try {
+    dataUrl = 'data:image/svg+xml;base64,' + btoa(svg);
+  } catch (_) {
+    // Fallback if btoa chokes for any reason — use the URL-encoded
+    // form, which is also a valid data URL.
+    dataUrl = 'data:image/svg+xml;utf8,' + encodeURIComponent(svg);
+  }
+
+  // Find or create the icon link. We replace the existing <link> rather
+  // than mutating its href so browsers reliably re-fetch (some cache
+  // aggressively on href mutation alone).
+  let link = document.querySelector('link[rel="icon"]');
+  const newLink = document.createElement('link');
+  newLink.rel = 'icon';
+  newLink.type = 'image/svg+xml';
+  newLink.href = dataUrl;
+  if (link) {
+    link.parentNode.replaceChild(newLink, link);
+  } else {
+    document.head.appendChild(newLink);
+  }
 }
 
 function applyInstanceName(name) {
@@ -9343,22 +9797,34 @@ async function minimizeApplyFromConfig() {
 }
 
 // ---------------------------------------------------------------------------
-// Live-icon tooltip + right-click polling config
+// Live-icon popover (info + config)
 // ---------------------------------------------------------------------------
-// The header's #conn-state element is the "live icon." Hovering shows
-// a tooltip with WS count + breakdown (data flowing in via /ws/status
-// payload's ws_count field). Right-clicking opens a small popup with a
-// slider to adjust the global polling interval.
+// The header's #conn-state element is the "live icon." Clicking it opens
+// a small popover with two modes:
+//   - 'info'   — WS count, breakdown, /ws/status endpoint URL + state.
+//                Default mode when the popover opens.
+//   - 'config' — sliders for polling interval and clipboard auto-clear,
+//                plus the layout (auto/desktop/mobile) toggle. Reached
+//                via the gear button in the info-mode header.
+//
+// v4.0.1: replaced hover-to-show with click-to-pin. Same release moved
+// the polling-config from a right-click contextmenu popup into the same
+// popover under the gear button — right-click was undiscoverable, didn't
+// work on touch, and was fragile around the outside-click handler.
 
 const _liveIconState = {
   lastWSCount: { total: 0, breakdown: {} },
   tooltipEl: null,
-  popupEl: null,
-  pollIntervalMs: 3000,   // hydrated from /api/server/polling at boot
+  popupEl: null,        // legacy: kept null since v4.0.1, the polling
+                        // popup is no longer used. Field retained so
+                        // any external caller that touched it doesn't
+                        // null-deref.
+  mode: 'info',         // 'info' | 'config'
+  pollIntervalMs: 3000, // hydrated from /api/server/polling at boot
 };
 
 // Called by the existing /ws/status handler whenever a payload arrives.
-// We just stash the latest count; the tooltip uses it on hover.
+// We just stash the latest count; the popover uses it on next render.
 function liveIconUpdateWSCount(wsCount) {
   if (!wsCount || typeof wsCount !== 'object') return;
   _liveIconState.lastWSCount = {
@@ -9373,8 +9839,27 @@ function liveIconUpdateWSCount(wsCount) {
 }
 
 function liveIconRenderTooltip(el) {
+  // Dispatch on current mode. Both modes render into the same popover
+  // element so transitioning between them doesn't reposition the popover
+  // or flicker — the operator sees the contents change while the frame
+  // stays put.
+  if (_liveIconState.mode === 'config') {
+    _liveIconRenderConfigMode(el);
+  } else {
+    _liveIconRenderInfoMode(el);
+  }
+}
+
+function _liveIconRenderInfoMode(el) {
   const c = _liveIconState.lastWSCount;
-  let html = `<div class="ws-total">${c.total} WebSocket${c.total === 1 ? '' : 's'} open</div>`;
+  // Header row: total count, gear (→ config mode), close button.
+  let html = `<div class="ws-total">
+    <span>${c.total} WebSocket${c.total === 1 ? '' : 's'} open</span>
+    <span class="ws-actions">
+      <button class="ws-gear" type="button" aria-label="configure" title="configure">⚙</button>
+      <button class="ws-close" type="button" aria-label="close" title="close">✕</button>
+    </span>
+  </div>`;
   if (c.total > 0) {
     for (const [src, n] of Object.entries(c.breakdown)) {
       html += `<div class="ws-row"><span>${escape(src)}</span><span>${n}</span></div>`;
@@ -9382,12 +9867,371 @@ function liveIconRenderTooltip(el) {
   } else {
     html += `<div class="ws-row" style="color: var(--fg-muted);">no active streams</div>`;
   }
-  html += `<div class="ws-hint">poll interval: ${_liveIconState.pollIntervalMs}ms · right-click to configure</div>`;
+
+  // WS endpoint info. Surfaces the actual URL the browser's /ws/status
+  // connection is using, plus its readyState. Useful for debugging
+  // reverse-proxy + WSS setups — operator can confirm at a glance the
+  // connection upgraded to wss:// behind the proxy. The `ws` global is
+  // the one created in connectWS(); we read it defensively because the
+  // popover may render before the WS first connects.
+  const stateMap = ['connecting', 'open', 'closing', 'closed'];
+  let endpointURL = '—';
+  let stateLabel = 'unknown';
+  let stateClass = '';
+  try {
+    if (typeof ws !== 'undefined' && ws) {
+      endpointURL = ws.url || '—';
+      stateLabel = stateMap[ws.readyState] || 'unknown';
+      if (ws.readyState === 1) stateClass = 'open';
+      else if (ws.readyState === 3) stateClass = 'closed';
+    }
+  } catch (_) { /* defensive — `ws` may be in a different scope on some loaders */ }
+  html += `<div class="ws-endpoint">
+    <span class="ep-label">/ws/status endpoint · <span class="ep-state ${stateClass}">${escape(stateLabel)}</span></span>
+    <span class="mono">${escape(endpointURL)}</span>
+  </div>`;
+
+  // v4.0.1: "Add to home screen" button (mobile only). Mobile is
+  // detected via the existing _formFactor helper, which combines
+  // viewport width with the operator's persistent override. We don't
+  // surface this on desktop — it's not useful there and clutters the
+  // popover. On mobile we always show the button regardless of
+  // platform; the click handler does platform detection at click
+  // time and shows the right instructions.
+  if (_formFactor.detect() === 'mobile') {
+    html += `<div class="ws-install">
+      <button class="ws-install-btn" type="button">+ add to home screen</button>
+    </div>`;
+  }
+
+  html += `<div class="ws-hint">poll interval: ${_liveIconState.pollIntervalMs}ms</div>`;
   el.innerHTML = html;
+
+  // Wire header buttons. We re-bind every render because innerHTML
+  // replaces the children. Cheap; no leak risk because the references
+  // die when the element is removed.
+  const closeBtn = el.querySelector('.ws-close');
+  if (closeBtn) {
+    closeBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      liveIconHideTooltip();
+    });
+  }
+  const gearBtn = el.querySelector('.ws-gear');
+  if (gearBtn) {
+    gearBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      _liveIconState.mode = 'config';
+      liveIconRenderTooltip(el);
+    });
+  }
+  const installBtn = el.querySelector('.ws-install-btn');
+  if (installBtn) {
+    installBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      liveIconHideTooltip();
+      showInstallInstructions();
+    });
+  }
+}
+
+// v4.0.1: "Add to home screen" instructions modal.
+//
+// There is no programmatic install API that works across iOS Safari,
+// Android Chrome, Firefox Mobile, etc. iOS has no install prompt at
+// all (users must tap Share → Add to Home Screen manually). Android
+// Chrome has beforeinstallprompt — but only fires when a service
+// worker is registered and PWA criteria are met, which we don't yet
+// satisfy (service worker is v4.1+ backlog). So the user-facing
+// affordance is platform-specific instructions, not a one-tap button.
+//
+// Detection strategy:
+//   - iOS: userAgent contains iPhone/iPad/iPod, OR (Macintosh + touch
+//     capability — newer iPads spoof their UA as Mac).
+//   - Android: userAgent contains "Android".
+//   - Other (Firefox mobile, Samsung Internet, etc.): generic message.
+//
+// We deliberately don't try to capture beforeinstallprompt yet — even
+// when it fires (rare, since we have no service worker) the call() to
+// prompt() must happen in the same task as a user gesture. Wiring
+// that is plumbing for v4.1.
+
+let _deferredInstallPrompt = null;
+
+// Capture beforeinstallprompt eagerly so it's available if the page
+// somehow becomes installable later. Currently a no-op since we lack
+// a service worker, but the listener is cheap and defensive.
+window.addEventListener('beforeinstallprompt', (ev) => {
+  ev.preventDefault();
+  _deferredInstallPrompt = ev;
+});
+
+function _detectMobilePlatform() {
+  const ua = navigator.userAgent || '';
+  const isIOS = /iPhone|iPad|iPod/.test(ua)
+    || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+  if (isIOS) {
+    // iOS-only quirk: Apple requires every browser on iOS to use
+    // WebKit, but only Safari gets the "Add to Home Screen" gesture.
+    // Chrome on iOS (CriOS), Firefox (FxiOS), Edge (EdgiOS), and
+    // friends are WebKit-under-Chromium-UI and lack the install menu.
+    // We detect them by their distinct UA tokens — if any is present,
+    // we route to instructions that tell the user to open in Safari
+    // first. Bare "Safari" in the UA isn't reliable on its own
+    // (Chrome iOS also includes "Safari" for compatibility), so we
+    // negate against the known non-Safari tokens instead.
+    const isNonSafariIOS = /CriOS|FxiOS|EdgiOS|OPiOS|YaBrowser|GSA/.test(ua);
+    return isNonSafariIOS ? 'ios-non-safari' : 'ios';
+  }
+  if (/Android/.test(ua)) return 'android';
+  return 'other';
+}
+
+function showInstallInstructions() {
+  const platform = _detectMobilePlatform();
+
+  // If we somehow have a captured install prompt (Android Chrome with
+  // a future service worker), use it directly. Otherwise show the
+  // platform-specific manual instructions.
+  if (platform === 'android' && _deferredInstallPrompt) {
+    _deferredInstallPrompt.prompt();
+    _deferredInstallPrompt.userChoice.finally(() => {
+      _deferredInstallPrompt = null;
+    });
+    return;
+  }
+
+  let body;
+  if (platform === 'ios') {
+    body = `
+      <div class="install-steps">
+        <p class="mono-dim install-intro">
+          ios safari has no one-tap install. wgflow can still be added
+          to your home screen as an app-style icon:
+        </p>
+        <ol class="install-list">
+          <li>tap the <strong>share</strong> button at the bottom
+              <span class="mono-dim">(square with arrow up)</span></li>
+          <li>scroll down and tap <strong>add to home screen</strong></li>
+          <li>confirm the name (default: <span class="mono">wgflow</span>)
+              and tap <strong>add</strong></li>
+        </ol>
+        <p class="mono-dim" style="font-size: 11px; margin-top: 12px;">
+          launching from the home screen opens wgflow without safari
+          chrome — looks and feels like a native app.
+        </p>
+      </div>`;
+  } else if (platform === 'ios-non-safari') {
+    // Chrome / Firefox / Edge / Opera / Yandex / GSA on iOS. None of
+    // these can add to the home screen — Apple restricts that
+    // capability to Safari. The user has to open the page in Safari
+    // first, then use Safari's Share → Add to Home Screen flow.
+    //
+    // We can save them a couple of taps with the undocumented but
+    // long-stable `x-safari-https://` URL scheme: tapping a link with
+    // that scheme triggers an iOS-level confirmation dialog and then
+    // launches Safari at the given URL. Failure modes are graceful —
+    // if the scheme is ever removed or blocked, the link does
+    // nothing and the user falls back to the manual steps below.
+    //
+    // The scheme prefix `x-safari-` is glued in front of the existing
+    // `https://` (or `http://`) URL — produces e.g.
+    // `x-safari-https://wgflow.example.com:8080`. We hand Safari the
+    // site root rather than the current full URL: home-screen icons
+    // remember the install URL, and we don't want a deep path or query
+    // string to become a permanent part of the launched app.
+    const safariUrl = 'x-safari-' + window.location.origin;
+    body = `
+      <div class="install-steps">
+        <p class="mono-dim install-intro">
+          on ios, only <strong>safari</strong> can add a site to the home
+          screen. third-party browsers (chrome, firefox, edge, etc.)
+          don't have this capability — apple reserves it for safari.
+        </p>
+        <a class="install-shortcut-btn" href="${safariUrl}">
+          open this page in safari →
+        </a>
+        <p class="mono-dim" style="font-size: 11px; margin-top: 4px; margin-bottom: 14px;">
+          tap the button above, then in safari tap the
+          <strong>share</strong> button (square with arrow up) →
+          <strong>add to home screen</strong>.
+        </p>
+        <details class="install-manual-fallback">
+          <summary>doesn't work? do it manually</summary>
+          <ol class="install-list" style="margin-top: 8px;">
+            <li>tap your browser's menu
+                <span class="mono-dim">(<strong>⋯</strong> in chrome,
+                <strong>≡</strong> in firefox)</span></li>
+            <li>tap <strong>share</strong></li>
+            <li>in the ios share sheet, tap <strong>open in safari</strong></li>
+            <li>once the page loads in safari, tap the
+                <strong>share</strong> button at the bottom</li>
+            <li>scroll down and tap <strong>add to home screen</strong>
+                → <strong>add</strong></li>
+          </ol>
+        </details>
+        <p class="mono-dim" style="font-size: 11px; margin-top: 12px;">
+          launching from the home screen will open in safari, not in
+          your current browser — that's how ios web apps work.
+        </p>
+      </div>`;
+  } else if (platform === 'android') {
+    body = `
+      <div class="install-steps">
+        <p class="mono-dim install-intro">
+          android chrome will eventually surface an install prompt
+          on its own. to install now:
+        </p>
+        <ol class="install-list">
+          <li>tap the <strong>⋮</strong> menu in the top-right corner
+              of chrome</li>
+          <li>tap <strong>install app</strong> or
+              <strong>add to home screen</strong></li>
+          <li>confirm the name and tap <strong>install</strong>
+              (or <strong>add</strong>)</li>
+        </ol>
+        <p class="mono-dim" style="font-size: 11px; margin-top: 12px;">
+          on firefox mobile or samsung internet the menu wording differs
+          slightly but the gesture is the same.
+        </p>
+      </div>`;
+  } else {
+    body = `
+      <div class="install-steps">
+        <p class="mono-dim install-intro">
+          your browser doesn't expose a standard install gesture we
+          recognize. try your browser's main menu and look for
+          <strong>"add to home screen"</strong>,
+          <strong>"install app"</strong>, or
+          <strong>"create shortcut"</strong>.
+        </p>
+      </div>`;
+  }
+
+  openModal('add wgflow to home screen', body);
+}
+
+function _liveIconRenderConfigMode(el) {
+  // Same controls that lived in the right-click polling popup pre-
+  // v4.0.1, now rendered inside the same popover. The polling popup
+  // function still exists but is no longer reachable from the UI.
+  const cbSec = (typeof _clipboardConfig !== 'undefined' && _clipboardConfig.timeoutSec) || 30;
+  let ffOverride = 'auto';
+  try {
+    const stored = localStorage.getItem(_formFactor.OVERRIDE_KEY);
+    if (stored === 'mobile' || stored === 'desktop') ffOverride = stored;
+  } catch (_) {}
+  const ffActive = _formFactor.detect();
+  const ffBtnStyle = (selected) => selected
+    ? 'border-color: var(--accent); color: var(--accent);'
+    : '';
+
+  el.innerHTML = `
+    <div class="ws-total">
+      <span>configure</span>
+      <span class="ws-actions">
+        <button class="ws-back" type="button" aria-label="back" title="back">←</button>
+        <button class="ws-close" type="button" aria-label="close" title="close">✕</button>
+      </span>
+    </div>
+    <div class="ws-config">
+      <label class="ws-cfg-label">polling interval</label>
+      <div class="ws-cfg-row">
+        <input type="range" id="polling-slider" min="1000" max="6000" step="500"
+               value="${_liveIconState.pollIntervalMs}">
+        <span class="ws-cfg-value" id="polling-value">${_liveIconState.pollIntervalMs}ms</span>
+      </div>
+      <div class="ws-cfg-hint">ACL stats, DNS recent, iptables modal.</div>
+
+      <label class="ws-cfg-label">clipboard auto-clear</label>
+      <div class="ws-cfg-row">
+        <input type="range" id="clipboard-slider" min="0" max="120" step="10" value="${cbSec}">
+        <span class="ws-cfg-value" id="clipboard-value">${cbSec === 0 ? 'off' : cbSec + 's'}</span>
+      </div>
+      <div class="ws-cfg-hint">overwrite clipboard after viewing private keys. 0 = off.</div>
+
+      <label class="ws-cfg-label">layout · ${escape(ffActive)}</label>
+      <div class="ws-cfg-row" style="gap: 4px;">
+        <button class="ghost ws-ff-btn" data-ff="auto"    style="${ffBtnStyle(ffOverride === 'auto')}">auto</button>
+        <button class="ghost ws-ff-btn" data-ff="desktop" style="${ffBtnStyle(ffOverride === 'desktop')}">desktop</button>
+        <button class="ghost ws-ff-btn" data-ff="mobile"  style="${ffBtnStyle(ffOverride === 'mobile')}">mobile</button>
+      </div>
+      <div class="ws-cfg-hint">'auto' uses viewport width. changing reloads the page.</div>
+    </div>`;
+
+  // Header buttons.
+  el.querySelector('.ws-close').addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    _liveIconState.mode = 'info';   // reset for next open
+    liveIconHideTooltip();
+  });
+  el.querySelector('.ws-back').addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    _liveIconState.mode = 'info';
+    liveIconRenderTooltip(el);
+  });
+
+  // Polling slider — same logic as the old polling popup.
+  const slider  = el.querySelector('#polling-slider');
+  const sliderV = el.querySelector('#polling-value');
+  slider.addEventListener('input', () => {
+    sliderV.textContent = `${slider.value}ms`;
+  });
+  slider.addEventListener('change', async () => {
+    const ms = parseInt(slider.value, 10);
+    try {
+      await api('PUT', '/api/server/polling', { interval_ms: ms });
+      _liveIconState.pollIntervalMs = ms;
+      restartPollingIntervals();
+      if (typeof toast === 'function') toast(`poll interval: ${ms}ms`);
+    } catch (e) {
+      if (typeof toast === 'function') {
+        toast('polling save failed: ' + (e.message || ''), 'error');
+      }
+      slider.value = _liveIconState.pollIntervalMs;
+      sliderV.textContent = `${_liveIconState.pollIntervalMs}ms`;
+    }
+  });
+
+  // Clipboard slider — same pattern, different endpoint.
+  const cbSlider  = el.querySelector('#clipboard-slider');
+  const cbValueEl = el.querySelector('#clipboard-value');
+  cbSlider.addEventListener('input', () => {
+    const v = parseInt(cbSlider.value, 10);
+    cbValueEl.textContent = (v === 0) ? 'off' : v + 's';
+  });
+  cbSlider.addEventListener('change', async () => {
+    const sec = parseInt(cbSlider.value, 10);
+    try {
+      await api('PUT', '/api/server/clipboard', { timeout_sec: sec });
+      _clipboardConfig.timeoutSec = sec;
+      if (typeof toast === 'function') {
+        toast(sec === 0 ? 'clipboard auto-clear disabled' : `clipboard clears after ${sec}s`);
+      }
+    } catch (e) {
+      if (typeof toast === 'function') {
+        toast('clipboard save failed: ' + (e.message || ''), 'error');
+      }
+      cbSlider.value = _clipboardConfig.timeoutSec;
+      cbValueEl.textContent = (_clipboardConfig.timeoutSec === 0) ? 'off' : _clipboardConfig.timeoutSec + 's';
+    }
+  });
+
+  // Form-factor toggle — reload after save so the chosen layout takes
+  // effect cleanly (rebuilding everything in-place is more code).
+  el.querySelectorAll('button[data-ff]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const choice = btn.dataset.ff;
+      _formFactor.setOverride(choice === 'auto' ? null : choice);
+      location.reload();
+    });
+  });
 }
 
 function liveIconShowTooltip(anchor) {
   liveIconHideTooltip();
+  // Always start in info mode when newly opening.
+  _liveIconState.mode = 'info';
   const el = document.createElement('div');
   el.className = 'live-indicator-tooltip';
   liveIconRenderTooltip(el);
@@ -9584,13 +10428,38 @@ async function liveIconLoadConfig() {
   const wire = () => {
     const el = document.getElementById('conn-state');
     if (!el) return;
-    el.style.cursor = 'help';
-    el.addEventListener('mouseenter', () => liveIconShowTooltip(el));
-    el.addEventListener('mouseleave', () => liveIconHideTooltip());
-    el.addEventListener('contextmenu', (ev) => {
-      ev.preventDefault();
+    el.style.cursor = 'pointer';
+    el.title = 'click for connection details + config';
+
+    // v4.0.1: click-to-pin info popover. Click toggles open/closed;
+    // configuration is reachable via the gear button inside the
+    // popover (was a right-click contextmenu in v3.6, removed in
+    // v4.0.1 because it didn't work on touch and was undiscoverable).
+    el.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      if (_liveIconState.tooltipEl) {
+        liveIconHideTooltip();
+      } else {
+        liveIconShowTooltip(el);
+      }
+    });
+
+    // Click anywhere outside the popover closes it. We bind to
+    // document and check the event target — if the click landed
+    // inside the popover or on the indicator itself, do nothing
+    // (the indicator's own click handler above takes care of toggle).
+    document.addEventListener('click', (ev) => {
+      if (!_liveIconState.tooltipEl) return;
+      if (_liveIconState.tooltipEl.contains(ev.target)) return;
+      if (el.contains(ev.target)) return;
       liveIconHideTooltip();
-      liveIconShowPollingPopup(el);
+    });
+
+    // Escape key closes the popover too — small accessibility win.
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape' && _liveIconState.tooltipEl) {
+        liveIconHideTooltip();
+      }
     });
   };
   if (document.readyState === 'loading') {
@@ -9775,6 +10644,442 @@ async function _saveCurrentOrder() {
     }
   }
 }
+
+// ===========================================================================
+// v4.0: federation
+// ===========================================================================
+// Manages the federation panel: pair-token generation, connect-by-URL,
+// link list rendering, periodic refresh + status reconciliation. Hidden
+// entirely when /api/federation/status reports enabled=false.
+//
+// Lifecycle:
+//   1. boot: GET /api/federation/status. If enabled=true, show the panel
+//      and start the polling loop. If false, leave hidden and stop.
+//   2. poll loop: every 5s, refresh /api/federation/links + the pending-
+//      token banner. Cheap on the server (single SELECT each).
+//   3. user actions: pair (modal), connect (modal), probe (per-row),
+//      enable/disable toggle (per-row), delete (per-row).
+//
+// Status color is derived in fedStatusDot() — keep it in one place so
+// every render uses the same mapping.
+
+const _fedState = {
+  enabled: false,
+  pollTimer: null,
+  rows: [],
+  localMeta: null,    // {local_fed_addr, subnet, wg_endpoint}
+};
+
+const FED_POLL_INTERVAL_MS = 5000;
+
+function fedStatusDot(status) {
+  // Returns the {color, label} pair for a given status string. Color
+  // names are CSS variables defined in this file's :root palette so
+  // theme switching works automatically. Mapping:
+  //   established  → --accent  (phosphor-green: tunnel handshake fresh)
+  //   pending      → --warn    (amber: link exists, no handshake yet)
+  //   failed       → --danger  (red: lost handshake or initial error)
+  //   disabled     → --fg-muted (gray: operator-paused)
+  const map = {
+    established: { color: 'var(--accent)',   label: 'established' },
+    pending:     { color: 'var(--warn)',     label: 'pending' },
+    failed:      { color: 'var(--danger)',   label: 'failed' },
+    disabled:    { color: 'var(--fg-muted)', label: 'disabled' },
+  };
+  return map[status] || { color: 'var(--fg-muted)', label: status || '?' };
+}
+
+// Tiny HTML escaper — every other place in this file uses textContent
+// directly, but we're building rows via innerHTML for compactness. So
+// escape any field that could contain user-controlled text.
+function fedEscapeHtml(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function fedRenderTable() {
+  const tbody = $('#fed-tbody');
+  const cardsHost = $('#fed-cards');
+  if (!tbody) return;
+
+  if (!_fedState.rows.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty">no federation links</td></tr>';
+    if (cardsHost) cardsHost.innerHTML = '<div class="empty">no federation links</div>';
+    return;
+  }
+
+  // Desktop table.
+  tbody.innerHTML = '';
+  for (const link of _fedState.rows) {
+    const dot = fedStatusDot(link.status);
+    const tr = document.createElement('tr');
+    tr.dataset.linkId = link.id;
+    tr.innerHTML = `
+      <td><span class="status-dot" style="display:inline-block; width:8px; height:8px; border-radius:50%; background:${dot.color}"
+                title="${dot.label}"></span></td>
+      <td><span class="mono">${fedEscapeHtml(link.name)}</span>
+          ${link.remote_instance_name
+            ? `<div class="mono-dim" style="font-size:10px;">${fedEscapeHtml(link.remote_instance_name)}</div>`
+            : ''}</td>
+      <td><span class="mono-dim">${fedEscapeHtml(link.remote_wg_endpoint)}</span></td>
+      <td><span class="mono">${fedEscapeHtml(link.remote_fed_addr.split('/')[0])}</span></td>
+      <td class="num">${link.last_handshake_ts ? fmtAgo(link.last_handshake_ts) : '—'}</td>
+      <td>${fedEscapeHtml(link.role)}</td>
+      <td>
+        <button class="ghost" data-fed-action="probe"   title="probe remote panel">⟳</button>
+        <button class="ghost" data-fed-action="toggle"  title="${link.enabled ? 'disable' : 'enable'}">${link.enabled ? '⏸' : '▶'}</button>
+        <button class="ghost" data-fed-action="delete"  title="forget this link">✕</button>
+      </td>`;
+    tbody.appendChild(tr);
+  }
+  // Wire per-row actions via delegation on tbody.
+  tbody.onclick = fedHandleRowClick;
+
+  // Mobile cards.
+  if (cardsHost) {
+    cardsHost.innerHTML = '';
+    for (const link of _fedState.rows) {
+      const dot = fedStatusDot(link.status);
+      const card = document.createElement('div');
+      card.className = 'peer-card';
+      card.dataset.linkId = link.id;
+      card.innerHTML = `
+        <div class="peer-card-head">
+          <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:${dot.color}"></span>
+          <span class="mono peer-card-name">${fedEscapeHtml(link.name)}</span>
+          <span class="mono-dim">${dot.label}</span>
+        </div>
+        <div class="peer-card-meta">
+          <div><span class="mono-dim">remote</span>
+               <span class="mono">${fedEscapeHtml(link.remote_wg_endpoint)}</span></div>
+          <div><span class="mono-dim">fed addr</span>
+               <span class="mono">${fedEscapeHtml(link.remote_fed_addr.split('/')[0])}</span></div>
+          <div><span class="mono-dim">handshake</span>
+               <span>${link.last_handshake_ts ? fmtAgo(link.last_handshake_ts) : '—'}</span></div>
+          ${link.last_error ? `<div class="mono-dim" style="color:var(--danger)">${fedEscapeHtml(link.last_error)}</div>` : ''}
+        </div>
+        <div class="peer-card-actions">
+          <button class="ghost" data-fed-action="probe">probe</button>
+          <button class="ghost" data-fed-action="toggle">${link.enabled ? 'disable' : 'enable'}</button>
+          <button class="ghost" data-fed-action="delete">forget</button>
+        </div>`;
+      cardsHost.appendChild(card);
+    }
+    cardsHost.onclick = fedHandleRowClick;
+  }
+}
+
+async function fedHandleRowClick(ev) {
+  const btn = ev.target.closest('[data-fed-action]');
+  if (!btn) return;
+  const row = btn.closest('[data-link-id]');
+  if (!row) return;
+  const linkId = row.dataset.linkId;
+  const action = btn.dataset.fedAction;
+  const link = _fedState.rows.find(r => String(r.id) === String(linkId));
+  if (!link) return;
+
+  try {
+    if (action === 'probe') {
+      btn.disabled = true;
+      try {
+        await api('POST', `/api/federation/links/${linkId}/probe`);
+        toast('probe complete');
+      } finally {
+        btn.disabled = false;
+      }
+      await fedRefresh();
+    } else if (action === 'toggle') {
+      await api('POST', `/api/federation/links/${linkId}/enabled`,
+                { enabled: !link.enabled });
+      toast(link.enabled ? 'link disabled' : 'link enabled');
+      await fedRefresh();
+    } else if (action === 'delete') {
+      if (!confirm(`forget link "${link.name}"? the remote will eventually time out.`)) return;
+      await api('DELETE', `/api/federation/links/${linkId}`);
+      toast('link forgotten');
+      await fedRefresh();
+    }
+  } catch (e) {
+    toast('action failed: ' + (e.message || ''), 'error');
+  }
+}
+
+async function fedRefresh() {
+  // Pull both endpoints in parallel. Tolerant of either failing — the
+  // panel keeps showing whatever was last successful.
+  try {
+    const [links, status] = await Promise.all([
+      api('GET', '/api/federation/links'),
+      api('GET', '/api/federation/status'),
+    ]);
+    _fedState.rows = links || [];
+    _fedState.localMeta = status;
+
+    // Header line: "this wgflow: 10.99.0.5 — 2 links established".
+    const meta = $('#fed-local-meta');
+    if (meta && status) {
+      const addr = (status.local_fed_addr || '').split('/')[0] || '—';
+      const counts = status.links_by_status || {};
+      const established = counts.established || 0;
+      const total = (counts.established || 0) + (counts.pending || 0)
+                  + (counts.failed || 0) + (counts.disabled || 0);
+      meta.textContent = `this: ${addr} · ${established}/${total} established`;
+    }
+
+    // Pending-token banner.
+    const banner = $('#fed-pending-banner');
+    const meta2  = $('#fed-pending-meta');
+    if (banner && status) {
+      if (status.pending_token_active) {
+        banner.style.display = '';
+        if (meta2) {
+          meta2.textContent = `${status.pending_token_seconds_left}s remaining`;
+        }
+      } else {
+        banner.style.display = 'none';
+      }
+    }
+
+    fedRenderTable();
+  } catch (e) {
+    // Don't toast on poll errors — the panel stays usable, the next
+    // tick may succeed. Console-log so developers can spot it.
+    console.warn('[federation] refresh failed:', e);
+  }
+}
+
+function fedStartPolling() {
+  if (_fedState.pollTimer) return;
+  _fedState.pollTimer = setInterval(fedRefresh, FED_POLL_INTERVAL_MS);
+}
+
+function fedStopPolling() {
+  if (_fedState.pollTimer) {
+    clearInterval(_fedState.pollTimer);
+    _fedState.pollTimer = null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Pair-token modal (responder side)
+// ---------------------------------------------------------------------------
+
+function fedOpenPairModal() {
+  const modal = $('#modal');
+  const title = $('#modal-title');
+  const body  = $('#modal-body');
+  if (!modal || !body) return;
+  title.textContent = 'generate pairing token';
+
+  // The operator has to tell us our public panel host:port, because we
+  // can't sniff it reliably from the request side. Default to the
+  // current browser's location since most operators DO browse to the
+  // panel via the same hostname they'd federate on — but make it
+  // editable in case wgflow lives on a different DNS name from the WG
+  // public endpoint.
+  const defaultEndpoint = `${window.location.hostname}` +
+    (window.location.port ? `:${window.location.port}` : '');
+
+  body.innerHTML = `
+    <div style="display:flex; flex-direction: column; gap: 14px;">
+      <p class="mono-dim" style="font-size: 12px;">
+        share the resulting URL with the other wgflow's operator. it expires
+        in 10 minutes and is single-use.
+      </p>
+      <label style="display:flex; flex-direction: column; gap: 4px;">
+        <span class="mono-dim" style="font-size: 11px;">our panel endpoint (host:port)</span>
+        <input id="fed-pair-endpoint" class="mono" value="${fedEscapeHtml(defaultEndpoint)}"
+               placeholder="vpn.example.com:443">
+      </label>
+      <label style="display:flex; flex-direction: column; gap: 4px;">
+        <span class="mono-dim" style="font-size: 11px;">name hint (optional)</span>
+        <input id="fed-pair-name" class="mono" placeholder="box-A"
+               maxlength="64">
+      </label>
+      <div style="display:flex; gap: 8px; justify-content: flex-end;">
+        <button class="ghost" id="fed-pair-cancel">cancel</button>
+        <button class="primary" id="fed-pair-submit">generate</button>
+      </div>
+      <div id="fed-pair-result" style="display:none;"></div>
+    </div>`;
+
+  modal.classList.add('open');
+
+  $('#fed-pair-cancel').onclick = () => modal.classList.remove('open');
+  $('#fed-pair-submit').onclick = async () => {
+    const endpoint = ($('#fed-pair-endpoint').value || '').trim();
+    const nameHint = ($('#fed-pair-name').value || '').trim();
+    if (!endpoint) {
+      toast('panel endpoint is required', 'error');
+      return;
+    }
+    try {
+      const r = await api('POST', '/api/federation/links/pair', {
+        panel_endpoint: endpoint, name_hint: nameHint,
+      });
+      // Replace the form with the result.
+      const result = $('#fed-pair-result');
+      result.style.display = '';
+      result.innerHTML = `
+        <div style="border-top: 1px solid var(--border); padding-top: 12px; margin-top: 4px;">
+          <div class="mono-dim" style="font-size: 11px; margin-bottom: 4px;">pairing url (copy + send)</div>
+          <textarea readonly class="mono" id="fed-pair-out"
+                    style="width: 100%; min-height: 80px;">${fedEscapeHtml(r.pair_url)}</textarea>
+          <div style="display:flex; gap: 8px; margin-top: 8px;">
+            <button class="primary" id="fed-pair-copy">copy</button>
+            <span class="mono-dim" style="font-size: 11px; align-self: center;">
+              expires in ${r.expires_in_seconds}s
+            </span>
+          </div>
+        </div>`;
+      $('#fed-pair-copy').onclick = () => {
+        const ta = $('#fed-pair-out');
+        ta.select();
+        try {
+          navigator.clipboard.writeText(ta.value);
+          toast('copied');
+        } catch (_) {
+          // Fallback: execCommand. Some older browsers / non-https contexts.
+          document.execCommand('copy');
+          toast('copied');
+        }
+      };
+      // Disable submit so they don't accidentally generate a second one
+      // before copying the first.
+      $('#fed-pair-submit').disabled = true;
+      // Refresh the panel banner.
+      fedRefresh();
+    } catch (e) {
+      toast('pair failed: ' + (e.message || ''), 'error');
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Connect-by-URL modal (initiator side)
+// ---------------------------------------------------------------------------
+
+function fedOpenConnectModal() {
+  const modal = $('#modal');
+  const title = $('#modal-title');
+  const body  = $('#modal-body');
+  if (!modal || !body) return;
+  title.textContent = 'connect to remote wgflow';
+
+  body.innerHTML = `
+    <div style="display:flex; flex-direction: column; gap: 14px;">
+      <p class="mono-dim" style="font-size: 12px;">
+        paste the wgflow-pair:// url generated on the other wgflow.
+        the handshake uses webpki TLS — the remote panel needs a valid
+        public certificate for federation in v4.0.
+      </p>
+      <label style="display:flex; flex-direction: column; gap: 4px;">
+        <span class="mono-dim" style="font-size: 11px;">pairing url</span>
+        <textarea id="fed-conn-url" class="mono"
+                  placeholder="wgflow-pair://host:port/code…"
+                  style="min-height: 60px;"></textarea>
+      </label>
+      <label style="display:flex; flex-direction: column; gap: 4px;">
+        <span class="mono-dim" style="font-size: 11px;">our local label for this link</span>
+        <input id="fed-conn-name" class="mono" placeholder="box-B"
+               maxlength="64">
+      </label>
+      <div style="display:flex; gap: 8px; justify-content: flex-end;">
+        <button class="ghost" id="fed-conn-cancel">cancel</button>
+        <button class="primary" id="fed-conn-submit">connect</button>
+      </div>
+    </div>`;
+
+  modal.classList.add('open');
+
+  $('#fed-conn-cancel').onclick = () => modal.classList.remove('open');
+  $('#fed-conn-submit').onclick = async () => {
+    const url  = ($('#fed-conn-url').value  || '').trim();
+    const name = ($('#fed-conn-name').value || '').trim();
+    if (!url || !name) {
+      toast('url and name are both required', 'error');
+      return;
+    }
+    const btn = $('#fed-conn-submit');
+    btn.disabled = true;
+    btn.textContent = 'connecting…';
+    try {
+      await api('POST', '/api/federation/links/connect',
+                { pair_url: url, name });
+      toast('link created');
+      modal.classList.remove('open');
+      fedRefresh();
+    } catch (e) {
+      toast('connect failed: ' + (e.message || ''), 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'connect';
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Boot
+// ---------------------------------------------------------------------------
+
+async function fedInit() {
+  let status;
+  try {
+    status = await api('GET', '/api/federation/status');
+  } catch (e) {
+    // Status endpoint missing or auth-blocked. Stay hidden — the legacy
+    // panel UI continues to work as before.
+    return;
+  }
+  if (!status || !status.enabled) {
+    return;
+  }
+
+  _fedState.enabled = true;
+  const panel = $('#federation-panel');
+  if (panel) panel.style.display = '';
+
+  // Wire header buttons.
+  const pairBtn    = $('#fed-pair-btn');
+  const connectBtn = $('#fed-connect-btn');
+  const cancelBtn  = $('#fed-pending-cancel');
+  if (pairBtn)    pairBtn.onclick    = fedOpenPairModal;
+  if (connectBtn) connectBtn.onclick = fedOpenConnectModal;
+  if (cancelBtn)  cancelBtn.onclick  = async () => {
+    try {
+      await api('DELETE', '/api/federation/links/pending');
+      toast('pairing window cancelled');
+      fedRefresh();
+    } catch (e) {
+      toast('cancel failed: ' + (e.message || ''), 'error');
+    }
+  };
+
+  // Initial fetch + start polling.
+  await fedRefresh();
+  fedStartPolling();
+
+  // Re-inject drag handles in case the panel just appeared after the
+  // reorder system already ran. Idempotent — reorderInjectHandles
+  // checks for existing handles before adding new ones.
+  if (typeof reorderInjectHandles === 'function') {
+    reorderInjectHandles();
+  }
+}
+
+// Hook into the existing boot path. fedInit is async and self-gated, so
+// firing it once at DOMContentLoaded is safe even when multisite is off.
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', fedInit);
+} else {
+  // Already past DOMContentLoaded — schedule a microtask.
+  setTimeout(fedInit, 0);
+}
+
+window.addEventListener('beforeunload', fedStopPolling);
 
 </script>
 

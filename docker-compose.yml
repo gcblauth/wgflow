@@ -36,3 +36,20 @@ services:
       # (recommended). Set this only if you are running your own collector
       # and have a shared key arrangement with it.
       WGFLOW_TELEMETRY_SECRET: ${WGFLOW_TELEMETRY_SECRET:-}
+      # v4.0: multi-site federation. When enabled (default), the panel
+      # exposes a Federation section where this wgflow can pair with
+      # other wgflow instances over WireGuard. Each pairing is gated by
+      # a one-time code; the inbound /api/federation/handshake endpoint
+      # is only responsive during an active 10-minute pairing window.
+      # Set to 0/false to hide the panel section and disable both
+      # inbound and outbound federation entirely.
+      WG_MULTISITE: ${WG_MULTISITE:-1}
+      # Subnet used for the federation overlay. Each paired wgflow gets
+      # one /32 from this range; the routes apply only to traffic
+      # between paired gateway boxes (NOT client peers, by iptables).
+      # Must NOT overlap with WG_SUBNET. Default 10.99.0.0/24.
+      WG_FEDERATION_SUBNET: ${WG_FEDERATION_SUBNET:-10.99.0.0/24}
+      # Optional. Public host:port other wgflows should send WG traffic
+      # to. Defaults to WG_ENDPOINT — override only if your federation
+      # listener is on a different UDP port from your client listener.
+      WG_FEDERATION_ENDPOINT: ${WG_FEDERATION_ENDPOINT:-}

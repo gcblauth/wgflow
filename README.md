@@ -93,6 +93,15 @@ Four on-demand log streams via WebSocket — opened only when you switch to that
 - Custom inline SVG charts everywhere (no chart.js dependency at runtime)
 - About modal with version + GitHub link
 
+### Multi-site federation (v4.0)
+- Pair two or more wgflow instances so each one's panel is reachable from the others over a private WireGuard overlay network (default `10.99.0.0/24`)
+- One-time pairing URL flow (`wgflow-pair://...`), 10-minute TTL, single-use, rate-limited handshake endpoint
+- Per-link WG keypair + PSK so revoking a single link doesn't ripple
+- Panel section with status dots (green = handshake fresh, amber = pending, red = failed, gray = disabled), per-row probe, enable/disable, forget actions
+- iptables hard backstop: federated peers can reach this box's services but cannot transit through to client peers
+- Disable entirely by setting `WG_MULTISITE=0` — the panel section hides and all federation API endpoints return 404. Default is on; the inbound handshake is gated by an in-memory pairing-code window so the public attack surface is small
+- Trust model in v4.0 is full panel-trust between paired operators (intended use case: one operator owning both ends). A tighter scoped-RPC trust model is planned for v5
+
 ---
 
 ## Deployment paths
@@ -178,7 +187,7 @@ If you set a plaintext password, wgflow prints a generated bcrypt hash in the co
 | Variable                    | Default | Notes                                                                       |
 |-----------------------------|---------|-----------------------------------------------------------------------------|
 | `WGFLOW_TELEMETRY_ENABLED`  | `1`     | `0` disables anonymous stats (peer count, totals, uptime). See Telemetry §  |
-| `WGFLOW_TELEMETRY_SECRET`   | `""`    | HMAC key. Empty = derive per-instance from the wg server key (recommended)  |
+| `WGFLOW_TELEMETRY_SECRET`   | `""`    | Optional shared key for operators running their own collector. Leave empty unless you've arranged this with the project. |
 
 ### Migration importer
 
@@ -452,28 +461,11 @@ The default state on a fresh install is **enabled** (so you can find the migrate
 
 ## Telemetry
 
-wgflow ships with anonymous usage telemetry **enabled by default**. Every 30 minutes the running container POSTs a small JSON payload to `https://wgflow.2ps.in/collect`:
-
-```json
-{
-  "instance_id":     "<uuid generated on first DB init>",
-  "version":         "3.2",
-  "peers_total":     12,
-  "rx_bytes":        47294827344,
-  "tx_bytes":        51182300012,
-  "uptime_seconds":  186420
-}
-```
-
-That's the entire payload. There are no peer names, no public keys, no IPs, no DNS query history, no host identifiers, no ACL contents — just the six values above.
-
-The body is HMAC-SHA256 signed (header `X-Signature`). The HMAC key is either `WGFLOW_TELEMETRY_SECRET` if set in the environment, or — when unset — a community-known constant baked into the source (`wgflow-community-default`). The signature is therefore an *integrity* check, not proof of origin: anyone reading the wgflow source can compute valid signatures. That's intentional. The collector defends against fake-instance flooding with per-IP rate limits and a pending-review queue: a new `instance_id` only counts toward the public stats after it has checked in **at least 10 times across at least 24 hours**. One-shot or short-burst forgeries never make it out of pending.
+wgflow ships with anonymous usage telemetry **enabled by default**. The running container periodically reports a small set of aggregate counters — instance UUID, peer count, cumulative rx/tx bytes, process uptime, and wgflow version. There are no peer names, no public keys, no IPs, no DNS query history, no host identifiers, no ACL contents.
 
 **To opt out:** set `WGFLOW_TELEMETRY_ENABLED=0` in your `.env` (or `docker-compose.yml`) and restart the container. `setup.sh` prompts for this on initial config. The startup log line `[wgflow] telemetry DISABLED via WGFLOW_TELEMETRY_ENABLED` confirms it took effect.
 
-**Why default-on:** the project genuinely benefits from knowing how it's used in the wild — peer-count distribution drives the "we should refactor at >50 peers" decisions, version mix tells us when it's safe to drop migration paths. Default-off would be more privacy-forward but leaves the project blind. We default-on, document plainly, and make opt-out a single env var.
-
-The collected aggregate stats are posted to the project's GitHub page.
+**Why default-on:** the project genuinely benefits from knowing how it's used in the wild — peer-count distribution drives the "we should refactor at >50 peers" decisions, version mix tells us when it's safe to drop migration paths. Default-off would be more privacy-forward but leaves the project blind. We default-on and make opt-out a single env var.
 
 ---
 

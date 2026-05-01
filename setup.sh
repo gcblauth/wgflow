@@ -86,14 +86,11 @@ prompt_user "WGFLOW_IPTABLES_LOG" "Enable drop logging? (1=Yes, 0=No)" "0"
 # 6. Telemetry
 echo ""
 echo "--- Anonymous telemetry ---"
-echo "wgflow can send anonymous usage stats every 30 minutes:"
-echo "  - per-instance UUID (generated on first DB init)"
-echo "  - peer count"
-echo "  - cumulative rx/tx bytes"
-echo "  - process uptime + wgflow version"
-echo "Aggregated stats are visible on the project's GitHub page. The README's"
-echo "Telemetry section documents exactly what's collected and how the HMAC"
-echo "signing works."
+echo "wgflow can periodically send anonymous usage stats: peer count,"
+echo "cumulative rx/tx bytes, uptime, and version. No peer names, keys,"
+echo "addresses, DNS history, or ACL contents are transmitted. The"
+echo "README's Telemetry section covers what's collected and how to opt"
+echo "out. You can change this any time by editing .env."
 prompt_user "WGFLOW_TELEMETRY_ENABLED" "Enable telemetry? (1=Yes, 0=No)" "1"
 
 # 7. Host Log Path
@@ -112,6 +109,13 @@ esac
 # Create .env file. We deliberately don't write WGFLOW_TELEMETRY_SECRET — leave
 # it empty so the per-instance derived secret is used. Operators running their
 # own collector can add it manually later.
+#
+# v4.0: WG_MULTISITE controls the federation feature. Default ON because
+# the feature is gated by an in-memory pairing-code window — the inbound
+# /api/federation/handshake endpoint returns 401 to anyone outside an
+# active 10-minute pairing window the operator just opened. Operators
+# who want federation hard-off can set WG_MULTISITE=0 here, which causes
+# all federation API endpoints to 404 and the panel section to hide.
 cat <<EOF > .env
 WG_INTERFACE=$WG_INTERFACE
 WG_LISTEN_PORT=$WG_LISTEN_PORT
@@ -128,6 +132,9 @@ WGFLOW_BIND=$WGFLOW_BIND
 WGFLOW_IPTABLES_LOG=$WGFLOW_IPTABLES_LOG
 KERNEL_LOG_PATH=$KERNEL_LOG
 WGFLOW_TELEMETRY_ENABLED=$WGFLOW_TELEMETRY_ENABLED
+WG_MULTISITE=1
+WG_FEDERATION_SUBNET=10.99.0.0/24
+WG_FEDERATION_ENDPOINT=
 EOF
 
 # Tighten permissions — .env contains the admin password.

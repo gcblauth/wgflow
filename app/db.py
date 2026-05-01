@@ -205,6 +205,63 @@ CREATE TABLE IF NOT EXISTS network_settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- v4.0: federation links.
+--
+-- One row per paired remote wgflow. Each link has its own WireGuard
+-- keypair (separate from the server's main identity, so revoking one
+-- link doesn't invalidate the others) and a per-link PSK. The remote
+-- gets allocated an address on the federation overlay subnet
+-- (config.federation_subnet, default 10.99.0.0/24); our own overlay
+-- address is the same across every link and stored in network_settings
+-- under 'federation_local_addr'.
+--
+-- Replay semantics: rows with enabled=1 contribute peers to wg0 via
+-- _load_federation_peers_for_sync(), and per-link iptables chains via
+-- create_federation_chain(). Disabled rows are kept in the DB (so the
+-- operator can re-enable without re-pairing) but their kernel state is
+-- removed.
+--
+-- status:
+--   pending     — created locally, no observed handshake yet
+--   established — wg show reports a recent handshake against remote_pubkey
+--   failed      — handshake either errored at HTTPS time or the wg link
+--                 hasn't completed a handshake within the probe window
+--   disabled    — operator-disabled (mirrors enabled=0; redundant but
+--                 the column carries the human-facing state)
+CREATE TABLE IF NOT EXISTS federation_links (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    name                  TEXT NOT NULL UNIQUE,
+    role                  TEXT NOT NULL,              -- 'initiator' | 'responder'
+    -- Per-link WG identity (NOT the server-wide WG keypair).
+    local_privkey         TEXT NOT NULL,
+    local_pubkey          TEXT NOT NULL,
+    remote_pubkey         TEXT NOT NULL,
+    psk                   TEXT NOT NULL,
+    -- Where the remote wgflow's WG endpoint lives, on the public internet.
+    remote_wg_endpoint    TEXT NOT NULL,              -- "host:port"
+    -- Federation overlay addresses. Both stored as "x.x.x.x/32".
+    -- local_fed_addr is denormalized from network_settings.federation_local_addr
+    -- so syncconf doesn't need a second query at apply time. All rows for
+    -- one wgflow have the same local_fed_addr.
+    local_fed_addr        TEXT NOT NULL,
+    remote_fed_addr       TEXT NOT NULL,
+    -- Where to reach the remote wgflow's panel — used for follow-up RPCs
+    -- (probe, future ACL sync). Stored as "host:port"; the scheme is
+    -- implied https. Cert pinning is by WebPKI only in v4.0 (no SPKI pin).
+    remote_panel_endpoint TEXT NOT NULL,
+    -- Display metadata exchanged at handshake.
+    remote_instance_id    TEXT,
+    remote_instance_name  TEXT,
+    -- Status fields.
+    status                TEXT NOT NULL DEFAULT 'pending',
+    last_handshake_ts     INTEGER,
+    last_error            TEXT,
+    enabled               INTEGER NOT NULL DEFAULT 1,
+    created_at            TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_fed_links_status ON federation_links(status);
 """
 
 
@@ -446,7 +503,15 @@ class DB:
                              # which to load/save based on viewport
                              # width + an optional manual toggle.
                              ("panel_order_mobile", ""),
-                             ("panels_minimized_mobile", "")):
+                             ("panels_minimized_mobile", ""),
+                             # v4.0: federation overlay address that THIS
+                             # wgflow box advertises across every link.
+                             # Empty string = not yet allocated (lazy:
+                             # populated by federation.allocate_local_addr
+                             # when the operator first generates a
+                             # pairing token or pastes one). Format when
+                             # populated: "x.x.x.x/32".
+                             ("federation_local_addr", "")):
             row = conn.execute(
                 "SELECT value FROM network_settings WHERE key = ?", (key,)
             ).fetchone()

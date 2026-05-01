@@ -52,11 +52,19 @@ def server_public_key() -> str:
 
 @dataclass
 class PeerConfig:
-    """Server-side representation of a peer, used to render wg0.conf."""
+    """Server-side representation of a peer, used to render wg0.conf.
+
+    For client peers, `endpoint` is None — clients dial in. For federation
+    peers (v4.0), `endpoint` is "host:port" so this side actively reaches
+    the remote wgflow, and `persistent_keepalive` keeps the tunnel up
+    through NAT on either end.
+    """
     name: str
     public_key: str
     preshared_key: str
     address: str  # "10.13.13.5/32"
+    endpoint: Optional[str] = None
+    persistent_keepalive: Optional[int] = None
 
 
 def render_server_conf(peers: List[PeerConfig]) -> str:
@@ -83,8 +91,12 @@ def render_server_conf(peers: List[PeerConfig]) -> str:
             # is NOT the ACL for what the peer is allowed to reach. ACLs live
             # in iptables.
             f"AllowedIPs = {p.address}",
-            "",
         ]
+        if p.endpoint:
+            lines.append(f"Endpoint = {p.endpoint}")
+        if p.persistent_keepalive:
+            lines.append(f"PersistentKeepalive = {p.persistent_keepalive}")
+        lines.append("")
     return "\n".join(lines)
 
 

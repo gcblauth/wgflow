@@ -46,7 +46,7 @@ from .db import DB
 
 # wgflow version included in every payload so the collector can break stats
 # down by release. Update on each tagged release.
-WGFLOW_VERSION = "3.8.3"
+WGFLOW_VERSION = "4.0.0-alpha"
 
 # Where telemetry goes. Hardcoded — operators who want to redirect or block
 # this run a local DNS override, or set WGFLOW_TELEMETRY_ENABLED=0.
@@ -168,6 +168,22 @@ def _build_payload(db: DB) -> Optional[dict]:
     rx_total = traffic["rx_total"] if traffic else 0
     tx_total = traffic["tx_total"] if traffic else 0
 
+    # v4.0: count of federation links currently established. Used to
+    # measure how many wgflow instances are talking to each other in
+    # aggregate. We send only the established count, not the total, so
+    # the field reflects actual mesh connectivity rather than abandoned/
+    # paused pairings. Tolerant of the table not existing yet (operator
+    # has v3.x DB but v4 binary, mid-upgrade) — try/except keeps the
+    # rest of the payload flowing.
+    try:
+        fed_count_row = conn.execute(
+            "SELECT COUNT(*) FROM federation_links "
+            "WHERE status='established' AND enabled=1"
+        ).fetchone()
+        federation_peer_count = fed_count_row[0] if fed_count_row else 0
+    except Exception:
+        federation_peer_count = 0
+
     return {
         "instance_id": instance_id,
         "version": WGFLOW_VERSION,
@@ -175,6 +191,7 @@ def _build_payload(db: DB) -> Optional[dict]:
         "rx_bytes": rx_total,
         "tx_bytes": tx_total,
         "uptime_seconds": _process_uptime(),
+        "federation_peer_count": federation_peer_count,
     }
 
 

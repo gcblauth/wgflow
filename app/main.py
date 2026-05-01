@@ -16,6 +16,7 @@ from fastapi import (
     FastAPI,
     File,
     HTTPException,
+    Request,
     Response,
     UploadFile,
     WebSocket,
@@ -27,6 +28,7 @@ from . import acl as acl_mod
 from . import auth
 from . import dns_log as dns_log_mod
 from . import dns_overrides
+from . import federation
 from . import inspector
 from . import installer_script
 from . import iptables_manager as ipt
@@ -45,6 +47,9 @@ from .models import (
     ACLUpdate,
     BatchByCount,
     BatchByNames,
+    FederationConnectRequest,
+    FederationLinkOut,
+    FederationPairCreate,
     ImportCommit,
     InstanceConfig,
     MigrationToggle,
@@ -130,7 +135,7 @@ def _load_all_peers_for_sync() -> List[wg.PeerConfig]:
     rows = conn.execute(
         "SELECT name, public_key, preshared_key, address FROM peers WHERE enabled = 1"
     ).fetchall()
-    return [
+    client_peers = [
         wg.PeerConfig(
             name=r["name"],
             public_key=r["public_key"],
@@ -139,6 +144,44 @@ def _load_all_peers_for_sync() -> List[wg.PeerConfig]:
         )
         for r in rows
     ]
+    # v4.0: federation peers join the same wg interface as a separate
+    # class. They have an Endpoint (we dial out) and a keepalive so the
+    # tunnel survives NAT on either side. AllowedIPs is the remote's
+    # /32 on the federation overlay subnet.
+    return client_peers + _load_federation_peers_for_sync()
+
+
+def _load_federation_peers_for_sync() -> List[wg.PeerConfig]:
+    """Build PeerConfig entries for every enabled federation_links row.
+
+    Returns [] when multisite is disabled, the table is empty, or every
+    row is disabled. Each returned PeerConfig carries an Endpoint and
+    PersistentKeepalive=25 — federation peers are mutual-dialer (either
+    side initiates), so we always set both.
+
+    The PeerConfig's `name` column gets a "fed:" prefix so the rendered
+    wg0.conf comments make it obvious which entries are federation
+    peers when an operator inspects the file by hand.
+    """
+    if not SETTINGS.multisite_enabled:
+        return []
+    conn = get_db().conn
+    rows = conn.execute(
+        "SELECT id, name, remote_pubkey, psk, remote_wg_endpoint, "
+        "remote_fed_addr "
+        "FROM federation_links WHERE enabled = 1"
+    ).fetchall()
+    out: List[wg.PeerConfig] = []
+    for r in rows:
+        out.append(wg.PeerConfig(
+            name=f"fed:{r['name']}",
+            public_key=r["remote_pubkey"],
+            preshared_key=r["psk"],
+            address=r["remote_fed_addr"],
+            endpoint=r["remote_wg_endpoint"],
+            persistent_keepalive=25,
+        ))
+    return out
 
 
 def _load_acl_alias_lookup(conn=None) -> dict:
@@ -265,6 +308,17 @@ def _replay_state_to_kernel() -> None:
         ipt.enable_mss_clamp()
     else:
         ipt.disable_mss_clamp()
+
+    # v4.0: federation chains. One drop-only chain per enabled link so
+    # FORWARD from a federated wgflow's overlay address is hard-blocked
+    # at iptables. Disabled rows do not get a chain (replay tears down
+    # state for disabled rows; re-enable triggers a fresh setup).
+    if SETTINGS.multisite_enabled:
+        fed_rows = conn.execute(
+            "SELECT id, remote_fed_addr FROM federation_links WHERE enabled = 1"
+        ).fetchall()
+        for fr in fed_rows:
+            ipt.create_federation_chain(fr["id"], fr["remote_fed_addr"])
 
 
 def _peer_id_for_ip(peer_ip: str) -> Optional[int]:
@@ -518,7 +572,20 @@ async def auth_middleware(request, call_next):
         return await call_next(request)
 
     path = request.url.path
-    if path in auth.PUBLIC_PATHS or path == "/" or path.startswith("/static/"):
+    # v4.0.1: static assets at the root pass through auth — the icons
+    # need to be reachable before login, the manifest needs to be
+    # reachable for the browser to enable the install affordance, and
+    # /favicon.svg has been there since the earlier patch. We list them
+    # explicitly rather than wildcarding because the path namespace at
+    # the root is not exclusively static (the panel itself is at /).
+    if (path in auth.PUBLIC_PATHS
+            or path == "/"
+            or path == "/favicon.svg"
+            or path == "/apple-touch-icon.png"
+            or path == "/icon-192.png"
+            or path == "/icon-512.png"
+            or path == "/manifest.json"
+            or path.startswith("/static/")):
         return await call_next(request)
 
     # Extract token from cookie or Authorization header.
@@ -3222,6 +3289,450 @@ async def ws_status(websocket: WebSocket):
 
 
 # ---------------------------------------------------------------------------
+# v4.0: federation API
+# ---------------------------------------------------------------------------
+# Endpoints:
+#   GET    /api/federation/status          → multisite enabled? local addr? counts.
+#   GET    /api/federation/links           → list links with status.
+#   POST   /api/federation/links/pair      → responder: generate pairing URL.
+#   GET    /api/federation/links/pending   → responder: peek at the open window.
+#   DELETE /api/federation/links/pending   → responder: cancel the open window.
+#   POST   /api/federation/links/connect   → initiator: paste URL, run handshake.
+#   POST   /api/federation/links/{id}/probe → either side: ping the remote panel
+#                                              over the tunnel + reconcile status.
+#   POST   /api/federation/links/{id}/enabled → toggle enable/disable (no delete).
+#   DELETE /api/federation/links/{id}      → tear down + remove row.
+#   POST   /api/federation/handshake       → INBOUND from a remote wgflow.
+#                                              Public-ish (gated by code window).
+#
+# All operator-facing endpoints require panel auth via the existing
+# require_auth dependency. The handshake endpoint does NOT — it can't,
+# the caller is another wgflow with no panel session — but it's gated
+# by the per-pairing one-time code state machine in federation.py.
+
+def _multisite_required() -> None:
+    """Raise 404 (not 403) when WG_MULTISITE is off.
+
+    404 because we don't want the existence of these endpoints to be a
+    fingerprintable feature. With multisite off, the routes behave as
+    if they don't exist.
+    """
+    if not SETTINGS.multisite_enabled:
+        raise HTTPException(404, "not found")
+
+
+def _server_instance_meta() -> tuple:
+    """Read (instance_id, instance_name) for inclusion in handshake bundles."""
+    conn = get_db().conn
+    iid = conn.execute(
+        "SELECT value FROM network_settings WHERE key='instance_id'"
+    ).fetchone()
+    iname = conn.execute(
+        "SELECT value FROM network_settings WHERE key='instance_name'"
+    ).fetchone()
+    return (
+        (iid["value"] if iid else ""),
+        (iname["value"] if iname else ""),
+    )
+
+
+def _federation_link_to_out(row) -> FederationLinkOut:
+    """sqlite Row → FederationLinkOut. Tolerant of missing columns for
+    forward-compat with future schema additions."""
+    return FederationLinkOut(
+        id=row["id"],
+        name=row["name"],
+        role=row["role"],
+        status=row["status"],
+        enabled=bool(row["enabled"]),
+        local_fed_addr=row["local_fed_addr"],
+        remote_fed_addr=row["remote_fed_addr"],
+        remote_wg_endpoint=row["remote_wg_endpoint"],
+        remote_panel_endpoint=row["remote_panel_endpoint"],
+        remote_instance_id=row["remote_instance_id"],
+        remote_instance_name=row["remote_instance_name"],
+        last_handshake_ts=row["last_handshake_ts"],
+        last_error=row["last_error"],
+        created_at=row["created_at"],
+    )
+
+
+@app.get("/api/federation/status")
+def federation_status():
+    """Lightweight info: feature flag state, local overlay address, counts.
+
+    Always returns 200 with `enabled: false` when multisite is off, so
+    the UI can hide the panel cleanly without 404 noise. (Distinct from
+    the operator-facing routes which 404 — the *status* call is
+    intentionally cheap and silent for UI bootstrapping.)
+    """
+    if not SETTINGS.multisite_enabled:
+        return {"enabled": False}
+    conn = get_db().conn
+    local_addr = conn.execute(
+        "SELECT value FROM network_settings WHERE key='federation_local_addr'"
+    ).fetchone()
+    by_status = dict(conn.execute(
+        "SELECT status, COUNT(*) FROM federation_links GROUP BY status"
+    ).fetchall())
+    pending_token = federation.TOKEN_STORE.peek()
+    return {
+        "enabled": True,
+        "subnet": str(SETTINGS.federation_subnet),
+        "local_fed_addr": (local_addr["value"] if local_addr else "") or "",
+        "wg_endpoint": SETTINGS.federation_wg_endpoint,
+        "links_by_status": by_status,
+        "pending_token_active": pending_token is not None,
+        "pending_token_seconds_left": (
+            int(federation.PAIRING_TOKEN_TTL_SECONDS
+                - (time.time() - pending_token.created_at))
+            if pending_token else 0
+        ),
+    }
+
+
+@app.get("/api/federation/links", response_model=List[FederationLinkOut])
+def list_federation_links():
+    _multisite_required()
+    rows = get_db().conn.execute(
+        "SELECT * FROM federation_links ORDER BY id"
+    ).fetchall()
+    return [_federation_link_to_out(r) for r in rows]
+
+
+@app.post("/api/federation/links/pair")
+def federation_pair_token(body: FederationPairCreate):
+    """Mint a pairing token + URL for the operator to copy.
+
+    Replaces any existing pending token. Allocates this box's local
+    federation address if not yet allocated (so the URL is meaningful
+    immediately — once the partner pastes it, both sides have addresses
+    ready).
+    """
+    _multisite_required()
+    with get_db().write() as conn:
+        federation.ensure_local_addr(conn)
+    tok = federation.TOKEN_STORE.issue(body.name_hint)
+    pair_url = federation.build_pair_url(body.panel_endpoint, tok.code)
+    return {
+        "pair_url": pair_url,
+        "code": tok.code,
+        "expires_in_seconds": federation.PAIRING_TOKEN_TTL_SECONDS,
+        "name_hint": tok.name_hint,
+    }
+
+
+@app.get("/api/federation/links/pending")
+def federation_pending_token():
+    """Whether a pairing window is currently open. UI uses this to render
+    the countdown indicator after the modal closes."""
+    _multisite_required()
+    tok = federation.TOKEN_STORE.peek()
+    if tok is None:
+        return {"active": False}
+    return {
+        "active": True,
+        "name_hint": tok.name_hint,
+        "seconds_left": int(
+            federation.PAIRING_TOKEN_TTL_SECONDS
+            - (time.time() - tok.created_at)
+        ),
+    }
+
+
+@app.delete("/api/federation/links/pending", status_code=204)
+def federation_cancel_pending_token():
+    _multisite_required()
+    federation.TOKEN_STORE.cancel()
+    return Response(status_code=204)
+
+
+@app.post("/api/federation/links/connect", response_model=FederationLinkOut)
+async def federation_connect(body: FederationConnectRequest):
+    """Initiator side: paste pair URL, run handshake, persist link.
+
+    Synchronous: the operator clicks Connect and waits ~1-3 seconds for
+    the remote handshake + DB write + state replay. Errors surface
+    inline (the UI shows the message in a status banner). On success
+    the row is persisted and replay has installed the kernel peer; the
+    UI refreshes the link list and starts polling status.
+    """
+    _multisite_required()
+
+    # Allocate local fed addr first (write transaction so concurrent
+    # connect calls can't pick the same /32 — there's no realistic
+    # contention here, but cheap to do right).
+    with get_db().write() as conn:
+        local_addr = federation.ensure_local_addr(conn)
+
+    iid, iname = _server_instance_meta()
+
+    # Reject duplicate names BEFORE the handshake so we don't pair with
+    # the remote, then have to roll back the link because of a name
+    # collision. Cheap pre-flight; race-loses on concurrent identical
+    # calls but the operator pasting the same URL twice is implausible.
+    dup = get_db().conn.execute(
+        "SELECT 1 FROM federation_links WHERE name=?", (body.name,)
+    ).fetchone()
+    if dup:
+        raise HTTPException(409, f"link name '{body.name}' already exists")
+
+    try:
+        result = await federation.initiate_handshake(
+            pair_url=body.pair_url,
+            link_name=body.name,
+            local_fed_addr=local_addr,
+            local_instance_id=iid,
+            local_instance_name=iname,
+        )
+    except ValueError as e:
+        raise HTTPException(400, f"bad pairing URL: {e}")
+    except Exception as e:
+        # Network / TLS / remote-side error. Surface message verbatim;
+        # the operator needs to see what the remote returned.
+        raise HTTPException(502, f"handshake failed: {e}")
+
+    # Persist the link row. Use INSERT … RETURNING * so we can build
+    # the response without a second SELECT.
+    with get_db().write() as conn:
+        cur = conn.execute(
+            """INSERT INTO federation_links (
+                name, role,
+                local_privkey, local_pubkey, remote_pubkey, psk,
+                remote_wg_endpoint,
+                local_fed_addr, remote_fed_addr,
+                remote_panel_endpoint,
+                remote_instance_id, remote_instance_name,
+                status, enabled
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 1)""",
+            (result.name, result.role,
+             result.local_privkey, result.local_pubkey,
+             result.remote_pubkey, result.psk,
+             result.remote_wg_endpoint,
+             result.local_fed_addr, result.remote_fed_addr,
+             result.remote_panel_endpoint,
+             result.remote_instance_id, result.remote_instance_name),
+        )
+        new_id = cur.lastrowid
+
+    # Push to kernel: wg peer + iptables drop chain.
+    _replay_state_to_kernel()
+
+    # Return the freshly-inserted row. Status will still be 'pending'
+    # at this instant — the first WG handshake usually completes within
+    # a couple of seconds, and the metrics/probe loop will update.
+    row = get_db().conn.execute(
+        "SELECT * FROM federation_links WHERE id=?", (new_id,)
+    ).fetchone()
+    return _federation_link_to_out(row)
+
+
+@app.post("/api/federation/links/{link_id}/probe", response_model=FederationLinkOut)
+async def federation_probe_link(link_id: int):
+    """Reconcile WG handshake status + try a panel HTTP probe over the
+    tunnel. Updates the row, returns it.
+
+    The probe is best-effort: if the remote panel isn't reachable on
+    its overlay address (e.g. operator binds the panel only to a public
+    NIC), status reflects WG handshake freshness only. The probe result
+    is stashed in last_error for the UI to display.
+    """
+    _multisite_required()
+    conn = get_db().conn
+    row = conn.execute(
+        "SELECT * FROM federation_links WHERE id=?", (link_id,)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(404, "link not found")
+
+    # First: refresh from wg show.
+    try:
+        dump = wg.show_dump()
+    except Exception:
+        dump = []
+    with get_db().write() as wconn:
+        federation.reconcile_link_status(wconn, dump)
+
+    # Then: HTTP probe over the tunnel (only if the link is supposed to
+    # be enabled — no point probing a disabled row).
+    if row["enabled"]:
+        ok, msg = await federation.probe_remote_panel(row["remote_fed_addr"])
+        with get_db().write() as wconn:
+            wconn.execute(
+                "UPDATE federation_links SET last_error=? WHERE id=?",
+                (None if ok else f"probe: {msg}", link_id),
+            )
+
+    fresh = get_db().conn.execute(
+        "SELECT * FROM federation_links WHERE id=?", (link_id,)
+    ).fetchone()
+    return _federation_link_to_out(fresh)
+
+
+@app.post("/api/federation/links/{link_id}/enabled",
+          response_model=FederationLinkOut)
+def federation_toggle_link(link_id: int, body: PeerEnabledUpdate):
+    """Enable/disable a link without deleting it. Disabled links keep
+    their keys + addresses in the DB so the operator can re-enable
+    without re-pairing — but the kernel state is removed."""
+    _multisite_required()
+    with get_db().write() as conn:
+        row = conn.execute(
+            "SELECT * FROM federation_links WHERE id=?", (link_id,)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404, "link not found")
+        new_status = "pending" if body.enabled else "disabled"
+        conn.execute(
+            "UPDATE federation_links SET enabled=?, status=? WHERE id=?",
+            (1 if body.enabled else 0, new_status, link_id),
+        )
+
+    # If we just disabled the link, tear down its iptables chain. If we
+    # just re-enabled, the chain gets created in replay.
+    if not body.enabled:
+        try:
+            ipt.destroy_federation_chain(link_id, row["remote_fed_addr"])
+        except Exception:
+            pass
+    _replay_state_to_kernel()
+
+    fresh = get_db().conn.execute(
+        "SELECT * FROM federation_links WHERE id=?", (link_id,)
+    ).fetchone()
+    return _federation_link_to_out(fresh)
+
+
+@app.delete("/api/federation/links/{link_id}", status_code=204)
+def federation_delete_link(link_id: int):
+    """Tear down a link and forget it.
+
+    The remote wgflow will eventually notice the lack of handshakes and
+    transition its mirror row to 'failed'. We don't currently send a
+    polite "I'm leaving" RPC — the v5 backlog item for that lands when
+    we add a federation control RPC layer. For now, deletion is local-only.
+    """
+    _multisite_required()
+    conn = get_db().conn
+    row = conn.execute(
+        "SELECT remote_fed_addr FROM federation_links WHERE id=?",
+        (link_id,),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(404, "link not found")
+    try:
+        ipt.destroy_federation_chain(link_id, row["remote_fed_addr"])
+    except Exception:
+        pass
+    with get_db().write() as wconn:
+        wconn.execute("DELETE FROM federation_links WHERE id=?", (link_id,))
+    _replay_state_to_kernel()
+    return Response(status_code=204)
+
+
+@app.post("/api/federation/handshake")
+async def federation_handshake_inbound(payload: dict, request: Request):
+    """INBOUND from a remote wgflow's initiator side.
+
+    Auth model:
+      - No panel session (the caller is another wgflow, not a browser).
+      - Gated by the in-memory pending pairing token. Outside an active
+        pairing window, every request returns 401 regardless of body.
+      - Per-source-IP rate limit prevents online brute force on the
+        one-time code.
+
+    On success we generate our half of the bundle, persist a
+    federation_links row, and reply with the data the initiator needs
+    to install us as their wg peer. The caller-side row is not yet
+    'established' — both sides flip to established once their first
+    handshake is observed via wg show.
+
+    The endpoint signature uses a raw `dict` payload rather than a
+    Pydantic model because the initiator's bundle has internal
+    structure that's better validated by federation.parse_incoming_bundle
+    (which produces typed errors with safe messages).
+    """
+    _multisite_required()
+
+    source_ip = (request.client.host if request.client else "?")
+    if not federation.TOKEN_STORE.check_rate_limit(source_ip):
+        raise HTTPException(429, "rate limit exceeded")
+
+    code = payload.get("code", "")
+    tok = federation.TOKEN_STORE.consume(code)
+    if tok is None:
+        # Same response whether token is missing, expired, or wrong.
+        # The 401 + uniform message is the defensive choice.
+        raise HTTPException(401, "no active pairing window")
+
+    try:
+        incoming = federation.parse_incoming_bundle(payload)
+    except ValueError as e:
+        raise HTTPException(400, f"bad bundle: {e}")
+
+    # Generate our per-link WG identity.
+    privkey = wg.genkey()
+    pubkey = wg.pubkey(privkey)
+
+    # Allocate local fed addr (idempotent) and a slot for ourselves
+    # NOT for the remote — they already chose theirs and told us in
+    # incoming.remote_fed_addr.
+    with get_db().write() as conn:
+        local_addr = federation.ensure_local_addr(conn)
+
+        # Pick a name. Prefer the initiator's hint if non-conflicting,
+        # otherwise append a numeric suffix. Operators can rename later.
+        base = incoming.link_name_hint or "remote"
+        candidate = base
+        n = 1
+        while conn.execute(
+            "SELECT 1 FROM federation_links WHERE name=?", (candidate,)
+        ).fetchone():
+            n += 1
+            candidate = f"{base}-{n}"
+
+        cur = conn.execute(
+            """INSERT INTO federation_links (
+                name, role,
+                local_privkey, local_pubkey, remote_pubkey, psk,
+                remote_wg_endpoint,
+                local_fed_addr, remote_fed_addr,
+                remote_panel_endpoint,
+                remote_instance_id, remote_instance_name,
+                status, enabled
+            ) VALUES (?, 'responder', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 1)""",
+            (candidate,
+             privkey, pubkey,
+             incoming.remote_pubkey, incoming.psk,
+             incoming.remote_wg_endpoint,
+             local_addr, incoming.remote_fed_addr,
+             # remote_panel_endpoint: we don't actually know this for
+             # responder-side rows. The initiator dialed in to OUR panel,
+             # so the only thing we know is the source IP (which may be
+             # behind NAT / proxy). Stash a best-effort value: source IP
+             # without a port. The operator can edit this manually if
+             # the heuristic is wrong (TODO v4.1: PUT endpoint for
+             # remote_panel_endpoint editing).
+             source_ip,
+             incoming.remote_instance_id, incoming.remote_instance_name),
+        )
+        link_id = cur.lastrowid
+
+    # Push to kernel.
+    _replay_state_to_kernel()
+
+    # Build response.
+    iid, iname = _server_instance_meta()
+    return federation.build_response_payload(
+        local_pubkey=pubkey,
+        psk=incoming.psk,
+        local_fed_addr=local_addr,
+        instance_id=iid,
+        instance_name=iname,
+    )
+
+
+# ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
 
@@ -3229,6 +3740,84 @@ async def ws_status(websocket: WebSocket):
 def index():
     path = Path(__file__).parent / "static" / "index.html"
     return HTMLResponse(path.read_text())
+
+
+# v4.0.1: small dispatch table for static assets we serve at the root.
+# The original `/favicon.svg` handler was per-file; with the addition of
+# apple-touch-icon, manifest.json, and the PNG home-screen icons we'd
+# rather table-drive than write 5 near-identical handlers. Each entry
+# maps a request path to (filename in app/static/, MIME type, cache age).
+# If a future file needs different headers, fork the handler — but
+# nothing today does.
+_STATIC_ROOT_ASSETS = {
+    "/favicon.svg":          ("favicon.svg",          "image/svg+xml", 86400),
+    "/apple-touch-icon.png": ("apple-touch-icon.png", "image/png",     86400),
+    "/icon-192.png":         ("icon-192.png",         "image/png",     86400),
+    "/icon-512.png":         ("icon-512.png",         "image/png",     86400),
+    "/manifest.json":        ("manifest.json",        "application/manifest+json", 86400),
+}
+
+
+def _serve_static_root(name: str, media_type: str, max_age: int) -> Response:
+    """Read a file from app/static/ and return it with cache headers."""
+    path = Path(__file__).parent / "static" / name
+    return Response(
+        content=path.read_bytes(),
+        media_type=media_type,
+        headers={"Cache-Control": f"public, max-age={max_age}"},
+    )
+
+
+@app.get("/favicon.svg")
+def favicon_svg():
+    """Bracket-[w] mark, the panel brand distilled to a single character.
+    Phosphor on dark by default; the runtime favicon swap in
+    static/index.html (refreshFavicon) replaces this with a theme-tracked
+    data-URL after JS loads. This static file remains as the pre-JS
+    fallback for bookmarks, PWA install snapshots, and browsers that
+    fetch the favicon before parsing the document."""
+    f, mt, age = _STATIC_ROOT_ASSETS["/favicon.svg"]
+    return _serve_static_root(f, mt, age)
+
+
+@app.get("/apple-touch-icon.png")
+def apple_touch_icon():
+    """180x180 home-screen icon for iOS. Apple ignores SVG favicons
+    and won't render them on the home screen — must be a PNG.
+    Generated at build time by scripts/render-favicon-png.py. Theme-
+    fixed (phosphor on dark) intentionally: home-screen icons should
+    be brand-stable, not tracking the user's panel preferences."""
+    f, mt, age = _STATIC_ROOT_ASSETS["/apple-touch-icon.png"]
+    return _serve_static_root(f, mt, age)
+
+
+@app.get("/icon-192.png")
+def icon_192():
+    """192x192 PNG referenced by manifest.json for Android PWA icon."""
+    f, mt, age = _STATIC_ROOT_ASSETS["/icon-192.png"]
+    return _serve_static_root(f, mt, age)
+
+
+@app.get("/icon-512.png")
+def icon_512():
+    """512x512 PNG referenced by manifest.json. Used for Android PWA
+    icon and as the maskable variant (same image; we don't separately
+    pad for maskable safe area in v4.0 since the [w] mark already sits
+    well within the inner 80% of the canvas)."""
+    f, mt, age = _STATIC_ROOT_ASSETS["/icon-512.png"]
+    return _serve_static_root(f, mt, age)
+
+
+@app.get("/manifest.json")
+def manifest_json():
+    """Web app manifest. Lets Android Chrome surface a richer
+    'Add to Home Screen' flow with a proper icon, theme color, and
+    standalone display mode. Doesn't enable a one-tap install button
+    — that requires a service worker too, which is on the v4.1+
+    backlog. iOS Safari ignores most manifest fields; the apple-touch-
+    icon and apple-mobile-web-app-* meta tags carry that platform."""
+    f, mt, age = _STATIC_ROOT_ASSETS["/manifest.json"]
+    return _serve_static_root(f, mt, age)
 
 
 @app.get("/healthz")
