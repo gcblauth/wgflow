@@ -14,7 +14,7 @@ Run WireGuard, generate peer configs, manage per-peer ACLs, monitor live through
 
 <img width="1906" height="990" alt="image" src="https://github.com/user-attachments/assets/407067fd-1e2f-4aa8-986c-9743828275dc" />
 
-<img width="945" height="908" alt="image" src="https://github.com/user-attachments/assets/c253f7b9-00be-4f48-b5ca-6a6ae1950e67" />
+<img width="938" height="901" alt="image" src="https://github.com/user-attachments/assets/565504fd-67e2-41a5-8211-43df2f93b0f9" />
 
 
 
