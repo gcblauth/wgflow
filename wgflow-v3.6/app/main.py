@@ -72,36 +72,23 @@ def get_db() -> DB:
 
 def _row_to_peer_out(conn, row) -> PeerOut:
     acl_rows = conn.execute(
-        "SELECT cidr, port, proto, action, comment, alias_ref "
-        "FROM peer_acls WHERE peer_id = ? ORDER BY id",
+        "SELECT cidr, port, proto, action, comment FROM peer_acls WHERE peer_id = ? ORDER BY id",
         (row["id"],),
     ).fetchall()
-    entries = []
-    for r in acl_rows:
-        action = r["action"] if (r["action"] in ("allow", "deny")) else "allow"
-        comment = r["comment"] or ""
-        # v3.7: rows can be alias references (alias_ref column populated,
-        # cidr NULL) or literal CIDR rules (cidr populated, alias_ref NULL).
-        # The `alias_ref` column was added in v3.7 migration, so it may
-        # not exist on rows from pre-3.7 DBs that haven't gone through
-        # the schema reload — defensive lookup.
-        alias_ref = None
-        if "alias_ref" in r.keys():
-            alias_ref = r["alias_ref"]
-        if alias_ref:
-            entries.append(acl_mod.ACLAliasRef(
-                name=alias_ref,
-                action=action,
-                comment=comment,
-            ))
-        else:
-            entries.append(acl_mod.ACLEntry(
-                cidr=r["cidr"],
-                port=r["port"],
-                proto=r["proto"],
-                action=action,
-                comment=comment,
-            ))
+    entries = [
+        acl_mod.ACLEntry(
+            cidr=r["cidr"],
+            port=r["port"],
+            proto=r["proto"],
+            action=r["action"] if (r["action"] in ("allow", "deny")) else "allow",
+            # Comment may be NULL on rows from pre-3.6 DBs that haven't
+            # been touched since the column was added. Coerce to "" so
+            # downstream code (renderers, str()) doesn't have to handle
+            # None separately.
+            comment=r["comment"] or "",
+        )
+        for r in acl_rows
+    ]
     dns_val = row["dns"] if "dns" in row.keys() else None
     # has_private_key may be missing on rows from databases that haven't
     # run the 3.3 migration yet (defensive — startup migration should
@@ -141,98 +128,24 @@ def _load_all_peers_for_sync() -> List[wg.PeerConfig]:
     ]
 
 
-def _load_acl_alias_lookup(conn=None) -> dict:
-    """Read all ACL aliases from the DB and return a {name -> [ACLEntry]} map.
-
-    Body is stored as JSON in acl_aliases.body; we deserialize and
-    re-construct ACLEntry objects so the iptables generator can consume
-    them directly. Aliases are allow-only (the body's stored entries
-    have action='allow'); the deny semantics come from the alias usage.
-    """
-    if conn is None:
-        conn = get_db().conn
-    out: dict = {}
-    rows = conn.execute("SELECT name, body FROM acl_aliases").fetchall()
-    for r in rows:
-        try:
-            body_list = json.loads(r["body"])
-        except (json.JSONDecodeError, TypeError):
-            # Corrupt body — skip this alias so it doesn't crash the
-            # iptables apply path. Operator can fix on the aliases tab.
-            continue
-        entries = []
-        for item in body_list:
-            try:
-                entries.append(acl_mod.ACLEntry(
-                    cidr=item.get("cidr", ""),
-                    port=item.get("port"),
-                    proto=item.get("proto"),
-                    action="allow",   # always — see schema comment
-                    comment="",
-                ))
-            except Exception:
-                continue
-        out[r["name"]] = entries
-    return out
-
-
 def _load_peer_acls(peer_id: int) -> List[acl_mod.ACLEntry]:
-    """Return the FLATTENED ACLEntry list for iptables consumption.
-
-    Alias references in peer_acls (rows with alias_ref set) are
-    expanded via the alias table here, before the list reaches the
-    iptables generator. Missing aliases are silently skipped (the
-    operator-facing error happens at save time, not apply time —
-    we don't want a deleted alias to break startup replay).
-    """
     rows = get_db().conn.execute(
-        "SELECT cidr, port, proto, action, comment, alias_ref "
-        "FROM peer_acls WHERE peer_id = ? ORDER BY id",
+        "SELECT cidr, port, proto, action, comment FROM peer_acls WHERE peer_id = ? ORDER BY id",
         (peer_id,),
     ).fetchall()
-    items = []
-    for r in rows:
-        action = r["action"] if (r["action"] in ("allow", "deny")) else "allow"
-        comment = r["comment"] or ""
-        alias_ref = r["alias_ref"] if "alias_ref" in r.keys() else None
-        if alias_ref:
-            items.append(acl_mod.ACLAliasRef(
-                name=alias_ref, action=action, comment=comment,
-            ))
-        else:
-            items.append(acl_mod.ACLEntry(
-                cidr=r["cidr"],
-                port=r["port"],
-                proto=r["proto"],
-                action=action,
-                comment=comment,
-            ))
-
-    # Expand. Use the resilient mode (silently drop missing aliases) so
-    # a deleted alias doesn't break startup. Save-path validation
-    # (in update_peer_acl) catches the same case earlier and surfaces it.
-    alias_lookup = _load_acl_alias_lookup()
-    flat = []
-    for item in items:
-        if isinstance(item, acl_mod.ACLAliasRef):
-            body = alias_lookup.get(item.name)
-            if body is None:
-                # Skip — log somewhere? For now, silent. The peer's
-                # iptables chain will be slightly different from what
-                # the operator intended, but the WG tunnel still works.
-                # The aliases tab UI will flag the broken reference.
-                continue
-            for entry in body:
-                flat.append(acl_mod.ACLEntry(
-                    cidr=entry.cidr,
-                    port=entry.port,
-                    proto=entry.proto,
-                    action=item.action,
-                    comment=item.comment or entry.comment,
-                ))
-        else:
-            flat.append(item)
-    return flat
+    return [
+        acl_mod.ACLEntry(
+            cidr=r["cidr"],
+            port=r["port"],
+            proto=r["proto"],
+            # action can be NULL in pre-migration rows (SQLite ALTER TABLE
+            # ADD COLUMN only sets DEFAULT for new inserts, not existing rows).
+            # Treat NULL as "allow" to preserve the row's original intent.
+            action=r["action"] if (r["action"] in ("allow", "deny")) else "allow",
+            comment=r["comment"] or "",
+        )
+        for r in rows
+    ]
 
 
 def _replay_state_to_kernel() -> None:
@@ -590,32 +503,12 @@ def _create_peer_row(
         )
         peer_id = cur.lastrowid
         for e in acl_entries:
-            _insert_peer_acl_row(conn, peer_id, e)
+            conn.execute(
+                "INSERT INTO peer_acls (peer_id, cidr, port, proto, action, comment) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (peer_id, e.cidr, e.port, e.proto, e.action, e.comment or None),
+            )
     return peer_id
-
-
-def _insert_peer_acl_row(conn, peer_id: int, entry) -> None:
-    """Insert one peer_acls row from an ACLEntry or ACLAliasRef.
-
-    Centralised so the create-peer, update-acl, and import paths all
-    use the same shape and don't drift out of sync as the schema
-    evolves. Distinguishes the two row variants by entry type:
-      - ACLEntry      → cidr/port/proto populated, alias_ref NULL
-      - ACLAliasRef   → alias_ref populated, cidr/port/proto NULL
-    """
-    if isinstance(entry, acl_mod.ACLAliasRef):
-        conn.execute(
-            "INSERT INTO peer_acls (peer_id, cidr, port, proto, action, comment, alias_ref) "
-            "VALUES (?, NULL, NULL, NULL, ?, ?, ?)",
-            (peer_id, entry.action, entry.comment or None, entry.name),
-        )
-    else:
-        conn.execute(
-            "INSERT INTO peer_acls (peer_id, cidr, port, proto, action, comment, alias_ref) "
-            "VALUES (?, ?, ?, ?, ?, ?, NULL)",
-            (peer_id, entry.cidr, entry.port, entry.proto,
-             entry.action, entry.comment or None),
-        )
 
 
 def _apply_peer_to_kernel(peer_id: int) -> None:
@@ -820,55 +713,17 @@ def update_peer_acl(peer_id: int, body: ACLUpdate):
     except acl_mod.ACLParseError as e:
         raise HTTPException(422, str(e))
 
-    # v3.7: validate that any alias references actually resolve. Doing
-    # this at save-time (rather than apply-time) means the operator
-    # gets immediate feedback "alias @home_lan doesn't exist" when they
-    # type a typo, instead of a silent skip later.
-    alias_lookup = _load_acl_alias_lookup(conn)
-    for item in entries:
-        if isinstance(item, acl_mod.ACLAliasRef):
-            if item.name not in alias_lookup:
-                raise HTTPException(
-                    422,
-                    f"alias @{item.name} is not defined; "
-                    f"create it on the aliases tab before referencing it",
-                )
-
     with get_db().write() as c:
         c.execute("DELETE FROM peer_acls WHERE peer_id = ?", (peer_id,))
         for e in entries:
-            _insert_peer_acl_row(c, peer_id, e)
-        # Refresh the alias_refs index for this peer. We delete the
-        # whole peer's set first (cheap, scoped) and re-insert from the
-        # collected refs in the new ACL list.
-        c.execute("DELETE FROM acl_alias_refs WHERE peer_id = ?", (peer_id,))
-        for alias_name in acl_mod.collect_alias_refs(entries):
             c.execute(
-                "INSERT OR IGNORE INTO acl_alias_refs (alias_name, peer_id) "
-                "VALUES (?, ?)",
-                (alias_name, peer_id),
+                "INSERT INTO peer_acls (peer_id, cidr, port, proto, action, comment) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (peer_id, e.cidr, e.port, e.proto, e.action, e.comment or None),
             )
 
-    # Expand aliases for the iptables apply call. Pass the flattened
-    # ACLEntry list, not the raw heterogeneous parsed list. _load_peer_acls
-    # would do the same expansion if we re-loaded; doing it inline saves
-    # the round-trip.
-    flat_entries = []
-    for item in entries:
-        if isinstance(item, acl_mod.ACLAliasRef):
-            for body_entry in alias_lookup.get(item.name, []):
-                flat_entries.append(acl_mod.ACLEntry(
-                    cidr=body_entry.cidr,
-                    port=body_entry.port,
-                    proto=body_entry.proto,
-                    action=item.action,
-                    comment=item.comment or body_entry.comment,
-                ))
-        else:
-            flat_entries.append(item)
-
     peer_row = conn.execute("SELECT address FROM peers WHERE id = ?", (peer_id,)).fetchone()
-    ipt.apply_peer_acls(peer_id, flat_entries,
+    ipt.apply_peer_acls(peer_id, entries,
                         peer_address=peer_row["address"] if peer_row else "")
 
     row = conn.execute("SELECT * FROM peers WHERE id = ?", (peer_id,)).fetchone()
@@ -1028,11 +883,7 @@ def peer_qr(peer_id: int, dns: Optional[str] = None):
 
 
 @app.get("/api/peers/{peer_id}/install-script")
-def peer_install_script(
-    peer_id: int,
-    dns: Optional[str] = None,
-    passphrase: Optional[str] = None,
-):
+def peer_install_script(peer_id: int, dns: Optional[str] = None):
     """Return a Windows installer for this peer as an AES-256 encrypted zip.
 
     The zip contains a single .ps1 with the WireGuard config embedded as
@@ -1041,16 +892,11 @@ def peer_install_script(
     Optional `?dns=` query param overrides the DNS in the bundled config
     (same semantics as /config endpoint).
 
-    Optional `?passphrase=` (v3.7) lets the operator supply their own
-    encryption passphrase instead of the auto-generated Diceware one.
-    Server-side validation: minimum 12 characters. The UI is responsible
-    for the strength meter; this endpoint just enforces the floor.
-    Empty/missing → server generates a Diceware passphrase as before.
-
-    The passphrase (whether generated or operator-supplied) is returned
-    in the X-WGFlow-Passphrase response header so the UI can show it.
-    Operator communicates the passphrase to the recipient via a separate
-    channel (SMS, Signal, in person).
+    The passphrase is generated fresh on every download (8 Diceware words,
+    ~60 bits entropy) and returned in the X-WGFlow-Passphrase response
+    header so the UI can show it to the operator. Operator communicates
+    the passphrase to the recipient via a separate channel (SMS, Signal,
+    in person).
 
     Recipient extraction note: native Windows zip UI cannot extract AES-
     encrypted entries. Recipients need 7-Zip installed.
@@ -1070,27 +916,9 @@ def peer_install_script(
     except ValueError as e:
         raise HTTPException(500, f"could not render installer: {e}")
 
-    # v3.7: passphrase override. If the operator supplied one, validate
-    # it; otherwise generate a Diceware one as before. The 12-char floor
-    # is a hard bound — anything weaker dramatically reduces the
-    # security of the encrypted zip (which is potentially crossing
-    # untrusted channels: SMS, email, etc).
-    if passphrase is not None and passphrase.strip():
-        candidate = passphrase.strip()
-        if len(candidate) < 12:
-            raise HTTPException(
-                422, "passphrase must be at least 12 characters"
-            )
-        # Cap absurd lengths to prevent abuse — 256 chars is more than
-        # any sane password and stops a megabyte-string DoS attempt.
-        if len(candidate) > 256:
-            raise HTTPException(422, "passphrase too long (max 256)")
-        passphrase_value = candidate
-    else:
-        passphrase_value = installer_script.generate_passphrase()
-
+    passphrase = installer_script.generate_passphrase()
     zip_bytes, _inner = installer_script.package_install_zip(
-        safe_name, ps1_text, passphrase_value,
+        safe_name, ps1_text, passphrase,
     )
 
     return Response(
@@ -1102,7 +930,7 @@ def peer_install_script(
             # CORS-wise we're same-origin so exposing this header is fine; if
             # this app were ever served from a different origin from the UI,
             # we'd need Access-Control-Expose-Headers.
-            "X-WGFlow-Passphrase": passphrase_value,
+            "X-WGFlow-Passphrase": passphrase,
         },
     )
 
@@ -1995,94 +1823,6 @@ def set_polling_interval(body: dict):
 
 
 # ---------------------------------------------------------------------------
-# Clipboard timeout (v3.7)
-# ---------------------------------------------------------------------------
-# How long the UI waits before overwriting the clipboard after a sensitive
-# value is copied. 0 = disabled (just warn, don't overwrite). 1..300 sec
-# range enforced. Best-effort on the UI side — browsers may reject
-# clipboard writes outside of user gestures.
-
-_CLIPBOARD_MIN_SEC = 0
-_CLIPBOARD_MAX_SEC = 300
-
-
-@app.get("/api/server/clipboard")
-def get_clipboard_config():
-    conn = get_db().conn
-    row = conn.execute(
-        "SELECT value FROM network_settings WHERE key = 'clipboard_timeout_sec'"
-    ).fetchone()
-    raw = (row["value"] if row else "") or "30"
-    try:
-        val = int(raw)
-    except (TypeError, ValueError):
-        val = 30
-    if not (_CLIPBOARD_MIN_SEC <= val <= _CLIPBOARD_MAX_SEC):
-        val = 30
-    return {"timeout_sec": val}
-
-
-@app.put("/api/server/clipboard")
-def set_clipboard_config(body: dict):
-    val = body.get("timeout_sec")
-    try:
-        val = int(val)
-    except (TypeError, ValueError):
-        raise HTTPException(422, "timeout_sec must be an integer")
-    if not (_CLIPBOARD_MIN_SEC <= val <= _CLIPBOARD_MAX_SEC):
-        raise HTTPException(
-            422,
-            f"timeout_sec must be {_CLIPBOARD_MIN_SEC}..{_CLIPBOARD_MAX_SEC}",
-        )
-    with get_db().write() as conn:
-        conn.execute(
-            """INSERT INTO network_settings (key, value)
-               VALUES ('clipboard_timeout_sec', ?)
-               ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
-            (str(val),),
-        )
-    return {"timeout_sec": val}
-
-
-# ---------------------------------------------------------------------------
-# Private key reveal (v3.7)
-# ---------------------------------------------------------------------------
-# Returns the raw private key for a peer. Separate endpoint from the full
-# config so:
-#   1. The UI can guard reveal behind a confirmation/warning specifically
-#      about the key (rather than the broader config view).
-#   2. Audit logging (future) can distinguish "viewed full config" from
-#      "viewed bare private key" — different sensitivity.
-#
-# Auth: same session check as everything else. No extra confirmation
-# step on the server side — the UI is responsible for the warning.
-# Reasoning: confirmations on the server would require a multi-step
-# flow (issue token, then redeem) that doesn't add real security
-# against an authenticated session. The warning is for the operator's
-# benefit, not adversarial.
-
-@app.get("/api/peers/{peer_id}/private-key")
-def peer_private_key(peer_id: int):
-    """Return the bare private key for one peer.
-
-    Response shape: {"private_key": "..."} or 404 / 410.
-    Returns 410 (gone) if the peer was imported without a private key
-    (has_private_key = 0) — cleaner than 404 so the UI can distinguish.
-    """
-    conn = get_db().conn
-    row = conn.execute(
-        "SELECT private_key, has_private_key FROM peers WHERE id = ?",
-        (peer_id,),
-    ).fetchone()
-    if not row:
-        raise HTTPException(404, "peer not found")
-    has_pk = row["has_private_key"] if "has_private_key" in row.keys() else 1
-    if not has_pk or not row["private_key"]:
-        raise HTTPException(410, "private key not stored for this peer")
-    return {"private_key": row["private_key"]}
-
-
-# ---------------------------------------------------------------------------
 # Live status
 # ---------------------------------------------------------------------------
 
@@ -2221,251 +1961,6 @@ def peer_acl_hits(peer_id: int):
          "pkts": h.pkts, "bytes": h.bytes}
         for h in hits
     ]
-
-
-# ---------------------------------------------------------------------------
-# ACL aliases (v3.7) — named groups of CIDRs the operator can reference
-# from peer ACLs as `@name`. CRUD endpoints + ref counting.
-# ---------------------------------------------------------------------------
-
-# Validate alias names: lowercase letters, digits, underscores; 1-32
-# chars. Same rule as the parser regex; duplicated here for fast
-# server-side rejection without parser invocation.
-import re as _re
-_ALIAS_NAME_RE = _re.compile(r"^[a-z0-9_]{1,32}$")
-
-
-@app.get("/api/acl-aliases")
-def list_acl_aliases():
-    """Return all aliases with their bodies + reference counts.
-
-    Response shape:
-      [
-        {
-          "name": "home_lan",
-          "description": "main home network",
-          "body": [{"cidr": "192.168.0.0/16", "port": null, "proto": null}, ...],
-          "ref_count": 3,         # how many peers reference this alias
-          "ref_peer_ids": [3, 5, 12],
-        },
-        ...
-      ]
-    """
-    conn = get_db().conn
-    aliases = conn.execute(
-        "SELECT name, body, description FROM acl_aliases ORDER BY name"
-    ).fetchall()
-    out = []
-    for a in aliases:
-        try:
-            body_list = json.loads(a["body"])
-        except (json.JSONDecodeError, TypeError):
-            body_list = []
-        ref_rows = conn.execute(
-            "SELECT peer_id FROM acl_alias_refs WHERE alias_name = ? ORDER BY peer_id",
-            (a["name"],),
-        ).fetchall()
-        ref_peer_ids = [r["peer_id"] for r in ref_rows]
-        out.append({
-            "name": a["name"],
-            "description": a["description"] or "",
-            "body": body_list,
-            "ref_count": len(ref_peer_ids),
-            "ref_peer_ids": ref_peer_ids,
-        })
-    return out
-
-
-def _validate_alias_body(raw_body: str) -> List[acl_mod.ACLEntry]:
-    """Parse + validate an alias body string. Returns list of ACLEntry.
-
-    Body format is the same comma-separated ACL syntax as a peer's ACL,
-    but with two extra constraints:
-      - No deny entries (`!` prefix forbidden — aliases are allow-only;
-        deny semantics live on the alias usage)
-      - No nested aliases (`@other_name` forbidden — flat aliases only)
-
-    Raises HTTPException(422) on any violation.
-    """
-    try:
-        items = acl_mod.parse_list(raw_body)
-    except acl_mod.ACLParseError as e:
-        raise HTTPException(422, f"alias body parse error: {e}")
-    if not items:
-        raise HTTPException(422, "alias body must have at least one entry")
-
-    out = []
-    for item in items:
-        if isinstance(item, acl_mod.ACLAliasRef):
-            raise HTTPException(
-                422,
-                f"alias body cannot reference other aliases (@{item.name}); "
-                f"flatten by including its CIDRs directly",
-            )
-        if item.action == "deny":
-            raise HTTPException(
-                422,
-                f"alias body cannot contain deny rules (!{item.cidr}); "
-                f"deny semantics apply to the alias usage, not to its body",
-            )
-        out.append(item)
-    return out
-
-
-@app.post("/api/acl-aliases")
-def create_acl_alias(body: dict):
-    """Create a new alias.
-
-    Body: {"name": str, "description": str (optional), "body": str}
-    where `body` is a comma-separated list like a peer's ACL.
-
-    Conflicts (name already exists) → 409.
-    """
-    name = (body.get("name") or "").strip().lower()
-    description = (body.get("description") or "").strip()
-    raw_body = (body.get("body") or "").strip()
-
-    if not _ALIAS_NAME_RE.match(name):
-        raise HTTPException(
-            422,
-            "alias name must be 1-32 chars, lowercase letters/digits/underscore",
-        )
-    if len(description) > 200:
-        raise HTTPException(422, "description too long (max 200 chars)")
-
-    entries = _validate_alias_body(raw_body)
-
-    conn = get_db().conn
-    if conn.execute(
-        "SELECT 1 FROM acl_aliases WHERE name = ?", (name,)
-    ).fetchone():
-        raise HTTPException(409, f"alias @{name} already exists")
-
-    body_json = json.dumps([
-        {"cidr": e.cidr, "port": e.port, "proto": e.proto}
-        for e in entries
-    ])
-    with get_db().write() as c:
-        c.execute(
-            "INSERT INTO acl_aliases (name, body, description) VALUES (?, ?, ?)",
-            (name, body_json, description or None),
-        )
-    return {"ok": True, "name": name}
-
-
-@app.put("/api/acl-aliases/{name}")
-def update_acl_alias(name: str, body: dict):
-    """Update an existing alias's body and/or description.
-
-    The name itself is immutable — to rename, delete and recreate (and
-    update all referencing peers). Editing the body re-applies ACLs for
-    every referencing peer so iptables stays in sync with the new
-    expansion.
-    """
-    name = name.strip().lower()
-    if not _ALIAS_NAME_RE.match(name):
-        raise HTTPException(422, "invalid alias name in URL")
-
-    conn = get_db().conn
-    if not conn.execute(
-        "SELECT 1 FROM acl_aliases WHERE name = ?", (name,)
-    ).fetchone():
-        raise HTTPException(404, f"alias @{name} not found")
-
-    description = body.get("description")
-    raw_body = body.get("body")
-
-    updates = []
-    params = []
-    if description is not None:
-        if len(description) > 200:
-            raise HTTPException(422, "description too long (max 200 chars)")
-        updates.append("description = ?")
-        params.append(description.strip() or None)
-
-    affected_peers: List[int] = []
-    if raw_body is not None:
-        entries = _validate_alias_body(raw_body)
-        body_json = json.dumps([
-            {"cidr": e.cidr, "port": e.port, "proto": e.proto}
-            for e in entries
-        ])
-        updates.append("body = ?")
-        params.append(body_json)
-        # Find affected peers — they need iptables re-applied because
-        # the alias's expansion has changed.
-        affected_peers = [
-            r["peer_id"]
-            for r in conn.execute(
-                "SELECT peer_id FROM acl_alias_refs WHERE alias_name = ?",
-                (name,),
-            ).fetchall()
-        ]
-
-    if not updates:
-        return {"ok": True, "name": name}
-
-    params.append(name)
-    with get_db().write() as c:
-        c.execute(
-            f"UPDATE acl_aliases SET {', '.join(updates)} WHERE name = ?",
-            params,
-        )
-
-    # Re-apply iptables for every peer that references this alias.
-    # Cheap (per-peer chain flush + reapply); the alternative would be
-    # to wait until they save their own ACL again, but that leaves
-    # iptables stale meanwhile.
-    for pid in affected_peers:
-        peer_row = conn.execute(
-            "SELECT address FROM peers WHERE id = ? AND enabled = 1",
-            (pid,),
-        ).fetchone()
-        if peer_row:
-            ipt.apply_peer_acls(pid, _load_peer_acls(pid),
-                                peer_address=peer_row["address"])
-
-    return {"ok": True, "name": name, "reapplied_peers": affected_peers}
-
-
-@app.delete("/api/acl-aliases/{name}")
-def delete_acl_alias(name: str):
-    """Delete an alias. Refuses if any peer references it.
-
-    The operator must remove the @name from each peer's ACL first.
-    Force-delete is not provided — accidentally deleting an alias that
-    a peer's full-tunnel ACL depends on would silently change that
-    peer's iptables on next save (the alias would expand to nothing).
-    Better to make the operator do it explicitly.
-    """
-    name = name.strip().lower()
-    conn = get_db().conn
-    row = conn.execute(
-        "SELECT 1 FROM acl_aliases WHERE name = ?", (name,)
-    ).fetchone()
-    if not row:
-        raise HTTPException(404, f"alias @{name} not found")
-
-    refs = conn.execute(
-        "SELECT peer_id FROM acl_alias_refs WHERE alias_name = ?", (name,)
-    ).fetchall()
-    if refs:
-        peer_ids = [r["peer_id"] for r in refs]
-        # Look up names for a friendlier error.
-        names_rows = conn.execute(
-            f"SELECT id, name FROM peers WHERE id IN ({','.join('?' * len(peer_ids))})",
-            peer_ids,
-        ).fetchall()
-        peer_names = ", ".join(r["name"] for r in names_rows) or str(peer_ids)
-        raise HTTPException(
-            409,
-            f"alias @{name} is referenced by {len(peer_ids)} peer(s): "
-            f"{peer_names}. remove the reference from each peer first.",
-        )
-
-    with get_db().write() as c:
-        c.execute("DELETE FROM acl_aliases WHERE name = ?", (name,))
-    return {"ok": True, "deleted": name}
 
 
 @app.get("/api/peers/acl-stats")

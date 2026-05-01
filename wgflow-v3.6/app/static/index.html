@@ -2303,21 +2303,8 @@
     border-top: 1px solid var(--border);
   }
 
-  /* Passphrase strength meter (v3.7). Renders a horizontal bar that
-     fills proportionally to entropy bits, with a textual band label. */
-  .pass-strength-bar {
-    height: 4px;
-    background: var(--bg-2);
-    border: 1px solid var(--border);
-    overflow: hidden;
-  }
-  .pass-strength-fill {
-    height: 100%;
-    background: var(--fg-muted);
-    transition: width 0.15s ease, background 0.15s ease;
-  }
-
   /* Polling interval popup. Shown on right-click of the live indicator. */
+  .polling-popup {
     position: fixed;
     z-index: 9999;
     background: var(--bg-2);
@@ -2370,7 +2357,7 @@
         <span class="instance-chrome" id="instance-chrome">
           <span class="instance-sep">⟫</span><span class="instance-name" id="instance-name"></span><span class="instance-edit-btn" id="instance-edit-btn" title="edit instance name and color">⚙</span>
         </span>
-        <span class="sub">wireguard control panel · v3.7 · <span id="brand-author" class="brand-author" title="about wgflow">gcblauth</span> <span id="matrix-replay" class="matrix-replay-btn" title="replay matrix intro">◆</span></span>
+        <span class="sub">wireguard control panel · v3.6 · <span id="brand-author" class="brand-author" title="about wgflow">gcblauth</span> <span id="matrix-replay" class="matrix-replay-btn" title="replay matrix intro">◆</span></span>
       </div>
     </div>
     <div class="header-right">
@@ -2577,7 +2564,6 @@
           <div class="tab" data-tab="count">batch · count</div>
           <div class="tab" data-tab="migrate">migrate</div>
           <div class="tab" data-tab="dns-overrides">dns override</div>
-          <div class="tab" data-tab="aliases">acl aliases</div>
           <div class="tab" data-tab="server">server</div>
         </div>
 
@@ -2784,57 +2770,6 @@
           </div>
         </div>
 
-        <!-- ACL aliases tab (v3.7). Lets the operator define named CIDR
-             groups (e.g. @home_lan = 192.168.0.0/16) that can be referenced
-             from any peer's ACL. Editing the body of an alias re-applies
-             iptables for every peer that uses it.
-             Allow-only — no `!` inside an alias body. Deny semantics live
-             on the alias usage in the peer's ACL. No nesting. -->
-        <div class="tab-pane" data-pane="aliases" style="display:none">
-          <div class="hint" style="margin-bottom: 12px;">
-            named groups of CIDRs that can be referenced from any peer's ACL.
-            type <code>@name</code> in a peer's ACL to allow,
-            <code>!@name</code> to deny.
-            allow-only · no nested aliases.
-          </div>
-
-          <div id="aliases-list" style="margin-bottom: 16px; font-size: 12px;">
-            <div class="mono-dim" style="padding: 14px; text-align: center;">loading…</div>
-          </div>
-
-          <details style="margin-top: 10px;">
-            <summary style="cursor: pointer; color: var(--accent); font-size: 12px; padding: 6px 0;">
-              + create new alias
-            </summary>
-            <div style="padding: 10px 0 0 0; border-top: 1px solid var(--border); margin-top: 6px;">
-              <div class="field">
-                <label for="alias-new-name">name (without @)</label>
-                <input type="text" id="alias-new-name"
-                       placeholder="e.g. home_lan"
-                       autocomplete="off"
-                       maxlength="32"
-                       style="font-family: var(--f-mono);">
-                <div class="hint">1-32 chars · lowercase letters, digits, underscore</div>
-              </div>
-              <div class="field">
-                <label for="alias-new-desc">description (optional)</label>
-                <input type="text" id="alias-new-desc"
-                       placeholder="e.g. main home network"
-                       autocomplete="off"
-                       maxlength="200">
-              </div>
-              <div class="field">
-                <label for="alias-new-body">body</label>
-                <textarea id="alias-new-body" rows="4"
-                          placeholder="192.168.0.0/16, 192.168.1.0/24, 10.0.0.0/8:443/tcp"
-                          style="font-family: var(--f-mono); font-size: 12px;"></textarea>
-                <div class="hint">comma-separated · same syntax as peer ACLs · NO denies, NO nesting</div>
-              </div>
-              <button class="primary" id="alias-create-btn">create alias</button>
-            </div>
-          </details>
-        </div>
-
         <div class="tab-pane" data-pane="server" style="display:none">
           <div id="server-info" style="font-size: 12px; line-height: 1.7;">loading…</div>
 
@@ -2929,22 +2864,6 @@
                 installs an iptables rule that rewrites TCP SYN MSS values to fit the path MTU.
                 fixes TCP black-hole on paths where ICMP fragmentation-needed is filtered.
                 applied immediately on toggle · survives restarts.
-              </div>
-            </div>
-
-            <div class="field" style="margin-top: 14px;">
-              <label for="server-clipboard-timeout">clipboard auto-clear (sensitive copy)</label>
-              <div style="display: flex; gap: 8px; align-items: center;">
-                <input id="server-clipboard-timeout" type="number" min="0" max="300"
-                       autocomplete="off"
-                       style="width: 100px;">
-                <span class="mono-dim" style="font-size: 11px;">seconds (0 = disabled, max 300)</span>
-              </div>
-              <div class="hint" style="margin-top: 6px;">
-                after copying a private key or peer config, wgflow tries to
-                overwrite the clipboard with a single space after this many seconds.
-                browsers may reject the overwrite without a user gesture, so this
-                is best-effort — operator is still warned at copy time.
               </div>
             </div>
 
@@ -3135,7 +3054,7 @@
     <div class="about-brand">
       <span class="bracket">[</span>wgflow<span class="bracket">]</span>
     </div>
-    <div class="about-version">v3.7</div>
+    <div class="about-version">v3.6</div>
     <div class="about-line">wireguard control panel</div>
     <a class="about-link" href="https://github.com/gcblauth/wgflow" target="_blank" rel="noopener">
       github.com/gcblauth/wgflow
@@ -3875,7 +3794,6 @@ $$('.tab').forEach(t => {
     $$('.tab-pane').forEach(p => p.style.display = p.dataset.pane === name ? '' : 'none');
     if (name === 'server') loadServer();
     if (name === 'dns-overrides') loadDnsOverrides();
-    if (name === 'aliases') loadAliases();
   };
 });
 
@@ -3933,158 +3851,6 @@ $('#btn-add-override').onclick = async () => {
     toast(e.message, 'error');
   }
 };
-
-// -----------------------------------------------------------------------------
-// ACL aliases (v3.7)
-// -----------------------------------------------------------------------------
-// CRUD over /api/acl-aliases. Body editing triggers iptables re-apply
-// for every referencing peer (handled server-side). The alias list is
-// also cached in `_aclAliasesCache` for autocomplete + broken-ref
-// detection in the per-peer ACL editor.
-
-const _aclAliasesCache = {
-  byName: {},     // name -> alias object (matches server response shape)
-  loadedAt: 0,
-};
-
-async function loadAliases() {
-  const wrap = document.getElementById('aliases-list');
-  if (!wrap) return;
-  let aliases;
-  try {
-    aliases = await api('GET', '/api/acl-aliases');
-  } catch (e) {
-    wrap.innerHTML = `<div class="mono-dim" style="padding: 14px; text-align: center; color: var(--danger);">load failed: ${escape(e.message || '')}</div>`;
-    return;
-  }
-  // Refresh cache for the autocomplete consumer.
-  _aclAliasesCache.byName = {};
-  for (const a of aliases) {
-    _aclAliasesCache.byName[a.name] = a;
-  }
-  _aclAliasesCache.loadedAt = Date.now();
-
-  if (!aliases.length) {
-    wrap.innerHTML = '<div class="mono-dim" style="padding: 14px; text-align: center;">no aliases yet — create one below.</div>';
-    return;
-  }
-
-  wrap.innerHTML = aliases.map(a => `
-    <div class="alias-row" data-alias-name="${escape(a.name)}" style="border: 1px solid var(--border); margin-bottom: 8px; padding: 10px 12px;">
-      <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px;">
-        <div>
-          <span style="color: var(--accent); font-family: var(--f-display); font-weight: 500;">@${escape(a.name)}</span>
-          ${a.description ? `<span style="color: var(--fg-muted); font-size: 11px; margin-left: 8px; font-style: italic;">${escape(a.description)}</span>` : ''}
-        </div>
-        <div style="display: flex; gap: 6px;">
-          <span class="mono-dim" style="font-size: 10px;">${a.ref_count} peer${a.ref_count === 1 ? '' : 's'}</span>
-          <button class="ghost" data-alias-edit="${escape(a.name)}" title="edit">✎</button>
-          <button class="ghost danger icon" data-alias-del="${escape(a.name)}" title="delete">✕</button>
-        </div>
-      </div>
-      <div class="mono-dim" style="font-size: 11px; line-height: 1.5;">
-        ${a.body.map(e => {
-          const port = e.port ? `:${e.port}/${e.proto}` : '';
-          return `<span style="display: inline-block; padding: 2px 6px; margin: 2px; border: 1px solid var(--border);">${escape(e.cidr)}${port}</span>`;
-        }).join('')}
-      </div>
-    </div>
-  `).join('');
-
-  // Wire delete buttons.
-  $$('[data-alias-del]', wrap).forEach(btn => {
-    btn.onclick = async () => {
-      const name = btn.dataset.aliasDel;
-      const alias = _aclAliasesCache.byName[name];
-      if (alias && alias.ref_count > 0) {
-        toast(`@${name} is used by ${alias.ref_count} peer(s) — remove from peer ACLs first`, 'error');
-        return;
-      }
-      if (!confirm(`delete alias @${name}?`)) return;
-      try {
-        await api('DELETE', `/api/acl-aliases/${encodeURIComponent(name)}`);
-        toast(`@${name} deleted`);
-        loadAliases();
-      } catch (e) {
-        toast(e.message, 'error');
-      }
-    };
-  });
-
-  // Wire edit buttons.
-  $$('[data-alias-edit]', wrap).forEach(btn => {
-    btn.onclick = () => openAliasEditor(_aclAliasesCache.byName[btn.dataset.aliasEdit]);
-  });
-}
-
-function openAliasEditor(alias) {
-  if (!alias) return;
-  // Body re-stringification: round-trip through the comma-separated
-  // textual form the operator types. Server stores structured but the
-  // editor is a textbox — same as the peer ACL editor's shape.
-  const bodyText = alias.body.map(e => {
-    const port = e.port ? `:${e.port}/${e.proto}` : '';
-    return `${e.cidr}${port}`;
-  }).join(', ');
-
-  openModal(`edit alias · @${escape(alias.name)}`, `
-    <div class="field">
-      <label for="alias-edit-desc">description</label>
-      <input type="text" id="alias-edit-desc" value="${escape(alias.description || '')}"
-             autocomplete="off" maxlength="200">
-    </div>
-    <div class="field">
-      <label for="alias-edit-body">body</label>
-      <textarea id="alias-edit-body" rows="4"
-                style="font-family: var(--f-mono); font-size: 12px;">${escape(bodyText)}</textarea>
-      <div class="hint">comma-separated · NO denies, NO nesting</div>
-    </div>
-    <div class="hint" style="margin-bottom: 10px;">
-      ${alias.ref_count} peer${alias.ref_count === 1 ? '' : 's'} reference this alias.
-      saving will immediately re-apply iptables for ${alias.ref_count === 1 ? 'it' : 'them'}.
-    </div>
-    <button class="primary" id="alias-edit-save">save</button>
-  `);
-
-  $('#alias-edit-save').onclick = async () => {
-    const description = $('#alias-edit-desc').value.trim();
-    const body = $('#alias-edit-body').value.trim();
-    try {
-      const r = await api('PUT', `/api/acl-aliases/${encodeURIComponent(alias.name)}`, {
-        description, body,
-      });
-      $('#modal').classList.remove('show');
-      toast(`@${alias.name} updated · ${(r.reapplied_peers || []).length} peer${(r.reapplied_peers || []).length === 1 ? '' : 's'} re-applied`);
-      loadAliases();
-    } catch (e) {
-      toast(e.message, 'error');
-    }
-  };
-}
-
-// Wire create button. Button exists in the static HTML; the handler is
-// set when the aliases tab is first opened.
-document.addEventListener('click', async (ev) => {
-  const t = ev.target;
-  if (t.id !== 'alias-create-btn') return;
-  const name = ($('#alias-new-name').value || '').trim().toLowerCase();
-  const description = ($('#alias-new-desc').value || '').trim();
-  const body = ($('#alias-new-body').value || '').trim();
-  if (!name || !body) {
-    toast('name and body are required', 'error');
-    return;
-  }
-  try {
-    await api('POST', '/api/acl-aliases', { name, description, body });
-    $('#alias-new-name').value = '';
-    $('#alias-new-desc').value = '';
-    $('#alias-new-body').value = '';
-    toast(`@${name} created`);
-    loadAliases();
-  } catch (e) {
-    toast(e.message, 'error');
-  }
-});
 
 // -----------------------------------------------------------------------------
 // forms
@@ -4427,9 +4193,9 @@ $('#peers-tbody').addEventListener('click', async (ev) => {
 function openActionsMenu(peer) {
   openModal(`actions · ${escape(peer.name)}`, `
     <div class="action-grid">
-      <button class="action-tile" data-act="cfg-view" data-id="${peer.id}">
+      <button class="action-tile" data-act="cfg" data-id="${peer.id}">
         <div class="action-tile-title">conf</div>
-        <div class="action-tile-sub">view text · then download</div>
+        <div class="action-tile-sub">download .conf for manual import</div>
       </button>
       <button class="action-tile" data-act="qr" data-id="${peer.id}">
         <div class="action-tile-title">qr</div>
@@ -4442,10 +4208,6 @@ function openActionsMenu(peer) {
       <button class="action-tile" data-act="acl" data-id="${peer.id}">
         <div class="action-tile-title">acl</div>
         <div class="action-tile-sub">edit allowed destinations</div>
-      </button>
-      <button class="action-tile" data-act="key" data-id="${peer.id}">
-        <div class="action-tile-title">private key</div>
-        <div class="action-tile-sub">⚠ reveal · sensitive</div>
       </button>
     </div>
   `);
@@ -4462,75 +4224,18 @@ function openActionsMenu(peer) {
       // Defer one tick so the modal close animation doesn't overlap
       // with another modal opening (qr / acl).
       setTimeout(() => {
-        if (act === 'cfg-view') openConfViewer(peer);
+        if (act === 'cfg') location.href = `/api/peers/${id}/config`;
         else if (act === 'qr')  showQR(id, peer.name);
         else if (act === 'ps1') downloadInstallerZip(id);
         else if (act === 'acl') openAclEditor(peer);
-        else if (act === 'key') openPrivateKeyViewer(peer);
       }, 50);
     };
   });
 }
 
-/* Show the peer's private key with warnings + auto-clear on copy.
-   v3.7. */
-async function openPrivateKeyViewer(peer) {
-  // First fetch the key. May fail with 410 if peer was imported without
-  // a private key — defensive copy below.
-  let key;
-  try {
-    const r = await fetch(`/api/peers/${peer.id}/private-key`, {
-      credentials: 'same-origin',
-    });
-    if (r.status === 410) {
-      toast('this peer was imported without a private key', 'warn');
-      return;
-    }
-    if (!r.ok) throw new Error('http ' + r.status);
-    const data = await r.json();
-    key = data.private_key;
-  } catch (e) {
-    toast('could not load key: ' + (e.message || ''), 'error');
-    return;
-  }
-
-  openModal(`private key · ${escape(peer.name)}`, `
-    <div style="font-size: 13px; line-height: 1.6;">
-      <div class="hint" style="margin-bottom: 12px; color: var(--danger); line-height: 1.5;">
-        ⚠ this is the peer's <strong>WireGuard private key</strong>.
-        anyone holding it can impersonate this peer. don't paste into
-        chat, screenshots, or untrusted tools. clipboard auto-clears
-        after the timeout configured in your settings.
-      </div>
-      <div style="background: var(--bg-2); border: 1px solid var(--border); padding: 12px; word-break: break-all; font-family: var(--f-mono); font-size: 12px;" id="key-text">${escape(key)}</div>
-      <div style="display: flex; gap: 10px; margin-top: 14px;">
-        <button class="primary" id="key-copy">copy to clipboard</button>
-      </div>
-    </div>
-  `);
-  $('#key-copy').onclick = () => secureClipboardWrite(key, 'private key copied');
-}
-
 // Extracted from the inline data-acl handler so the actions modal can
 // reuse it. Behaviour is unchanged.
 function openAclEditor(peer) {
-  // v3.7: ensure the alias cache is fresh so preview can validate
-  // @name references without round-tripping per keystroke. Fire and
-  // forget — if the load is still in flight when the user starts
-  // typing, the preview will just temporarily mark all aliases as
-  // broken; once the load resolves, the next render will be correct.
-  if (Date.now() - (_aclAliasesCache.loadedAt || 0) > 5000) {
-    api('GET', '/api/acl-aliases').then(aliases => {
-      _aclAliasesCache.byName = {};
-      for (const a of aliases) _aclAliasesCache.byName[a.name] = a;
-      _aclAliasesCache.loadedAt = Date.now();
-      // Trigger a re-render if the editor is still open.
-      const ed = $('#acl-editor');
-      if (ed && typeof renderAclPreview === 'function') {
-        renderAclPreview(ed.value);
-      }
-    }).catch(() => { /* offline / pre-3.7 server — leave cache empty */ });
-  }
   openModal(`edit acl · ${escape(peer.name)}`, `
     <div class="field" style="margin-bottom: 8px;">
       <label>acl entries (one per line)</label>
@@ -4539,14 +4244,13 @@ function openAclEditor(peer) {
         ip / cidr / ip:port/proto · prefix <code>!</code> to
         <span style="color: var(--danger); font-weight: 600;">deny</span>
         (e.g. <code>!192.168.1.0/24</code>) — any deny triggers full-tunnel mode.
-        <br>add <code># comment</code> after a rule for a human label.
-        <br>v3.7: type <code>@alias_name</code> to reference a defined alias
-        (manage on the "acl aliases" tab) — e.g. <code>@home_lan</code> or <code>!@office_lan</code>.
+        <br>add <code># comment</code> after a rule for a human label
+        (e.g. <code>192.168.50.0/24 # office vlan</code>) — comments persist
+        and show in the live peers + acl stats views.
       </div>
     </div>
     <div id="acl-preview" style="margin-bottom: 12px; display: flex; flex-wrap: wrap; gap: 4px; min-height: 24px;"></div>
     <div id="acl-mode-hint" style="font-size: 11px; margin-bottom: 12px; color: var(--fg-muted);"></div>
-    <div id="acl-alias-warnings" style="font-size: 11px; margin-bottom: 12px; color: var(--danger);"></div>
     <button class="primary" id="acl-save">save acl</button>
   `);
 
@@ -4554,7 +4258,6 @@ function openAclEditor(peer) {
     const lines = val.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
     const preview = $('#acl-preview');
     const modeEl  = $('#acl-mode-hint');
-    const aliasWarnEl = $('#acl-alias-warnings');
     if (!preview) return;
 
     // Strip the comment portion for deny-counting; the deny prefix
@@ -4563,57 +4266,20 @@ function openAclEditor(peer) {
     const dc = lines.filter(l => ruleOf(l).startsWith('!')).length;
     const denyLines = lines.filter(l => ruleOf(l).startsWith('!'));
 
-    // v3.7: detect alias references and check against the cache. Any
-    // missing alias produces a warning at the bottom (not a blocker;
-    // server will reject save with a clearer error if the operator
-    // tries to commit an unresolved reference).
-    const aliasRefs = [];
-    const brokenRefs = [];
-    const isAliasRef = (rule) => /^!?@/.test(rule);
-    const aliasNameOf = (rule) => rule.replace(/^!?@/, '').toLowerCase();
-    for (const line of lines) {
-      const rule = ruleOf(line);
-      if (isAliasRef(rule)) {
-        const name = aliasNameOf(rule);
-        aliasRefs.push(name);
-        if (_aclAliasesCache.byName && !_aclAliasesCache.byName[name]) {
-          brokenRefs.push(name);
-        }
-      }
-    }
-
     preview.innerHTML = lines.map(line => {
       const rulePart = ruleOf(line);
       const commentPart = line.includes('#') ? line.substring(line.indexOf('#') + 1).trim() : '';
       const isDeny = rulePart.startsWith('!');
-      const isAlias = isAliasRef(rulePart);
-      // Visual distinction for aliases: dashed border + accent-blue color.
-      // Deny prefix on alias still uses the danger color for the border.
-      let style;
-      if (isAlias) {
-        const borderColor = isDeny ? 'var(--danger)' : 'var(--accent-blue)';
-        const textColor   = isDeny ? 'var(--danger)' : 'var(--accent-blue)';
-        const name = aliasNameOf(rulePart);
-        const isBroken = !_aclAliasesCache.byName || !_aclAliasesCache.byName[name];
-        style = `border: 1px dashed ${isBroken ? 'var(--warn)' : borderColor}; color: ${isBroken ? 'var(--warn)' : textColor}; background: transparent; padding: 2px 8px; font-size: 11px; font-family: var(--f-body);`;
-      } else {
-        style = isDeny
-          ? 'border: 1px solid var(--danger); color: var(--danger); background: transparent; padding: 2px 8px; font-size: 11px; font-family: var(--f-body);'
-          : 'border: 1px solid var(--accent); color: var(--accent); background: transparent; padding: 2px 8px; font-size: 11px; font-family: var(--f-body);';
-      }
+      const style  = isDeny
+        ? 'border: 1px solid var(--danger); color: var(--danger); background: transparent; padding: 2px 8px; font-size: 11px; font-family: var(--f-body);'
+        : 'border: 1px solid var(--accent); color: var(--accent); background: transparent; padding: 2px 8px; font-size: 11px; font-family: var(--f-body);';
+      // Render rule and comment together; the comment is muted within
+      // the chip via opacity so the rule reads as primary.
       const commentHtml = commentPart
         ? `<span style="opacity: 0.55; margin-left: 6px; font-style: italic;">— ${escape(commentPart)}</span>`
         : '';
       return `<span style="${style}">${escape(rulePart)}${commentHtml}</span>`;
     }).join('');
-
-    if (aliasWarnEl) {
-      if (brokenRefs.length) {
-        aliasWarnEl.innerHTML = `⚠ undefined alias${brokenRefs.length > 1 ? 'es' : ''}: ${brokenRefs.map(n => '@' + escape(n)).join(', ')} — create on "acl aliases" tab before saving`;
-      } else {
-        aliasWarnEl.innerHTML = '';
-      }
-    }
 
     if (modeEl) {
       const hints = [];
@@ -4686,28 +4352,15 @@ function openAclEditor(peer) {
    location.href trick because we need to read the X-WGFlow-Passphrase
    response header — so this path uses fetch, builds a blob URL, and
    triggers the download programmatically. After the download, surface
-   the passphrase modal.
-
-   v3.7: prompts the operator first, allowing them to either keep the
-   auto-generated Diceware passphrase or supply their own (12+ chars). */
+   the passphrase modal. */
 async function downloadInstallerZip(peerId) {
   const peer = peersDB.find(p => p.id == peerId);
   const peerName = peer ? peer.name : `peer-${peerId}`;
-  // Step 1: prompt. Resolves to either null (auto-generate) or a string
-  // (operator-supplied passphrase, already validated client-side).
-  const customPass = await promptInstallerPassphrase(peerName);
-  if (customPass === false) return;   // operator cancelled
-
   toast('preparing encrypted installer…');
   try {
-    // Pass the custom passphrase as a query string so it round-trips
-    // through the existing GET endpoint. URL-encode in case operators
-    // pick exotic characters.
-    let url = `/api/peers/${peerId}/install-script`;
-    if (customPass) {
-      url += `?passphrase=${encodeURIComponent(customPass)}`;
-    }
-    const r = await fetch(url, { credentials: 'same-origin' });
+    const r = await fetch(`/api/peers/${peerId}/install-script`, {
+      credentials: 'same-origin',
+    });
     if (!r.ok) {
       const data = await r.json().catch(() => ({}));
       throw new Error(data.detail || ('download failed: ' + r.status));
@@ -4716,253 +4369,31 @@ async function downloadInstallerZip(peerId) {
     const blob = await r.blob();
 
     // Trigger download.
-    const blobUrl = URL.createObjectURL(blob);
+    const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     const safe = peerName.replace(/[^a-zA-Z0-9_-]/g, '_');
-    a.href = blobUrl;
+    a.href = url;
     a.download = `${safe}-install.zip`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    URL.revokeObjectURL(blobUrl);
+    URL.revokeObjectURL(url);
 
     // Show the passphrase modal so the operator can communicate it.
-    showPassphraseModal(peerName, passphrase, !!customPass);
+    showPassphraseModal(peerName, passphrase);
   } catch (e) {
     toast(e.message, 'error');
   }
 }
 
-/* Prompt for installer passphrase. Returns:
-     - null  → use auto-generated
-     - false → cancelled
-     - string → operator-supplied (validated to 12+ chars) */
-function promptInstallerPassphrase(peerName) {
-  return new Promise((resolve) => {
-    openModal(`installer passphrase · ${escape(peerName)}`, `
-      <div style="font-size: 13px; line-height: 1.6;">
-        <p style="margin-top: 0;">
-          The installer zip is AES-encrypted with a passphrase. Choose
-          how to set it:
-        </p>
-        <div style="display: flex; flex-direction: column; gap: 12px;">
-          <label style="display: flex; gap: 10px; align-items: center; cursor: pointer;">
-            <input type="radio" name="pass-mode" value="auto" checked>
-            <span><strong>auto-generate</strong> · 8 Diceware words, ~100 bits entropy (recommended)</span>
-          </label>
-          <label style="display: flex; gap: 10px; align-items: center; cursor: pointer;">
-            <input type="radio" name="pass-mode" value="manual">
-            <span><strong>type my own</strong> · 12 character minimum</span>
-          </label>
-        </div>
-
-        <div id="pass-manual-fields" style="display: none; margin-top: 14px;">
-          <div class="field">
-            <label for="pass-input">passphrase</label>
-            <input type="text" id="pass-input" autocomplete="off"
-                   placeholder="at least 12 characters"
-                   style="font-family: var(--f-mono); width: 100%;">
-            <div id="pass-strength" class="pass-strength" style="margin-top: 8px;">
-              <div class="pass-strength-bar"><div class="pass-strength-fill" style="width: 0%"></div></div>
-              <div class="pass-strength-label" style="font-size: 11px; color: var(--fg-muted); margin-top: 4px;">
-                enter a passphrase
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div style="display: flex; gap: 10px; margin-top: 18px;">
-          <button class="primary" id="pass-confirm">create installer</button>
-          <button class="ghost" id="pass-cancel">cancel</button>
-        </div>
-      </div>
-    `);
-
-    const radios = $$('input[name="pass-mode"]', $('#modal'));
-    const manualFields = $('#pass-manual-fields');
-    const input = $('#pass-input');
-    const strengthLabel = $('.pass-strength-label', $('#modal'));
-    const strengthFill  = $('.pass-strength-fill', $('#modal'));
-
-    const updateMode = () => {
-      const mode = $$('input[name="pass-mode"]:checked', $('#modal'))[0]?.value || 'auto';
-      manualFields.style.display = (mode === 'manual') ? 'block' : 'none';
-      if (mode === 'manual') input.focus();
-    };
-    radios.forEach(r => r.addEventListener('change', updateMode));
-
-    // Strength meter. We use a simple heuristic: bits of entropy ≈
-    // length × log2(charset_size). This isn't a real password-strength
-    // analyzer but it's better than length-only and fast. The five
-    // bands (very weak / weak / fair / strong / very strong) match the
-    // common visual convention.
-    const computeStrength = (s) => {
-      if (!s) return { bits: 0, band: 'enter a passphrase', color: 'var(--fg-muted)', pct: 0 };
-      let charset = 0;
-      if (/[a-z]/.test(s)) charset += 26;
-      if (/[A-Z]/.test(s)) charset += 26;
-      if (/[0-9]/.test(s)) charset += 10;
-      if (/[^a-zA-Z0-9]/.test(s)) charset += 32;
-      const bits = s.length * Math.log2(charset || 1);
-      let band, color, pct;
-      if (bits < 30)      { band = 'very weak';    color = 'var(--danger)';    pct = 15; }
-      else if (bits < 50) { band = 'weak';         color = 'var(--warn)';      pct = 35; }
-      else if (bits < 70) { band = 'fair';         color = 'var(--accent-d)';  pct = 60; }
-      else if (bits < 90) { band = 'strong';       color = 'var(--accent)';    pct = 80; }
-      else                { band = 'very strong';  color = 'var(--accent)';    pct = 100; }
-      return { bits, band, color, pct };
-    };
-    if (input) {
-      input.addEventListener('input', () => {
-        const v = input.value;
-        const s = computeStrength(v);
-        strengthFill.style.width = `${s.pct}%`;
-        strengthFill.style.background = s.color;
-        const lenNote = v.length < 12 ? ` · ${12 - v.length} more chars needed` : '';
-        strengthLabel.textContent = `${s.band} · ~${Math.round(s.bits)} bits${lenNote}`;
-        strengthLabel.style.color = s.color;
-      });
-    }
-
-    const cleanup = () => $('#modal').classList.remove('show');
-
-    $('#pass-cancel').onclick = () => { cleanup(); resolve(false); };
-
-    $('#pass-confirm').onclick = () => {
-      const mode = $$('input[name="pass-mode"]:checked', $('#modal'))[0]?.value || 'auto';
-      if (mode === 'auto') { cleanup(); resolve(null); return; }
-      const v = input.value || '';
-      if (v.length < 12) {
-        toast('passphrase must be at least 12 characters', 'error');
-        input.focus();
-        return;
-      }
-      cleanup();
-      resolve(v);
-    };
-  });
-}
-
-/* View the peer .conf as plain text in a modal with copy + download
-   buttons. The .conf contains the peer's private key in plain text,
-   so it's flagged with the same security warnings as the private-key
-   reveal flow. v3.7. */
-async function openConfViewer(peer) {
-  let confText;
-  try {
-    const r = await fetch(`/api/peers/${peer.id}/config`, {
-      credentials: 'same-origin',
-    });
-    if (!r.ok) {
-      throw new Error('fetch failed: ' + r.status);
-    }
-    confText = await r.text();
-  } catch (e) {
-    toast('could not load config: ' + e.message, 'error');
-    return;
-  }
-
-  openModal(`peer config · ${escape(peer.name)}`, `
-    <div style="font-size: 12px;">
-      <div class="hint" style="margin-bottom: 10px; color: var(--warn); line-height: 1.5;">
-        ⚠ this config contains the peer's private key in plain text.
-        copying or screenshotting puts it on your clipboard / disk.
-        prefer "qr" or the encrypted "ps1 zip" for distribution.
-      </div>
-      <pre id="conf-viewer-text" style="background: var(--bg-2); border: 1px solid var(--border); padding: 12px; max-height: 360px; overflow: auto; font-size: 11px; line-height: 1.5; margin: 0; white-space: pre;">${escape(confText)}</pre>
-      <div style="display: flex; gap: 10px; margin-top: 14px;">
-        <button class="primary" id="conf-copy">copy to clipboard</button>
-        <button class="ghost" id="conf-download">download .conf</button>
-      </div>
-    </div>
-  `);
-
-  $('#conf-copy').onclick = () => secureClipboardWrite(confText, 'config copied');
-  $('#conf-download').onclick = () => {
-    const blob = new Blob([confText], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    const safe = peer.name.replace(/[^a-zA-Z0-9_-]/g, '_');
-    a.href = url;
-    a.download = `${safe}.conf`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
-}
-
-/* Secure-ish clipboard write for sensitive values (private keys, peer
-   configs). Behaviour:
-     1. Write to clipboard via the modern API, fall back to execCommand
-     2. Show a toast warning that the value is sensitive
-     3. After the operator-configured timeout, overwrite the clipboard
-        with a single space — best-effort: browsers may reject
-        out-of-gesture clipboard writes, in which case the timeout
-        silently fails (still warned at copy time).
-   The timeout is configurable via /api/server/clipboard (1..300s,
-   default 30s; 0 disables auto-clear). */
-async function secureClipboardWrite(text, successMessage) {
-  let wrote = false;
-  try {
-    await navigator.clipboard.writeText(text);
-    wrote = true;
-  } catch (_) {
-    // Fallback for older browsers / non-HTTPS origins.
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.select();
-    try { document.execCommand('copy'); wrote = true; } catch (_) {}
-    document.body.removeChild(ta);
-  }
-  if (!wrote) {
-    toast('clipboard unavailable — copy by hand', 'warn');
-    return;
-  }
-  // Configurable auto-clear delay. Hydrated at boot; falls back to 30s.
-  const timeoutSec = (typeof _clipboardConfig !== 'undefined' && _clipboardConfig.timeoutSec) || 30;
-  if (timeoutSec === 0) {
-    toast(`${successMessage} · ⚠ contains a secret · clipboard NOT auto-cleared`, 'warn');
-    return;
-  }
-  toast(`${successMessage} · ⚠ contains a secret · clipboard clears in ${timeoutSec}s`, 'warn');
-  setTimeout(async () => {
-    // Best-effort overwrite. May fail without a user gesture; that's
-    // okay, we warned the operator at copy time.
-    try {
-      await navigator.clipboard.writeText(' ');
-    } catch (_) {
-      // Silent — the API rejected; nothing else we can do here.
-      // The operator was warned and the clipboard still holds the
-      // sensitive text. This is a known browser limitation, not a bug.
-    }
-  }, timeoutSec * 1000);
-}
-
-// Clipboard timeout config — hydrated from /api/server/clipboard at boot.
-const _clipboardConfig = { timeoutSec: 30 };
-async function loadClipboardConfig() {
-  try {
-    const cfg = await api('GET', '/api/server/clipboard');
-    if (cfg && typeof cfg.timeout_sec === 'number') {
-      _clipboardConfig.timeoutSec = cfg.timeout_sec;
-    }
-  } catch (_) { /* pre-3.7 server, keep default */ }
-}
-
-function showPassphraseModal(peerName, passphrase, wasManual) {
-  const note = wasManual
-    ? `Encrypted installer downloaded as <code>${escape(peerName)}-install.zip</code>.
-       This zip is encrypted with the passphrase <em>you provided</em>.`
-    : `Encrypted installer downloaded as <code>${escape(peerName)}-install.zip</code>.
-       Email the zip; share the passphrase via a separate channel
-       (SMS, Signal, in person — <em>not</em> the same email).`;
+function showPassphraseModal(peerName, passphrase) {
   openModal(`installer ready · ${escape(peerName)}`, `
     <div style="font-size: 13px; line-height: 1.6;">
-      <p style="margin-top: 0;">${note}</p>
+      <p style="margin-top: 0;">
+        Encrypted installer downloaded as <code>${escape(peerName)}-install.zip</code>.
+        Email the zip; share the passphrase via a separate channel
+        (SMS, Signal, in person — <em>not</em> the same email).
+      </p>
       <div class="passphrase-box">
         <code id="passphrase-text">${escape(passphrase)}</code>
         <button class="ghost icon" id="passphrase-copy" title="copy to clipboard">⎘</button>
@@ -4976,8 +4407,22 @@ function showPassphraseModal(peerName, passphrase, wasManual) {
       </div>
     </div>
   `);
-  $('#passphrase-copy').onclick = () =>
-    secureClipboardWrite(passphrase, 'passphrase copied');
+  $('#passphrase-copy').onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(passphrase);
+      toast('passphrase copied');
+    } catch (_) {
+      // clipboard API requires HTTPS in some browsers / origins; fall back
+      // to a select+execCommand which is universally supported on http.
+      const r = document.createRange();
+      r.selectNode($('#passphrase-text'));
+      window.getSelection().removeAllRanges();
+      window.getSelection().addRange(r);
+      try { document.execCommand('copy'); toast('passphrase copied'); }
+      catch (_) { toast('clipboard unavailable — copy by hand', 'warn'); }
+      window.getSelection().removeAllRanges();
+    }
+  };
 }
 
 $('#refresh-btn').onclick = loadPeers;
@@ -8341,51 +7786,6 @@ async function loadTunnelSettings() {
       clampInput.checked = !clampInput.checked;
     }
   });
-
-  // v3.7: clipboard auto-clear timeout. Saves on blur or Enter.
-  // Loads its own value on tab activation; pulls from /api/server/clipboard.
-  const clipInput = document.getElementById('server-clipboard-timeout');
-  if (clipInput) {
-    let _lastClip = '';
-    const loadClip = async () => {
-      try {
-        const cfg = await api('GET', '/api/server/clipboard');
-        if (cfg && typeof cfg.timeout_sec === 'number') {
-          clipInput.value = String(cfg.timeout_sec);
-          _lastClip = clipInput.value;
-        }
-      } catch (_) {}
-    };
-    const commitClip = async () => {
-      const v = clipInput.value.trim();
-      if (v === _lastClip) return;
-      const n = parseInt(v, 10);
-      if (Number.isNaN(n) || n < 0 || n > 300) {
-        if (typeof toast === 'function') toast('clipboard timeout must be 0..300', 'error');
-        clipInput.value = _lastClip;
-        return;
-      }
-      try {
-        await api('PUT', '/api/server/clipboard', { timeout_sec: n });
-        _lastClip = clipInput.value;
-        // Update the live in-memory config so subsequent copies use it.
-        if (typeof _clipboardConfig !== 'undefined') {
-          _clipboardConfig.timeoutSec = n;
-        }
-        if (typeof toast === 'function') {
-          toast(n === 0 ? 'clipboard auto-clear disabled' : `clipboard clears after ${n}s`);
-        }
-      } catch (e) {
-        if (typeof toast === 'function') toast('save failed: ' + (e.message || ''), 'error');
-        clipInput.value = _lastClip;
-      }
-    };
-    clipInput.addEventListener('blur', commitClip);
-    clipInput.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Enter') { ev.preventDefault(); clipInput.blur(); }
-    });
-    setTimeout(loadClip, 250);
-  }
 })();
 
 // ---------------------------------------------------------------------------
@@ -8671,10 +8071,6 @@ async function reorderApplyFromConfig() {
       minimizeInjectButtons();
       minimizeApplyFromConfig();
       liveIconLoadConfig();
-      // v3.7: clipboard timeout config — used by secureClipboardWrite
-      // to know how long to wait before overwriting the clipboard
-      // after a sensitive value (private key, peer config) is copied.
-      loadClipboardConfig();
 
       // Reset-to-default button. Sends an empty order array to the
       // server, which clears the override; on next page load the
@@ -8890,11 +8286,6 @@ function liveIconShowPollingPopup(anchor) {
   liveIconHidePopup();
   const el = document.createElement('div');
   el.className = 'polling-popup';
-  // Two sliders now (v3.7): polling interval AND clipboard auto-clear
-  // timeout. Both live here because they're "background timer" config
-  // and don't deserve their own surface elsewhere. Clipboard timeout
-  // 0 disables auto-clear (operator opts out, accepts the risk).
-  const cbSec = (typeof _clipboardConfig !== 'undefined' && _clipboardConfig.timeoutSec) || 30;
   el.innerHTML = `
     <label>polling interval</label>
     <div class="row">
@@ -8902,19 +8293,10 @@ function liveIconShowPollingPopup(anchor) {
              value="${_liveIconState.pollIntervalMs}">
       <span class="value" id="polling-value">${_liveIconState.pollIntervalMs}ms</span>
     </div>
-    <div class="hint" style="margin-bottom: 14px;">
-      ACL stats, DNS recent, iptables modal.<br>
-      lower = more responsive, higher CPU + iptables exec cost.
-    </div>
-
-    <label>clipboard auto-clear</label>
-    <div class="row">
-      <input type="range" id="clipboard-slider" min="0" max="120" step="10" value="${cbSec}">
-      <span class="value" id="clipboard-value">${cbSec === 0 ? 'off' : cbSec + 's'}</span>
-    </div>
     <div class="hint">
-      after viewing private keys / peer.conf, overwrite clipboard.<br>
-      0 = disable auto-clear · best-effort (browsers may refuse).
+      affects ACL stats, DNS recent, iptables modal.<br>
+      lower = more responsive, higher CPU + iptables exec cost.<br>
+      saves on release.
     </div>
   `;
   document.body.appendChild(el);
@@ -8925,6 +8307,9 @@ function liveIconShowPollingPopup(anchor) {
 
   const slider = document.getElementById('polling-slider');
   const valueEl = document.getElementById('polling-value');
+  // Live-update the value display as the user drags. Don't PUT on
+  // every tick — that would hammer the server during a drag. We save
+  // on `change` (which fires when the user releases the slider).
   slider.addEventListener('input', () => {
     valueEl.textContent = `${slider.value}ms`;
   });
@@ -8933,6 +8318,9 @@ function liveIconShowPollingPopup(anchor) {
     try {
       await api('PUT', '/api/server/polling', { interval_ms: ms });
       _liveIconState.pollIntervalMs = ms;
+      // Apply to currently-running polling intervals. The cleanest way
+      // to swap an interval is to stop and restart it; the helper
+      // restartPollingIntervals does that for the panels that care.
       restartPollingIntervals();
       if (typeof toast === 'function') toast(`poll interval: ${ms}ms`);
     } catch (e) {
@@ -8941,30 +8329,6 @@ function liveIconShowPollingPopup(anchor) {
       }
       slider.value = _liveIconState.pollIntervalMs;
       valueEl.textContent = `${_liveIconState.pollIntervalMs}ms`;
-    }
-  });
-
-  // Clipboard slider — same pattern, different endpoint + state.
-  const cbSlider = document.getElementById('clipboard-slider');
-  const cbValueEl = document.getElementById('clipboard-value');
-  cbSlider.addEventListener('input', () => {
-    const v = parseInt(cbSlider.value, 10);
-    cbValueEl.textContent = (v === 0) ? 'off' : v + 's';
-  });
-  cbSlider.addEventListener('change', async () => {
-    const sec = parseInt(cbSlider.value, 10);
-    try {
-      await api('PUT', '/api/server/clipboard', { timeout_sec: sec });
-      _clipboardConfig.timeoutSec = sec;
-      if (typeof toast === 'function') {
-        toast(sec === 0 ? 'clipboard auto-clear disabled' : `clipboard clears after ${sec}s`);
-      }
-    } catch (e) {
-      if (typeof toast === 'function') {
-        toast('clipboard save failed: ' + (e.message || ''), 'error');
-      }
-      cbSlider.value = _clipboardConfig.timeoutSec;
-      cbValueEl.textContent = (_clipboardConfig.timeoutSec === 0) ? 'off' : _clipboardConfig.timeoutSec + 's';
     }
   });
 

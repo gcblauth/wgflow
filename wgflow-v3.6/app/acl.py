@@ -45,14 +45,6 @@ _ENTRY_RE = re.compile(
     re.VERBOSE | re.IGNORECASE,
 )
 
-# Alias reference syntax: optional `!`, then `@`, then a name.
-# Names are lowercase alphanumeric + underscore, 1-32 chars. We accept
-# uppercase here and lowercase at parse time so users can type @Home_LAN
-# and have it round-trip cleanly.
-_ALIAS_RE = re.compile(
-    r"^(?P<bang>!)?@(?P<name>[a-zA-Z0-9_]{1,32})$"
-)
-
 
 # Cap on comment length. Long enough for "Plex / Sonarr / arr stack admin
 # UI on this host" without being so generous it bloats the DB. 80 is a
@@ -97,37 +89,6 @@ class ACLEntry:
         return self.action == "deny"
 
 
-@dataclass(frozen=True)
-class ACLAliasRef:
-    """A reference to a named alias in a peer's ACL list.
-
-    Stored alongside ACLEntry items in a peer's parsed ACL. The iptables
-    rule generator detects ACLAliasRef and expands it via the alias
-    table; literal ACLEntry items pass through unchanged.
-
-    Why a separate type rather than reusing ACLEntry: aliases don't have
-    cidr/port/proto until expanded. Forcing them into ACLEntry's shape
-    would require sentinel values and error-prone "is this a real entry
-    or a placeholder" checks across every code path. Distinct types make
-    the heterogeneity explicit in the type system.
-    """
-    name: str               # alias name without the leading @, lowercased
-    action: str = "allow"   # "allow" or "deny" — applied to the WHOLE expansion
-    comment: str = ""       # optional comment on the alias usage line
-
-    def __str__(self) -> str:
-        base = ("!" if self.action == "deny" else "") + "@" + self.name
-        if self.comment:
-            base += f" # {self.comment}"
-        return base
-
-    @property
-    def is_deny(self) -> bool:
-        return self.action == "deny"
-
-
-
-
 def _strip_comment(raw: str) -> tuple[str, str]:
     """Split an entry on its first `#`, returning (rule_part, comment_part).
 
@@ -147,15 +108,7 @@ def _strip_comment(raw: str) -> tuple[str, str]:
     return rule_part.strip(), comment
 
 
-def parse_entry(raw: str):
-    """Parse a single ACL entry. Returns either:
-      - ACLEntry  for a CIDR/host rule, or
-      - ACLAliasRef for an `@name` alias reference (v3.7+).
-
-    The caller distinguishes via isinstance() or by inspecting the
-    type. Code that needs to flatten aliases into concrete iptables
-    rules calls expand_aliases() (below).
-    """
+def parse_entry(raw: str) -> ACLEntry:
     raw = raw.strip()
     if not raw:
         raise ACLParseError("empty ACL entry")
@@ -163,17 +116,6 @@ def parse_entry(raw: str):
     rule_part, comment = _strip_comment(raw)
     if not rule_part:
         raise ACLParseError(f"comment-only ACL entry: {raw!r}")
-
-    # Try alias reference first. The regex is more specific than
-    # _ENTRY_RE (requires the @) so there's no ambiguity.
-    m = _ALIAS_RE.match(rule_part)
-    if m:
-        action = "deny" if m.group("bang") else "allow"
-        return ACLAliasRef(
-            name=m.group("name").lower(),
-            action=action,
-            comment=comment,
-        )
 
     m = _ENTRY_RE.match(rule_part)
     if not m:
@@ -210,9 +152,8 @@ def parse_entry(raw: str):
     )
 
 
-def parse_list(raw: str):
-    """Parse a comma-separated list. Returns a heterogeneous list of
-    ACLEntry and/or ACLAliasRef items (in source order). Blanks ignored.
+def parse_list(raw: str) -> List[ACLEntry]:
+    """Parse a comma-separated list. Blanks are ignored.
 
     Note on comma-vs-comment ambiguity: the parser splits on `,` first,
     THEN extracts `#` comments from each piece. So
@@ -222,78 +163,15 @@ def parse_list(raw: str):
     which parses cleanly into two entries with comments.
 
     A comma INSIDE a comment can't be expressed in this format — the
-    comma would split the comment in two. By design.
+    comma would split the comment in two. This is by design (commas are
+    cheap punctuation; commenters can use other separators like `;` or
+    `·` if they really need a comma in their note).
     """
     if not raw:
         return []
     return [parse_entry(p) for p in raw.split(",") if p.strip()]
 
 
-def expand_aliases(items, alias_lookup) -> "List[ACLEntry]":
-    """Flatten a heterogeneous parsed ACL list to literal ACLEntry items.
-
-    Args:
-      items: list returned by parse_list() — mix of ACLEntry + ACLAliasRef
-      alias_lookup: dict {name -> list of ACLEntry} from the alias store
-
-    Returns:
-      A flat list of ACLEntry. Alias references expand IN ORDER at the
-      position they appeared (so ordering relative to other rules is
-      preserved). Each expanded entry's action is set from the
-      ACLAliasRef.action — not from the alias body's stored action,
-      because aliases are allow-only and the deny prefix on the
-      reference is what triggers deny semantics.
-
-    Raises ACLParseError if a referenced alias doesn't exist in
-    alias_lookup. Caller is responsible for catching this and reporting
-    to the operator (e.g. "alias @home_lan was deleted; remove from
-    peer's ACL before saving").
-    """
-    out: List[ACLEntry] = []
-    for item in items:
-        if isinstance(item, ACLAliasRef):
-            body = alias_lookup.get(item.name)
-            if body is None:
-                raise ACLParseError(
-                    f"alias @{item.name} not defined; "
-                    f"create it on the aliases tab or remove the reference"
-                )
-            for entry in body:
-                # Body entries are always 'allow' in the alias table.
-                # The alias usage's action ("allow" or "deny") wins.
-                # Comment from the alias-usage line propagates to every
-                # expanded entry so the operator sees their context in
-                # the stats panel.
-                out.append(ACLEntry(
-                    cidr=entry.cidr,
-                    port=entry.port,
-                    proto=entry.proto,
-                    action=item.action,
-                    comment=item.comment or entry.comment,
-                ))
-        else:
-            out.append(item)
-    return out
-
-
-def collect_alias_refs(items) -> "List[str]":
-    """Return the unique alias names referenced in a parsed list.
-
-    Used by the persistence layer to refresh acl_alias_refs index when
-    a peer's ACL is saved.
-    """
-    seen: List[str] = []
-    for item in items:
-        if isinstance(item, ACLAliasRef) and item.name not in seen:
-            seen.append(item.name)
-    return seen
-
-
-def has_any_deny(entries) -> bool:
-    """True if any entry is a deny — signals full-tunnel ACL intent.
-
-    Accepts either ACLEntry or ACLAliasRef items (or a mix). The
-    mode-detection logic that calls this needs to work pre-expansion
-    too, so deny-prefixed alias references count.
-    """
-    return any(getattr(e, 'is_deny', False) for e in entries)
+def has_any_deny(entries: List[ACLEntry]) -> bool:
+    """True if any entry is a deny — signals full-tunnel ACL intent."""
+    return any(e.is_deny for e in entries)

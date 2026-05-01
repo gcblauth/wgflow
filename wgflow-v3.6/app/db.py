@@ -10,7 +10,6 @@ worker threads, so we cannot pass a single connection around.
 """
 from __future__ import annotations
 
-import re
 import sqlite3
 import threading
 import uuid
@@ -52,64 +51,15 @@ CREATE TABLE IF NOT EXISTS peers (
 CREATE TABLE IF NOT EXISTS peer_acls (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     peer_id     INTEGER NOT NULL REFERENCES peers(id) ON DELETE CASCADE,
-    cidr        TEXT,                  -- NULL when this is an alias reference
+    cidr        TEXT NOT NULL,         -- always normalised to CIDR form
     port        INTEGER,               -- NULL = any
     proto       TEXT,                  -- NULL = any, else 'tcp' or 'udp'
     action      TEXT NOT NULL DEFAULT 'allow',   -- 'allow' or 'deny'
     comment     TEXT,                  -- v3.6: optional human label, ≤ 80 chars
-    alias_ref   TEXT,                  -- v3.7: alias name when this row is a ref;
-                                       --        cidr/port/proto are NULL in that case
-    -- Source-order preservation: the operator's textbox order matters
-    -- because deny rules emit BEFORE the catchall ACCEPT in iptables.
-    -- Use insertion order (id ASC) on read; no separate column needed.
-    UNIQUE(peer_id, cidr, port, proto, action, alias_ref)
+    UNIQUE(peer_id, cidr, port, proto, action)
 );
 
 CREATE INDEX IF NOT EXISTS idx_peer_acls_peer ON peer_acls(peer_id);
-
--- ACL aliases (v3.7).
---
--- Named groups of ACL entries. Operator defines `@home_lan = 192.168.0.0/16,
--- 192.168.1.0/24` once; peers reference it as `@home_lan` (or `!@home_lan`
--- to deny) in their normal ACL list. At apply time, the alias name is
--- expanded into its constituent entries and emitted as individual iptables
--- rules.
---
--- Constraints:
---   - Aliases are allow-only (no `!` prefix inside the alias body). The
---     deny prefix applies to alias *usage*, not to entries within. This
---     keeps iptables rule generation simple and avoids chain-target
---     collision corner cases.
---   - Aliases do not nest. Cannot reference @other_alias inside a body.
---   - Names: lowercase letters, digits, underscores, 1-32 chars. The
---     leading @ is implicit (not stored in the name column).
---   - Body stored as a JSON array of {cidr, port, proto} objects. We
---     don't store comments inside aliases (they're a peer-rule concept
---     only).
---
--- Deletion is blocked while any peer references the alias. The
--- alias_peer_refs view (below) makes the reference count cheap to
--- query.
-CREATE TABLE IF NOT EXISTS acl_aliases (
-    name        TEXT PRIMARY KEY,        -- without leading @
-    body        TEXT NOT NULL,           -- JSON array of {cidr, port, proto}
-    description TEXT,                    -- optional human label
-    created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
--- Reference index: which peers' ACL bodies mention which alias.
--- Refreshed atomically when a peer's ACL is saved. Lets us quickly
--- answer "is this alias referenced anywhere" before allowing delete,
--- without scanning every peer's ACL text.
-CREATE TABLE IF NOT EXISTS acl_alias_refs (
-    alias_name  TEXT NOT NULL REFERENCES acl_aliases(name) ON DELETE CASCADE,
-    peer_id     INTEGER NOT NULL REFERENCES peers(id) ON DELETE CASCADE,
-    PRIMARY KEY (alias_name, peer_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_acl_alias_refs_alias ON acl_alias_refs(alias_name);
-CREATE INDEX IF NOT EXISTS idx_acl_alias_refs_peer  ON acl_alias_refs(peer_id);
-
 
 -- Aggregated metrics sample, written every 10s. We intentionally store
 -- aggregate numbers only (not per-peer rows) to keep storage bounded. With
@@ -262,96 +212,6 @@ class DB:
         if acl_cols and "comment" not in acl_cols:
             conn.execute("ALTER TABLE peer_acls ADD COLUMN comment TEXT")
 
-        # v3.7: alias_ref column on peer_acls. NULL on existing rows
-        # (which are all literal CIDR rules); populated when the peer's
-        # ACL contains an `@alias_name` reference.
-        if acl_cols and "alias_ref" not in acl_cols:
-            conn.execute("ALTER TABLE peer_acls ADD COLUMN alias_ref TEXT")
-
-        # v3.7: drop the NOT NULL constraint on cidr.
-        #
-        # Original v3.5 schema declared `cidr TEXT NOT NULL`. For alias
-        # references we want cidr to be NULL (the alias_ref column tells
-        # the loader to look up the body elsewhere). SQLite has no
-        # ALTER COLUMN, so we have to rebuild the table.
-        #
-        # Detection: look at the table's CREATE statement and check
-        # whether `cidr TEXT NOT NULL` appears. Fresh installs already
-        # have the new schema (CREATE TABLE IF NOT EXISTS at the top of
-        # this module declares cidr TEXT, no NOT NULL), so the rebuild
-        # is a no-op for them.
-        sql_row = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='peer_acls'"
-        ).fetchone()
-        sql_text = (sql_row[0] if sql_row else "") or ""
-        # Use a tolerant match — different SQLite versions render
-        # whitespace slightly differently. Look for "cidr" near "NOT NULL"
-        # before any other column declaration.
-        needs_rebuild = bool(
-            sql_text and
-            re.search(r"\bcidr\s+TEXT\s+NOT\s+NULL", sql_text, re.IGNORECASE)
-        )
-        # Also rebuild if the UNIQUE constraint doesn't include alias_ref —
-        # without it, multiple alias-ref rows collide on (peer, NULL, NULL,
-        # NULL, action). Note SQLite treats NULL as distinct in UNIQUE,
-        # so duplicate alias_ref values would be allowed accidentally if
-        # we left the old constraint. The new schema's UNIQUE includes
-        # alias_ref so this is a one-time fix.
-        if not needs_rebuild and sql_text and "alias_ref" not in sql_text.split("UNIQUE", 1)[-1]:
-            needs_rebuild = True
-
-        if needs_rebuild:
-            # Rebuild dance: create new table, copy rows, drop old,
-            # rename. Wrap in a savepoint so a failure mid-way leaves
-            # the DB in a consistent state.
-            conn.execute("SAVEPOINT peer_acls_rebuild")
-            try:
-                conn.execute("""
-                    CREATE TABLE peer_acls__new (
-                        id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                        peer_id     INTEGER NOT NULL REFERENCES peers(id) ON DELETE CASCADE,
-                        cidr        TEXT,
-                        port        INTEGER,
-                        proto       TEXT,
-                        action      TEXT NOT NULL DEFAULT 'allow',
-                        comment     TEXT,
-                        alias_ref   TEXT,
-                        UNIQUE(peer_id, cidr, port, proto, action, alias_ref)
-                    )
-                """)
-                # Copy preserving id (and therefore source order, since
-                # callers SELECT ORDER BY id). The old table may not have
-                # had alias_ref/comment columns; defensive defaults.
-                old_cols = {r[1] for r in conn.execute(
-                    "PRAGMA table_info(peer_acls)"
-                ).fetchall()}
-                select_alias_ref = "alias_ref" if "alias_ref" in old_cols else "NULL"
-                select_comment   = "comment"   if "comment"   in old_cols else "NULL"
-                conn.execute(f"""
-                    INSERT INTO peer_acls__new
-                        (id, peer_id, cidr, port, proto, action, comment, alias_ref)
-                    SELECT id, peer_id, cidr, port, proto, action,
-                           {select_comment}, {select_alias_ref}
-                    FROM peer_acls
-                """)
-                conn.execute("DROP TABLE peer_acls")
-                conn.execute("ALTER TABLE peer_acls__new RENAME TO peer_acls")
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_peer_acls_peer "
-                    "ON peer_acls(peer_id)"
-                )
-                conn.execute("RELEASE SAVEPOINT peer_acls_rebuild")
-            except Exception:
-                conn.execute("ROLLBACK TO SAVEPOINT peer_acls_rebuild")
-                conn.execute("RELEASE SAVEPOINT peer_acls_rebuild")
-                raise
-
-        # The acl_aliases and acl_alias_refs tables are created via the
-        # same schema-execution at startup that creates peer_acls. We
-        # don't need explicit migration because both are CREATE TABLE
-        # IF NOT EXISTS — fresh and existing DBs converge to the same
-        # final schema.
-
         # speedtest_history.endpoint added when multi-endpoint support landed.
         # Existing rows get NULL → the UI treats them as "unknown endpoint",
         # color-coded as gray, which is honest.
@@ -426,18 +286,11 @@ class DB:
         #   ACL stats, DNS recent, iptables modal, and similar polling
         #   loops. Default "3000" (3 seconds). Range 1000..6000 enforced
         #   in the API. Added in v3.6 in-place patch.
-        # - clipboard_timeout_sec: integer seconds, how long after a
-        #   sensitive value (private key, peer config) is written to
-        #   the clipboard before we attempt to overwrite it with a
-        #   space. 0 = disabled. 1..300 enforced. Default "30". Added
-        #   in v3.7. Best-effort: browsers may reject the overwrite if
-        #   it doesn't have a user gesture.
         for key, default in (("client_mtu", ""),
                              ("mss_clamp",  "0"),
                              ("panel_order", ""),
                              ("panels_minimized", ""),
-                             ("polling_interval_ms", "3000"),
-                             ("clipboard_timeout_sec", "30")):
+                             ("polling_interval_ms", "3000")):
             row = conn.execute(
                 "SELECT value FROM network_settings WHERE key = ?", (key,)
             ).fetchone()
