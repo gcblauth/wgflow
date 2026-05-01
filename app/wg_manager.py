@@ -148,6 +148,7 @@ def render_client_conf(
     peer_address: str,
     allowed_ips: List[str],
     dns_override: Optional[str] = None,
+    mtu: Optional[str] = None,
 ) -> str:
     """Render the .conf the end user imports into their WireGuard client.
 
@@ -162,6 +163,13 @@ def render_client_conf(
                    useful for split-tunnel where forcing all DNS through
                    the VPN would cause local DNS resolution to fail)
       - non-empty → use this string verbatim as the DNS value
+
+    `mtu` (v3.6) controls the [Interface] MTU line:
+      - None or ""  → no MTU line; client uses kernel default (~1420)
+      - "1412" etc → emits `MTU = 1412` so the client interface is
+                     configured at this value when the .conf is imported.
+                     Useful when the client's path can't carry full-size
+                     WG-encapsulated packets (PPPoE, mobile, CGNAT).
     """
     lines = [
         "[Interface]",
@@ -176,6 +184,13 @@ def render_client_conf(
     elif dns_override.strip() != "":
         lines.append(f"DNS = {dns_override}")
     # else: empty-string sentinel → no DNS line at all
+
+    # MTU line. Two-state (None/empty = no line, otherwise emit). The
+    # caller is responsible for validating the value's range; we trust
+    # that validation has happened upstream and just emit verbatim.
+    if mtu and str(mtu).strip():
+        lines.append(f"MTU = {str(mtu).strip()}")
+
     lines += [
         "",
         "[Peer]",

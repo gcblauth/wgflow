@@ -28,6 +28,8 @@ import asyncio
 import collections
 import logging
 import os
+import shlex
+import shutil
 import time
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
@@ -40,12 +42,74 @@ from fastapi import WebSocket, WebSocketDisconnect
 # ---------------------------------------------------------------------------
 
 DNSMASQ_LOG = Path("/var/log/dnsmasq.log")
-KERN_LOG    = Path("/var/log/kern.log")     # bind-mounted from host
+KERN_LOG    = Path("/var/log/kern.log")     # bind-mounted from host (Docker)
+                                            # or written by rsyslog (some bare-metal)
 
 # How many lines `tail -F` should print before following. Matches the UI
 # buffer cap so opening a stream feels like "you start with the last 500
 # lines already in view".
 INITIAL_LINES = 500
+
+
+def _has_journalctl() -> bool:
+    """Whether journalctl is available as a fallback. Cached at import
+    time because it doesn't change at runtime."""
+    return shutil.which("journalctl") is not None
+
+
+_JOURNALCTL_AVAILABLE = _has_journalctl()
+
+
+def _kernel_log_available() -> bool:
+    """True if there's *some* way to read kernel logs.
+
+    Either /var/log/kern.log exists (Docker bind-mount, or bare-metal
+    with rsyslog), or journalctl is installed (modern Ubuntu bare-metal
+    where kernel logs live exclusively in journald).
+    """
+    return KERN_LOG.exists() or _JOURNALCTL_AVAILABLE
+
+
+def _kernel_log_command(grep_pattern: Optional[str] = None) -> list:
+    """Build the right command for streaming kernel logs.
+
+    On Docker (and on hosts with rsyslog), /var/log/kern.log exists and
+    `tail -F` on it is the simplest, most efficient approach. On modern
+    Ubuntu 22.04+ bare-metal installs, rsyslog isn't installed by default
+    and kernel logs only live in journald — `journalctl -k -f` is the
+    equivalent. We pick at call-time so a host that adds/removes
+    rsyslog without restarting wgflow still picks the right path.
+
+    `grep_pattern` lets callers filter server-side rather than pulling
+    every kernel line through the WebSocket and filtering in Python.
+    Faster + saves bandwidth on busy hosts where most kernel lines are
+    uninteresting (USB events, network probes, etc).
+    """
+    if KERN_LOG.exists():
+        if grep_pattern:
+            # Pipe tail through grep --line-buffered so partial lines
+            # don't get buffered for seconds at a time. sh -c needed
+            # for the pipe.
+            return ["sh", "-c",
+                    f"tail -n {INITIAL_LINES} -F {KERN_LOG} | "
+                    f"grep --line-buffered -F {shlex.quote(grep_pattern)}"]
+        return ["tail", "-n", str(INITIAL_LINES), "-F", str(KERN_LOG)]
+
+    # journalctl fallback. -k restricts to kernel ring buffer messages,
+    # -f follows new entries, -n shows initial backlog. --no-pager is
+    # critical: without it, journalctl tries to invoke `less` even on
+    # non-tty stdout in some configs and the stream silently stalls.
+    # -o short-iso gives a compact ISO timestamp prefix that mirrors
+    # the look of /var/log/kern.log lines, so the UI rendering is
+    # consistent across both modes.
+    base = ["journalctl", "-k", "-f", "-n", str(INITIAL_LINES),
+            "--no-pager", "-o", "short-iso"]
+    if grep_pattern:
+        # journalctl's --grep filters server-side before rendering.
+        # Cleaner than piping through grep, and works whether the
+        # pattern's content has shell metacharacters.
+        return base + ["--grep", grep_pattern]
+    return base
 
 # In-memory ring for the access log. Always populated (cheap), even when
 # no one is watching. Tail-stream just iterates this and then waits for
@@ -88,23 +152,22 @@ def availability() -> dict:
     The UI calls this once on panel open so it can grey-out unavailable
     streams and display a helpful message instead of opening a WS that
     immediately closes with an error.
+
+    Note: `iptables` is intentionally absent from this dict — that source
+    has been replaced by the polling-based /api/peers/acl-stats endpoint
+    (env-agnostic, works on bare-metal and Docker without kernel-log
+    routing). The UI presents an "acl stats" tab in its place.
     """
-    iptables_log_enabled = os.environ.get("WGFLOW_IPTABLES_LOG", "").lower() in (
-        "1", "true", "yes",
-    )
+    kern_avail = _kernel_log_available()
+    no_kern_msg = ("no kernel log source available — install rsyslog or "
+                   "ensure journalctl is present (bare-metal), or "
+                   "bind-mount /var/log/kern.log (Docker)")
     return {
         "dnsmasq":   {"available": DNSMASQ_LOG.exists(),
                       "reason": None if DNSMASQ_LOG.exists()
                                 else "dnsmasq log not found at /var/log/dnsmasq.log"},
-        "wireguard": {"available": KERN_LOG.exists(),
-                      "reason": None if KERN_LOG.exists()
-                                else "host kernel log not bind-mounted — see docker-compose.yml"},
-        "iptables":  {"available": KERN_LOG.exists() and iptables_log_enabled,
-                      "reason": (None
-                                 if (KERN_LOG.exists() and iptables_log_enabled)
-                                 else ("set WGFLOW_IPTABLES_LOG=1 in docker-compose"
-                                       if KERN_LOG.exists()
-                                       else "host kernel log not bind-mounted"))},
+        "wireguard": {"available": kern_avail,
+                      "reason": None if kern_avail else no_kern_msg},
         "access":    {"available": True, "reason": None},
     }
 
@@ -206,15 +269,27 @@ async def stream_dnsmasq(websocket: WebSocket) -> None:
 async def stream_wireguard(websocket: WebSocket) -> None:
     """Kernel log lines containing `wireguard:`. Note that WG's kernel
     module is conservative about what it logs — most useful entries are
-    handshake errors, not routine traffic."""
-    if not KERN_LOG.exists():
+    handshake errors, not routine traffic.
+
+    Reads from /var/log/kern.log if available (Docker bind-mount, or
+    bare-metal with rsyslog), otherwise falls back to `journalctl -k -f`
+    (modern Ubuntu bare-metal). The grep pattern filters server-side."""
+    if not _kernel_log_available():
         await websocket.send_json({
-            "error": "host kernel log not bind-mounted — see docker-compose.yml",
+            "error": "no kernel log source — install rsyslog or "
+                     "(in Docker) bind-mount /var/log/kern.log",
         })
         return
+    # Filter pattern is case-insensitive in the original (line_filter used
+    # .lower()). journalctl --grep is regex; tail|grep is substring with
+    # the -F flag we pass. To preserve case-insensitivity we use a small
+    # bracket regex that works in both contexts.
     await _stream_subprocess(
         websocket,
-        ["tail", "-n", str(INITIAL_LINES), "-F", str(KERN_LOG)],
+        _kernel_log_command(grep_pattern="wireguard:"),
+        # Belt-and-suspenders: even if server-side grep let something
+        # through, the line_filter catches it. Also handles the lowercase
+        # variant on hosts where logger emits "Wireguard:".
         line_filter=lambda s: "wireguard:" in s.lower(),
     )
 
@@ -223,9 +298,10 @@ async def stream_iptables(websocket: WebSocket) -> None:
     """Kernel log lines tagged `WGFLOW-DROP:` — packets that hit the
     default DROP rule on WGFLOW_FORWARD. Only meaningful when
     WGFLOW_IPTABLES_LOG=1 (entrypoint adds the LOG rules in that mode)."""
-    if not KERN_LOG.exists():
+    if not _kernel_log_available():
         await websocket.send_json({
-            "error": "host kernel log not bind-mounted — see docker-compose.yml",
+            "error": "no kernel log source — install rsyslog or "
+                     "(in Docker) bind-mount /var/log/kern.log",
         })
         return
     iptables_log_enabled = os.environ.get("WGFLOW_IPTABLES_LOG", "").lower() in (
@@ -234,12 +310,13 @@ async def stream_iptables(websocket: WebSocket) -> None:
     if not iptables_log_enabled:
         await websocket.send_json({
             "error": "iptables drop logging not enabled — "
-                     "set WGFLOW_IPTABLES_LOG=1 in docker-compose",
+                     "set WGFLOW_IPTABLES_LOG=1 in your environment "
+                     "(.env file or docker-compose) and restart wgflow",
         })
         return
     await _stream_subprocess(
         websocket,
-        ["tail", "-n", str(INITIAL_LINES), "-F", str(KERN_LOG)],
+        _kernel_log_command(grep_pattern="WGFLOW-DROP:"),
         line_filter=lambda s: "WGFLOW-DROP:" in s,
     )
 
@@ -291,6 +368,9 @@ async def stream_access(websocket: WebSocket) -> None:
 DISPATCH: dict[str, Callable[[WebSocket], Awaitable[None]]] = {
     "dnsmasq":   stream_dnsmasq,
     "wireguard": stream_wireguard,
-    "iptables":  stream_iptables,
+    # iptables intentionally absent — replaced by the env-agnostic
+    # /api/peers/acl-stats counter polling endpoint. The stream_iptables
+    # function is preserved above for reference but unreachable from
+    # the WS handler.
     "access":    stream_access,
 }

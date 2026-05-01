@@ -12,7 +12,7 @@ services:
       net.netfilter.nf_conntrack_acct: "1"
     ports:
       - "${WG_LISTEN_PORT}:${WG_LISTEN_PORT}/udp"
-      - "127.0.0.1:8080:8080/tcp"
+      - "${HOSTBIND_WG_PANEL}:8080/tcp"
     volumes:
       - ./data:/data
       # Dynamically mounts based on the .env selection
@@ -28,6 +28,11 @@ services:
       WG_DNS_UPSTREAMS: ${WG_DNS_UPSTREAMS}
       WG_DEFAULT_ACL: ${WG_DEFAULT_ACL}
       WGFLOW_DATA_DIR: "/data"
-      WGFLOW_BIND: "0.0.0.0:8080"
+      WGFLOW_BIND: ${WGFLOW_BIND}
       PANEL_PASSWORD: ${PANEL_PASSWORD}
       WGFLOW_IPTABLES_LOG: ${WGFLOW_IPTABLES_LOG}
+      WGFLOW_TELEMETRY_ENABLED: ${WGFLOW_TELEMETRY_ENABLED}
+      # Optional. Leave empty to use the per-instance derived secret
+      # (recommended). Set this only if you are running your own collector
+      # and have a shared key arrangement with it.
+      WGFLOW_TELEMETRY_SECRET: ${WGFLOW_TELEMETRY_SECRET:-}

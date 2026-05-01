@@ -41,6 +41,25 @@ class Settings:
     keys_dir: Path
     peers_dir: Path
 
+    # Telemetry — anonymous usage stats (peer count, total rx/tx, uptime)
+    # POSTed every 30 minutes to the project's collection endpoint. Default
+    # ON so the project can see real-world usage; operators opt out via
+    # WGFLOW_TELEMETRY_ENABLED=0. The optional WGFLOW_TELEMETRY_SECRET, if
+    # set, is used as the HMAC key — when unset we sign with a per-instance
+    # secret derived from the server private key (see telemetry.py).
+    telemetry_enabled: bool
+    telemetry_secret: str  # "" = use per-instance derived secret
+
+    # Migration importer (wg-easy / PiVPN / bare WG). Three /api/import/*
+    # endpoints + a UI tab. Useful exactly once per deployment, then
+    # operators typically want to lock it down. The env var here ONLY
+    # seeds the default for fresh installs; once the DB row exists in
+    # network_settings the env var is ignored, so toggling it from the
+    # UI sticks across container restarts. To force a hard-disabled
+    # state from outside the container, edit the network_settings row
+    # directly or rely on the runtime API.
+    migration_default_enabled: bool
+
     @property
     def server_public_key_path(self) -> Path:
         return self.keys_dir / "server_public.key"
@@ -57,6 +76,18 @@ def load() -> Settings:
     # without surprise. Operators can opt out by setting WG_LOCAL_DNS=0.
     local_dns_raw = _env("WG_LOCAL_DNS", "1").strip().lower()
     local_dns_enabled = local_dns_raw in ("1", "true", "yes", "on")
+
+    # Telemetry toggle. Same boolean parsing as WG_LOCAL_DNS — accept the
+    # full set of common truthy spellings rather than just "1", because
+    # operators write things like `WGFLOW_TELEMETRY_ENABLED=true` in .env
+    # files and "true" != "1" was a real footgun in 3.2.0.
+    telemetry_raw = _env("WGFLOW_TELEMETRY_ENABLED", "1").strip().lower()
+    telemetry_enabled = telemetry_raw in ("1", "true", "yes", "on")
+
+    # Migration toggle. Default ON so a fresh install discovers the
+    # migrate tab without configuration. Same truthy-spelling tolerance.
+    migration_raw = _env("WGFLOW_MIGRATION_DEFAULT_ENABLED", "1").strip().lower()
+    migration_default_enabled = migration_raw in ("1", "true", "yes", "on")
 
     # peer_dns default depends on whether local DNS is on:
     #   - local DNS on  → server's wg address (peers query wgflow's dnsmasq)
@@ -82,6 +113,9 @@ def load() -> Settings:
         db_path=data_dir / "wgflow.sqlite",
         keys_dir=data_dir / "keys",
         peers_dir=data_dir / "peers",
+        telemetry_enabled=telemetry_enabled,
+        telemetry_secret=_env("WGFLOW_TELEMETRY_SECRET", ""),
+        migration_default_enabled=migration_default_enabled,
     )
 
 

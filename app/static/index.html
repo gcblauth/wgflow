@@ -351,13 +351,20 @@
   /* Per-column widths. The remaining width is distributed across the columns
      declared as `auto` (`name` and `endpoint` are the flexible ones). */
   table.peers col.c-status   { width: 26px; }
-  table.peers col.c-name     { width: auto; }      /* flex */
+  table.peers col.c-name     { width: auto; }     /* flex, but cells below have min-width */
   table.peers col.c-address  { width: 120px; }
-  table.peers col.c-endpoint { width: auto; }      /* flex */
+  table.peers col.c-endpoint { width: auto; }     /* flex */
   table.peers col.c-handshake{ width: 95px; }
   table.peers col.c-rate     { width: 110px; }
   table.peers col.c-spark    { width: 100px; }
-  table.peers col.c-actions  { width: 215px; }
+  table.peers col.c-actions  { width: 195px; }    /* was 215; tightened after v3.5's enable/disable icon */
+  /* Floor for the name column so it can't get squeezed below readability
+     when the endpoint column gets wide. <col min-width> isn't reliably
+     honored across browsers, so we set it on the cells themselves. */
+  table.peers th:nth-child(2),
+  table.peers td:nth-child(2) {
+    min-width: 180px;
+  }
 
   /* Actions cell: clip anything that would otherwise overflow into the
      sparkline column to its left. The width above should be sufficient
@@ -1496,6 +1503,844 @@
     margin: -8px 0 12px;
     min-height: 18px;
   }
+
+  /* ---------- Migrate tab ---------- */
+  .migrate-drop {
+    border: 2px dashed var(--border-hi);
+    background: var(--bg-2);
+    padding: 36px 24px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .migrate-drop:hover, .migrate-drop.dragover {
+    border-color: var(--accent);
+    background: var(--bg-3);
+  }
+  .migrate-drop-icon {
+    font-family: var(--f-display);
+    font-size: 32px;
+    color: var(--accent);
+    margin-bottom: 8px;
+    line-height: 1;
+  }
+  .migrate-drop-text {
+    font-size: 13px;
+    color: var(--fg);
+    margin-bottom: 6px;
+  }
+  .migrate-drop-hint {
+    font-size: 10px;
+    color: var(--fg-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+  }
+  .error-banner {
+    background: var(--bg-2);
+    border: 1px solid var(--danger);
+    color: var(--danger);
+    padding: 10px 14px;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .migrate-preview-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 16px;
+  }
+  .migrate-source-label {
+    font-size: 11px;
+    color: var(--fg-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    margin-bottom: 4px;
+  }
+  .migrate-source-label span {
+    color: var(--accent);
+    font-family: var(--f-display);
+  }
+  .migrate-summary {
+    font-size: 12px;
+    color: var(--fg-dim);
+  }
+  .migrate-summary .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    margin-right: 6px;
+    border: 1px solid var(--border-hi);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+  .migrate-summary .pill.ok       { color: var(--accent); border-color: var(--accent-d); }
+  .migrate-summary .pill.warn     { color: var(--warn); border-color: var(--warn); }
+  .migrate-summary .pill.danger   { color: var(--danger); border-color: var(--danger); }
+  .migrate-warnings {
+    background: var(--bg-2);
+    border: 1px solid var(--warn);
+    border-left: 3px solid var(--warn);
+    color: var(--fg-dim);
+    padding: 10px 14px;
+    font-size: 11px;
+    line-height: 1.6;
+    margin-bottom: 16px;
+  }
+  .migrate-warnings ul { margin: 0; padding-left: 18px; }
+
+  .migrate-server-block {
+    background: var(--bg-2);
+    border: 1px solid var(--border-hi);
+    padding: 14px 18px;
+    margin-bottom: 18px;
+  }
+  .migrate-server-toggle {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    cursor: pointer;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--fg);
+  }
+  .migrate-server-toggle input { margin-top: 4px; }
+  .migrate-key-diff {
+    margin-top: 10px;
+    font-family: var(--f-display);
+    font-size: 11px;
+    color: var(--fg-muted);
+    background: var(--bg);
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+  }
+  .migrate-key-diff .row { display: flex; gap: 8px; }
+  .migrate-key-diff .row .lbl {
+    color: var(--fg-muted); width: 70px;
+    text-transform: uppercase; letter-spacing: 0.1em; font-size: 9px;
+  }
+  .migrate-key-diff .row .val { color: var(--accent); }
+  .migrate-key-diff .row.outgoing .val { color: var(--danger); text-decoration: line-through; }
+  .migrate-server-warning {
+    margin-top: 8px;
+    font-size: 10px;
+    color: var(--fg-muted);
+    line-height: 1.5;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
+  table.migrate-peers {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    margin-bottom: 18px;
+  }
+  table.migrate-peers th {
+    text-align: left;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--fg-muted);
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  table.migrate-peers td {
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+    color: var(--fg);
+    vertical-align: middle;
+  }
+  table.migrate-peers tr.invalid td { color: var(--fg-muted); }
+  table.migrate-peers .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border: 1px solid;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+  table.migrate-peers .badge.ok      { color: var(--accent); border-color: var(--accent-d); }
+  table.migrate-peers .badge.warn    { color: var(--warn); border-color: var(--warn); }
+  table.migrate-peers .badge.danger  { color: var(--danger); border-color: var(--danger); }
+  table.migrate-peers .reassigned {
+    font-size: 10px;
+    color: var(--fg-muted);
+    margin-top: 2px;
+  }
+  table.migrate-peers .invalid-reason {
+    font-size: 10px;
+    color: var(--danger);
+    font-style: italic;
+  }
+  table.migrate-peers .privkey-no {
+    color: var(--fg-muted);
+    font-size: 10px;
+  }
+
+  .migrate-commit-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+  }
+  .migrate-commit-confirm {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    color: var(--fg-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+  .migrate-confirm-box {
+    width: 100px;
+    font-family: var(--f-display);
+    text-transform: none;
+    letter-spacing: 0.1em;
+  }
+
+  .migrate-done {
+    text-align: center;
+    padding: 36px 24px;
+  }
+  .migrate-done-icon {
+    color: var(--accent);
+    font-size: 36px;
+    line-height: 1;
+    margin-bottom: 10px;
+  }
+  .migrate-done-msg {
+    color: var(--fg);
+    font-size: 13px;
+    line-height: 1.6;
+    margin-bottom: 18px;
+  }
+  .migrate-done-nudge {
+    background: var(--bg-2);
+    border: 1px solid var(--warn);
+    border-left: 3px solid var(--warn);
+    padding: 12px 16px;
+    margin-bottom: 18px;
+    font-size: 12px;
+    color: var(--fg-dim);
+    line-height: 1.6;
+    text-align: left;
+  }
+  .migrate-done-nudge strong { color: var(--fg); }
+  .migrate-done-nudge.dismissed { display: none; }
+
+  /* ---------------------------------------------------------------------
+   * v3.5: peer enable/disable visuals + instance chrome + color themes
+   * ------------------------------------------------------------------- */
+  .status-dot.disabled {
+    /* Red, no pulse, no glow. Matches the .danger UI semantic so the
+       operator immediately reads "this peer is administratively off,
+       not just disconnected." Distinct from .idle (yellow 'used to be
+       online'). Disabled wins over kernel state because the kernel
+       doesn't have this peer at all when disabled. */
+    background: var(--danger);
+    box-shadow: 0 0 6px rgba(255, 107, 107, 0.5);
+  }
+  /* Row-level dim. We keep the status dot fully opaque so the red stays
+     readable, and keep action buttons clickable since the most useful
+     action on a disabled row is "enable". */
+  tr.row-disabled td { color: var(--fg-muted); }
+  tr.row-disabled td:first-child .status-dot { opacity: 1; }
+  tr.row-disabled .actions button { opacity: 0.85; }
+  tr.row-disabled .actions button:hover { opacity: 1; }
+  tr.row-disabled td .chip { opacity: 0.6; }
+  /* Inline 'disabled' badge next to the peer name. State label, not a
+     notification — no animation. */
+  .peer-disabled-badge {
+    display: inline-block;
+    padding: 1px 6px;
+    margin-left: 6px;
+    border: 1px solid var(--danger);
+    color: var(--danger);
+    font-family: var(--f-display);
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    vertical-align: middle;
+  }
+
+  /* Clickable rule-count cluster under each peer's name. Resets the
+     button chrome so it visually matches the prior plain-text counts;
+     hover surfaces the affordance via underline + slight brightening.
+     Each child <span> sets its own color (accent for allow, danger for
+     deny) so we don't override that here. */
+  button.acl-counts {
+    background: none;
+    border: none;
+    padding: 0;
+    margin: 0;
+    cursor: pointer;
+    font: inherit;
+    color: inherit;
+    line-height: inherit;
+    /* Subtle dotted underline hints "interactive" without shouting. */
+    border-bottom: 1px dotted transparent;
+    transition: border-color 0.12s ease, filter 0.12s ease;
+  }
+  button.acl-counts:hover {
+    border-bottom-color: var(--fg-muted);
+    filter: brightness(1.15);
+  }
+  button.acl-counts:focus-visible {
+    outline: 1px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /* Instance chrome (header). Hidden when no name is set; JS sets the
+     `has-name` class once the value is loaded. The whole group renders
+     inline next to the [wgflow] logo. The asymmetric left/right margin
+     pushes the chrome further from the logo (visual breathing room)
+     while keeping a tight gap before the subline that follows. */
+  .instance-chrome {
+    display: none;
+    margin: 0 8px 0 18px;
+    font-family: var(--f-display);
+    position: relative;
+  }
+  .instance-chrome.has-name { display: inline; }
+  .instance-sep {
+    color: var(--fg-muted);
+    font-size: 14px;
+    margin-right: 4px;
+  }
+  .instance-name {
+    color: var(--accent);
+    font-weight: 500;
+    cursor: context-menu;
+    user-select: none;
+  }
+  .instance-name:hover { text-shadow: 0 0 6px var(--accent); }
+  /* The ⚙ icon shows on hover anywhere over the chrome group. Touch
+     devices get the same controls in the server tab. */
+  .instance-edit-btn {
+    display: none;
+    margin-left: 4px;
+    color: var(--fg-muted);
+    cursor: pointer;
+    font-size: 12px;
+  }
+  .instance-chrome:hover .instance-edit-btn,
+  .instance-chrome.menu-open .instance-edit-btn { display: inline; }
+  .instance-edit-btn:hover { color: var(--accent); }
+
+  /* Popover dropped from the wgflow logo on right-click or ⚙ click. */
+  .instance-popover {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    margin-top: 4px;
+    z-index: 9999;
+    min-width: 240px;
+    padding: 10px;
+    background: var(--bg-2);
+    border: 1px solid var(--border-hi);
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.45);
+    font-family: var(--f-body);
+    font-size: 12px;
+    display: none;
+  }
+  .instance-popover.open { display: block; }
+  .instance-popover-section {
+    padding: 6px 4px;
+  }
+  .instance-popover-label {
+    color: var(--fg-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    font-size: 9px;
+    margin-bottom: 6px;
+  }
+  .instance-popover-divider {
+    height: 1px;
+    background: var(--border);
+    margin: 6px 0;
+  }
+  .instance-popover-input {
+    width: 100%;
+    padding: 6px 8px;
+    background: var(--bg);
+    border: 1px solid var(--border-hi);
+    color: var(--fg);
+    font-family: var(--f-display);
+    font-size: 11px;
+    box-sizing: border-box;
+  }
+  .instance-popover-input:focus {
+    outline: 1px solid var(--accent);
+    outline-offset: -1px;
+  }
+  .instance-popover-hint {
+    margin-top: 4px;
+    font-size: 9px;
+    color: var(--fg-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+  .instance-swatches {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 6px;
+  }
+  .instance-swatch {
+    height: 28px;
+    border: 1px solid var(--border-hi);
+    cursor: pointer;
+    position: relative;
+    transition: transform 0.1s ease;
+    /* Each swatch's --swatch-color is set inline by JS since CSS can't
+       see across theme contexts. */
+    background: var(--swatch-color, transparent);
+  }
+  .instance-swatch:hover { transform: scale(1.05); }
+  .instance-swatch.active::after {
+    content: "✓";
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #000;
+    font-weight: 700;
+    font-size: 14px;
+    text-shadow: 0 0 2px rgba(255,255,255,0.5);
+  }
+
+  /* Five color themes. Phosphor (default) needs no override block —
+     it's already in :root. Each non-default theme overrides --accent,
+     --accent-d, --accent-blue, --scan, --grid; light-mode equivalents
+     follow each, since the legibility tradeoff differs on white. */
+
+  /* Amber: classic IBM 3279. */
+  [data-instance-theme="amber"] {
+    --accent:    #ffb000;
+    --accent-d:  #6a4a00;
+    --accent-blue: #5ce1ff;
+    --accent-blue-d: rgba(92, 225, 255, 0.4);
+    --scan:      rgba(255, 176, 0, 0.04);
+    --grid:      rgba(106, 74, 0, 0.4);
+  }
+  [data-theme="light"][data-instance-theme="amber"] {
+    --accent:    #8a5e00;
+    --accent-d:  #c69400;
+    --accent-blue: #2266cc;
+    --accent-blue-d: rgba(34, 102, 204, 0.3);
+    --scan:      rgba(138, 94, 0, 0.02);
+    --grid:      rgba(168, 138, 80, 0.25);
+  }
+  /* Cyan: late-90s SGI / Tron. */
+  [data-instance-theme="cyan"] {
+    --accent:    #5fffe0;
+    --accent-d:  #1a6a5c;
+    --accent-blue: #ff8b6a;
+    --accent-blue-d: rgba(255, 139, 106, 0.35);
+    --scan:      rgba(95, 255, 224, 0.03);
+    --grid:      rgba(26, 106, 92, 0.4);
+  }
+  [data-theme="light"][data-instance-theme="cyan"] {
+    --accent:    #0e7a6a;
+    --accent-d:  #4ab1a2;
+    --accent-blue: #a64a25;
+    --accent-blue-d: rgba(166, 74, 37, 0.3);
+    --scan:      rgba(14, 122, 106, 0.02);
+    --grid:      rgba(80, 168, 156, 0.25);
+  }
+  /* Magenta: vaporwave / synthwave. */
+  [data-instance-theme="magenta"] {
+    --accent:    #ff5fb0;
+    --accent-d:  #6a2050;
+    --accent-blue: #5ce1ff;
+    --accent-blue-d: rgba(92, 225, 255, 0.4);
+    --scan:      rgba(255, 95, 176, 0.03);
+    --grid:      rgba(106, 32, 80, 0.4);
+  }
+  [data-theme="light"][data-instance-theme="magenta"] {
+    --accent:    #a01e6a;
+    --accent-d:  #d65aa0;
+    --accent-blue: #2266cc;
+    --accent-blue-d: rgba(34, 102, 204, 0.3);
+    --scan:      rgba(160, 30, 106, 0.02);
+    --grid:      rgba(176, 100, 140, 0.25);
+  }
+  /* Ice blue: cool oscilloscope / Macintosh aqua. */
+  [data-instance-theme="ice"] {
+    --accent:    #a0c8ff;
+    --accent-d:  #3a5680;
+    --accent-blue: #ffb380;
+    --accent-blue-d: rgba(255, 179, 128, 0.35);
+    --scan:      rgba(160, 200, 255, 0.03);
+    --grid:      rgba(58, 86, 128, 0.4);
+  }
+  [data-theme="light"][data-instance-theme="ice"] {
+    --accent:    #2c5fa8;
+    --accent-d:  #6a90c8;
+    --accent-blue: #c45a14;
+    --accent-blue-d: rgba(196, 90, 20, 0.3);
+    --scan:      rgba(44, 95, 168, 0.02);
+    --grid:      rgba(110, 144, 200, 0.25);
+  }
+
+  /* Lime: high-saturation electric green, brighter and more
+     yellow-leaning than phosphor's pure green. Reads as "active /
+     alert" rather than the calmer phosphor vibe. */
+  [data-instance-theme="lime"] {
+    --accent:    #c5ff4a;
+    --accent-d:  #5a7a1c;
+    --accent-blue: #ff7ab8;     /* hot pink contrast for TX so the two-tone separation reads */
+    --accent-blue-d: rgba(255, 122, 184, 0.35);
+    --scan:      rgba(197, 255, 74, 0.04);
+    --grid:      rgba(90, 122, 28, 0.4);
+  }
+  [data-theme="light"][data-instance-theme="lime"] {
+    --accent:    #4a6a14;
+    --accent-d:  #88aa4c;
+    --accent-blue: #b22b6c;
+    --accent-blue-d: rgba(178, 43, 108, 0.3);
+    --scan:      rgba(74, 106, 20, 0.02);
+    --grid:      rgba(120, 152, 70, 0.25);
+  }
+
+  /* Hot pink: vivid magenta-red, more saturated than the magenta
+     theme. Good for "look at me" instances. */
+  [data-instance-theme="pink"] {
+    --accent:    #ff3d8e;
+    --accent-d:  #6a1a3c;
+    --accent-blue: #5ce1ff;
+    --accent-blue-d: rgba(92, 225, 255, 0.4);
+    --scan:      rgba(255, 61, 142, 0.04);
+    --grid:      rgba(106, 26, 60, 0.4);
+  }
+  [data-theme="light"][data-instance-theme="pink"] {
+    --accent:    #a8194e;
+    --accent-d:  #d65484;
+    --accent-blue: #2266cc;
+    --accent-blue-d: rgba(34, 102, 204, 0.3);
+    --scan:      rgba(168, 25, 78, 0.02);
+    --grid:      rgba(176, 96, 130, 0.25);
+  }
+
+  /* Deep purple: slightly lavender so it stays readable on near-black.
+     Pure purple goes too dark and loses contrast. */
+  [data-instance-theme="purple"] {
+    --accent:    #b388ff;
+    --accent-d:  #4a3070;
+    --accent-blue: #ffb380;
+    --accent-blue-d: rgba(255, 179, 128, 0.35);
+    --scan:      rgba(179, 136, 255, 0.04);
+    --grid:      rgba(74, 48, 112, 0.4);
+  }
+  [data-theme="light"][data-instance-theme="purple"] {
+    --accent:    #5e2ba8;
+    --accent-d:  #9070c8;
+    --accent-blue: #c45a14;
+    --accent-blue-d: rgba(196, 90, 20, 0.3);
+    --scan:      rgba(94, 43, 168, 0.02);
+    --grid:      rgba(140, 110, 200, 0.25);
+  }
+
+  /* Gold: warmer than amber, more "vault room" than "1980s mainframe".
+     Yellow-leaning rather than orange-leaning. */
+  [data-instance-theme="gold"] {
+    --accent:    #ffd24a;
+    --accent-d:  #6a5520;
+    --accent-blue: #80c8ff;
+    --accent-blue-d: rgba(128, 200, 255, 0.4);
+    --scan:      rgba(255, 210, 74, 0.04);
+    --grid:      rgba(106, 85, 32, 0.4);
+  }
+  [data-theme="light"][data-instance-theme="gold"] {
+    --accent:    #8a6a14;
+    --accent-d:  #c69830;
+    --accent-blue: #2266cc;
+    --accent-blue-d: rgba(34, 102, 204, 0.3);
+    --scan:      rgba(138, 106, 20, 0.02);
+    --grid:      rgba(168, 144, 80, 0.25);
+  }
+
+  /* Mint: between cyan and phosphor — cooler than green, warmer than
+     pure cyan, slightly minty saturation. Distinct enough from cyan
+     that the picker swatches don't read as duplicates. */
+  [data-instance-theme="mint"] {
+    --accent:    #7affc7;
+    --accent-d:  #1c5a44;
+    --accent-blue: #ff8b6a;
+    --accent-blue-d: rgba(255, 139, 106, 0.35);
+    --scan:      rgba(122, 255, 199, 0.04);
+    --grid:      rgba(28, 90, 68, 0.4);
+  }
+  [data-theme="light"][data-instance-theme="mint"] {
+    --accent:    #14704a;
+    --accent-d:  #4ca082;
+    --accent-blue: #a64a25;
+    --accent-blue-d: rgba(166, 74, 37, 0.3);
+    --scan:      rgba(20, 112, 74, 0.02);
+    --grid:      rgba(80, 152, 124, 0.25);
+  }
+
+  /* ---------------------------------------------------------------------
+   * v3.6: iptables raw viewer modal + ACL comments + drag-to-reorder
+   * ------------------------------------------------------------------- */
+
+  /* Iptables modal — full-screen overlay with a centered frame, similar
+     shape to the existing netdiag modal but lighter (text-only body). */
+  #iptables-overlay {
+    position: fixed; inset: 0; z-index: 10000;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex; align-items: center; justify-content: center;
+    padding: 24px;
+  }
+  .iptables-frame {
+    background: var(--bg);
+    border: 1px solid var(--border-hi);
+    width: 100%;
+    max-width: 1100px;
+    height: 85vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 8px 48px rgba(0, 0, 0, 0.5);
+  }
+  .iptables-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 12px 18px;
+    border-bottom: 1px solid var(--border);
+  }
+  .iptables-title {
+    font-family: var(--f-display);
+    font-size: 14px;
+    color: var(--accent);
+  }
+  .iptables-toolbar {
+    display: flex; gap: 10px; align-items: center;
+    padding: 10px 18px;
+    border-bottom: 1px solid var(--border);
+  }
+  .iptables-toolbar input[type="text"] {
+    flex: 1;
+    padding: 6px 10px;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    font-family: var(--f-mono);
+    font-size: 11px;
+  }
+  .iptables-body {
+    flex: 1; overflow: auto;
+    margin: 0; padding: 12px 18px;
+    font-family: var(--f-mono);
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--fg-dim);
+    white-space: pre;
+    background: var(--bg);
+  }
+  /* Highlight WGFLOW-related rules so they're easy to spot in the dump.
+     Done via a wrapper span the JS injects when rendering. */
+  .iptables-body .ipt-wgflow { color: var(--accent); }
+  .iptables-body .ipt-chain { color: var(--accent-blue); font-weight: 500; }
+  .iptables-body .ipt-hidden { display: none; }
+
+  /* ACL comments — display next to each rule in the editor list and
+     in the live peers tooltip. Muted color so they don't compete with
+     the rule itself. */
+  .acl-comment {
+    color: var(--fg-muted);
+    font-style: italic;
+    font-size: 11px;
+    margin-left: 8px;
+  }
+  .acl-comment::before { content: "# "; opacity: 0.6; }
+  /* Comment input in the ACL editor row — same chrome as the rule input. */
+  .acl-row .acl-comment-input {
+    flex: 1.5;
+    min-width: 100px;
+    padding: 4px 8px;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    font-size: 11px;
+  }
+  .acl-row .acl-comment-input::placeholder {
+    color: var(--fg-muted);
+    font-style: italic;
+  }
+
+  /* Drag-to-reorder (v3.6).
+     Each reorderable panel gets a `.panel-reorderable` class. The drag
+     handle is a small ⋮⋮ glyph at the right edge of the panel header,
+     visible on hover. Drag affordances:
+       - cursor changes on the handle (move icon)
+       - dragging panel gets reduced opacity
+       - drop zones get a top border highlight where insertion will land */
+  .panel-reorderable .panel-drag-handle {
+    display: inline-block;
+    margin-left: auto;
+    padding: 0 6px;
+    color: var(--fg-muted);
+    cursor: move;
+    user-select: none;
+    font-size: 14px;
+    line-height: 1;
+    opacity: 0;
+    transition: opacity 0.12s ease;
+  }
+  .panel-reorderable:hover .panel-drag-handle { opacity: 0.7; }
+  .panel-drag-handle:hover { opacity: 1 !important; color: var(--accent); }
+  .panel-reorderable.dragging { opacity: 0.4; }
+  .panel-reorderable.drop-above { box-shadow: 0 -3px 0 0 var(--accent) inset; }
+  .panel-reorderable.drop-below { box-shadow: 0 3px 0 0 var(--accent) inset; }
+
+  /* Minimize button (v3.6 in-place patch).
+     Sits next to the drag handle in each reorderable panel's header.
+     Same hover-show pattern as the drag handle so the panel header
+     stays visually clean when the cursor is elsewhere. */
+  .panel-reorderable .panel-min-btn {
+    display: inline-block;
+    margin-left: 4px;
+    padding: 0 6px;
+    color: var(--fg-muted);
+    cursor: pointer;
+    user-select: none;
+    font-size: 14px;
+    line-height: 1;
+    opacity: 0;
+    transition: opacity 0.12s ease;
+    background: transparent;
+    border: none;
+    font-family: inherit;
+  }
+  .panel-reorderable:hover .panel-min-btn { opacity: 0.7; }
+  .panel-min-btn:hover { opacity: 1 !important; color: var(--accent); }
+
+  /* Collapsed state: hide the body, keep only the head visible.
+     We use a class on the panel itself rather than relying on the
+     button's icon — server-side state restoration applies the class
+     at boot before the JS has wired up the button. */
+  .panel-reorderable.minimized > .body,
+  .panel-reorderable.minimized > .head + *:not(.head) {
+    display: none !important;
+  }
+  /* For the logs panel which has a wrap inside, hide the wrap too. */
+  .panel-reorderable.minimized {
+    /* Tighten the bottom margin a bit when collapsed — minimized
+       panels look better stacked closer together. */
+    margin-bottom: 8px !important;
+  }
+
+  /* When minimized, hide anything in the header that's NOT the title
+     or our reorder/minimize controls. The flex header has h2 on the
+     left and a free-form content div on the right (filter buttons,
+     refresh, status spans like "logs stopped · 144 buffered" or
+     "26 queries · 1 blocked"). At collapsed size that right-side
+     content overlaps awkwardly with the title. Hide it; the body's
+     reveal on expand will bring it back. */
+  .panel-reorderable.minimized > .head > div,
+  .panel-reorderable.minimized > .head > span:not(.panel-drag-handle):not(.panel-min-btn) {
+    display: none !important;
+  }
+  /* But keep our drag + minimize buttons visible — and now ALWAYS visible
+     (not hover-dependent) when the panel is minimized, so the user can
+     still see how to expand. The :hover-only opacity rule from above
+     would otherwise hide the + button when not hovering. */
+  .panel-reorderable.minimized .panel-drag-handle,
+  .panel-reorderable.minimized .panel-min-btn {
+    opacity: 0.7 !important;
+  }
+  .panel-reorderable.minimized .panel-min-btn:hover,
+  .panel-reorderable.minimized .panel-drag-handle:hover {
+    opacity: 1 !important;
+  }
+
+  /* DNS RECENT QUERIES: give the title some breathing room from the
+     count text. Previously they sat snug due to flex's default spacing
+     and "26 queries · 1 blocked · 4 cached" rendered too close to the
+     title. Adding margin-left on the right-side div of every panel
+     header gives consistent spacing across all panels. */
+  .panel > .head > div + div,
+  .panel-reorderable > .head > h2 + div {
+    margin-left: 16px;
+  }
+
+  /* Live indicator + tooltip (v3.6 in-place patch).
+     The existing live indicator already exists in the header; we
+     just add a hover-tooltip and a right-click context menu. The
+     tooltip is a small fixed-position div positioned by JS. */
+  .live-indicator-tooltip {
+    position: fixed;
+    z-index: 9999;
+    background: var(--bg-2);
+    border: 1px solid var(--border-hi);
+    padding: 8px 12px;
+    font-family: var(--f-mono);
+    font-size: 11px;
+    color: var(--fg);
+    white-space: nowrap;
+    pointer-events: none;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
+  }
+  .live-indicator-tooltip .ws-row {
+    display: flex; justify-content: space-between; gap: 16px;
+    color: var(--fg-dim);
+  }
+  .live-indicator-tooltip .ws-total {
+    color: var(--accent);
+    margin-bottom: 4px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--border);
+  }
+  .live-indicator-tooltip .ws-hint {
+    color: var(--fg-muted);
+    font-size: 10px;
+    margin-top: 4px;
+    padding-top: 4px;
+    border-top: 1px solid var(--border);
+  }
+
+  /* Polling interval popup. Shown on right-click of the live indicator. */
+  .polling-popup {
+    position: fixed;
+    z-index: 9999;
+    background: var(--bg-2);
+    border: 1px solid var(--border-hi);
+    padding: 12px 14px;
+    font-family: var(--f-mono);
+    font-size: 11px;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.5);
+    min-width: 240px;
+  }
+  .polling-popup label {
+    display: block;
+    color: var(--fg-muted);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    margin-bottom: 8px;
+  }
+  .polling-popup .row {
+    display: flex; align-items: center; gap: 10px;
+  }
+  .polling-popup input[type="range"] {
+    flex: 1;
+  }
+  .polling-popup .value {
+    color: var(--accent);
+    min-width: 50px;
+    text-align: right;
+  }
+  .polling-popup .hint {
+    margin-top: 8px;
+    color: var(--fg-muted);
+    font-size: 10px;
+    line-height: 1.5;
+  }
+
 </style>
 </head>
 <body>
@@ -1505,7 +2350,14 @@
     <div>
       <div class="brand">
         <span class="bracket">[</span>wgflow<span class="bracket">]</span>
-        <span class="sub">wireguard control panel · v3.1 · <span id="brand-author" class="brand-author" title="about wgflow">gcblauth</span> <span id="matrix-replay" class="matrix-replay-btn" title="replay matrix intro">◆</span></span>
+        <!-- Instance name: free-form display string, set via right-click
+             on this span (or click the ⚙ that appears on hover). Empty
+             by default; the surrounding chrome hides itself when name=""
+             so a fresh install looks unchanged from earlier versions. -->
+        <span class="instance-chrome" id="instance-chrome">
+          <span class="instance-sep">⟫</span><span class="instance-name" id="instance-name"></span><span class="instance-edit-btn" id="instance-edit-btn" title="edit instance name and color">⚙</span>
+        </span>
+        <span class="sub">wireguard control panel · v3.6 · <span id="brand-author" class="brand-author" title="about wgflow">gcblauth</span> <span id="matrix-replay" class="matrix-replay-btn" title="replay matrix intro">◆</span></span>
       </div>
     </div>
     <div class="header-right">
@@ -1517,7 +2369,7 @@
       </button>
       <div class="server-meta" id="server-meta">
         <span class="k">uptime</span><span class="v" id="uptime-display">—</span>
-        <span class="k">status</span><span class="v" id="conn-state">connecting<span class="cursor"></span></span>
+        <span class="k">status</span><span class="v" id="conn-state" title="hover for WS detail · right-click to configure polling">connecting<span class="cursor"></span></span>
       </div>
       <button class="ghost icon" id="theme-toggle" title="toggle theme">◐</button>
       <button class="ghost" id="logout-btn" title="log out" style="display:none">logout</button>
@@ -1573,7 +2425,7 @@
   </section>
 
   <!-- Global throughput chart -->
-  <div class="panel" style="margin-bottom: 20px;">
+  <div class="panel panel-reorderable" data-panel-id="throughput" style="margin-bottom: 20px;">
     <div class="head">
       <h2>throughput</h2>
       <div style="display:flex; gap: 16px; align-items: center;">
@@ -1598,7 +2450,7 @@
 
   <!-- DNS log panel — global recent queries across all peers.
        Hidden when WG_LOCAL_DNS=0 (gated by applyLocalDnsVisibility). -->
-  <div class="panel" id="dns-recent-panel" style="margin-bottom: 20px;">
+  <div class="panel panel-reorderable" id="dns-recent-panel" data-panel-id="dns-recent" style="margin-bottom: 20px;">
     <div class="head">
       <h2>dns · recent queries</h2>
       <div style="display:flex; gap: 12px; align-items: center;">
@@ -1640,13 +2492,17 @@
     </div>
   </div>
 
-  <div class="grid two">
+  <!-- v3.6 reorder/Design A: previously a CSS grid laying out live peers
+       and server settings side-by-side. Flattened to single-column siblings
+       so they can be drag-reordered independently. The visual change: on
+       wide monitors the dashboard is now a single tall column instead of
+       two side-by-side. Each panel keeps its own internal layout. -->
+  <div class="panel panel-reorderable" data-panel-id="live-peers" style="margin-bottom: 20px;">
     <!-- LEFT: live peer table -->
-    <div class="panel">
-      <div class="head">
-        <h2>live peers</h2>
-        <div>
-          <button class="ghost" id="refresh-btn" title="force refresh">↻</button>
+    <div class="head">
+      <h2>live peers</h2>
+      <div>
+        <button class="ghost" id="refresh-btn" title="force refresh">↻</button>
         </div>
       </div>
       <div class="body" style="padding: 0;">
@@ -1697,7 +2553,7 @@
     </div>
 
     <!-- RIGHT: management -->
-    <div class="panel">
+    <div class="panel panel-reorderable" data-panel-id="server-management" style="margin-bottom: 20px;">
       <div class="head">
         <h2>peer management</h2>
       </div>
@@ -1706,6 +2562,7 @@
           <div class="tab active" data-tab="single">add one</div>
           <div class="tab" data-tab="names">batch · names</div>
           <div class="tab" data-tab="count">batch · count</div>
+          <div class="tab" data-tab="migrate">migrate</div>
           <div class="tab" data-tab="dns-overrides">dns override</div>
           <div class="tab" data-tab="server">server</div>
         </div>
@@ -1778,6 +2635,104 @@
           <button class="primary" id="btn-create-count">create batch</button>
         </div>
 
+        <div class="tab-pane" data-pane="migrate" style="display:none">
+          <!-- Migrate from another WireGuard manager. Auto-detects:
+               - wg-easy v1-v14: wg0.json
+               - wg-easy v15+:   wg-easy.db (SQLite)
+               - PiVPN:          tar/zip of /etc/wireguard/{wg0.conf,configs/}
+               - bare WG:        wg0.conf with [Interface]+[Peer] blocks
+               Bare-WG peers come in without privkeys (operator's clients
+               keep their existing configs); UI hides config-download
+               buttons for those peers.  -->
+          <div id="migrate-step-upload">
+            <div style="font-size: 11px; color: var(--fg-muted); margin-bottom: 12px; line-height: 1.5;">
+              import peers from an existing wireguard deployment. supports
+              <strong>wg-easy</strong> (wg0.json or wg-easy.db),
+              <strong>pivpn</strong> (tarball or zip of <code>/etc/wireguard/</code>), or
+              <strong>bare wireguard</strong> (a wg0.conf file).
+              the format is auto-detected.
+            </div>
+            <div id="migrate-drop" class="migrate-drop">
+              <div class="migrate-drop-icon">↓</div>
+              <div class="migrate-drop-text">drop a file here or click to choose</div>
+              <div class="migrate-drop-hint">wg0.json · wg-easy.db · *.tar.gz · *.zip · wg0.conf</div>
+              <input type="file" id="migrate-file-input" style="display:none">
+            </div>
+            <div id="migrate-upload-error" class="error-banner" style="display:none; margin-top: 12px;"></div>
+          </div>
+
+          <!-- Preview screen. Hidden until upload succeeds. -->
+          <div id="migrate-step-preview" style="display:none">
+            <div class="migrate-preview-head">
+              <div>
+                <div class="migrate-source-label">detected: <span id="migrate-source"></span></div>
+                <div class="migrate-summary" id="migrate-summary"></div>
+              </div>
+              <button class="ghost" id="migrate-cancel">cancel</button>
+            </div>
+
+            <div id="migrate-warnings" class="migrate-warnings" style="display:none"></div>
+
+            <!-- Server keypair adoption block -->
+            <div id="migrate-server-keypair-block" class="migrate-server-block" style="display:none">
+              <label class="migrate-server-toggle">
+                <input type="checkbox" id="migrate-adopt-key" checked>
+                <span><strong>adopt source's server keypair</strong> (recommended for migration — keeps existing client configs working without re-issuing)</span>
+              </label>
+              <div class="migrate-key-diff" id="migrate-key-diff"></div>
+              <div class="migrate-server-warning">
+                untick to keep wgflow's current server keypair. in that case
+                you'll need to re-issue all imported peer configs because
+                they reference the source's pubkey.
+              </div>
+            </div>
+
+            <table class="migrate-peers" id="migrate-peers-table">
+              <thead>
+                <tr>
+                  <th><input type="checkbox" id="migrate-select-all" checked></th>
+                  <th>name</th>
+                  <th>address</th>
+                  <th>status</th>
+                  <th>privkey</th>
+                </tr>
+              </thead>
+              <tbody id="migrate-peers-body"></tbody>
+            </table>
+
+            <div class="migrate-commit-row">
+              <div class="migrate-commit-confirm">
+                type <code>IMPORT</code> to confirm:
+                <input type="text" id="migrate-confirm-input" autocomplete="off"
+                       placeholder="IMPORT" class="migrate-confirm-box">
+              </div>
+              <button class="primary" id="migrate-commit-btn" disabled>commit import</button>
+            </div>
+            <div id="migrate-commit-error" class="error-banner" style="display:none; margin-top: 12px;"></div>
+          </div>
+
+          <!-- Result screen. Hidden until commit succeeds. -->
+          <div id="migrate-step-done" style="display:none">
+            <div class="migrate-done">
+              <div class="migrate-done-icon">✓</div>
+              <div class="migrate-done-msg" id="migrate-done-msg"></div>
+              <!-- Post-commit nudge: prompt the operator to disable the
+                   importer now that the migration is done. They can
+                   always flip it back on from the server tab. Removed
+                   on click; if they ignore it and click "back", the
+                   importer stays enabled — fail-open is the friendlier
+                   default for a feature that's reversible. -->
+              <div id="migrate-done-nudge" class="migrate-done-nudge">
+                <strong>migration is still enabled.</strong>
+                if you're done importing, lock the endpoints behind 403:
+                <button class="ghost" id="migrate-disable-now"
+                        style="margin-left: 8px;">disable migration</button>
+              </div>
+              <button class="primary" id="migrate-done-back">back to peer management</button>
+            </div>
+          </div>
+        </div>
+
         <div class="tab-pane" data-pane="dns-overrides" style="display:none">
           <div style="font-size: 11px; color: var(--fg-muted); margin-bottom: 12px; line-height: 1.5;">
             map domains to internal IPs. classic use case: NAT-loopback workaround so peers
@@ -1833,6 +2788,91 @@
             </div>
           </div>
 
+          <!-- Migration importer toggle. Useful exactly once per
+               deployment, then operators typically lock it down. The
+               state is persisted in network_settings so it survives
+               container restarts. Default ON for fresh installs. -->
+          <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border);">
+            <div style="font-size: 10px; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.14em; margin-bottom: 10px;">migration importer</div>
+            <label style="display: flex; gap: 10px; align-items: center; cursor: pointer; font-size: 12px;">
+              <input type="checkbox" id="server-migration-toggle">
+              <span><strong id="server-migration-label">enabled</strong> — adds a 'migrate' tab for importing peers from wg-easy / pivpn / bare wireguard</span>
+            </label>
+            <div class="hint" style="margin-top: 8px;">
+              you can disable this once you're done migrating. the three /api/import/* endpoints
+              return 403 when off, and the migrate tab is hidden from the UI. re-enable any time.
+            </div>
+          </div>
+
+          <!-- Instance identity — name shown in the header chrome, plus
+               the color theme that drives the accent variables. Both
+               persist in network_settings. Same fields are surfaced via
+               right-click on the header (or the ⚙ on hover); this card
+               is the discoverable / mobile-friendly entry point. -->
+          <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border);">
+            <div style="font-size: 10px; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.14em; margin-bottom: 10px;">instance identity</div>
+            <div class="field">
+              <label for="server-instance-name">display name (shown in header)</label>
+              <input id="server-instance-name" type="text" maxlength="40"
+                     placeholder="e.g. home-server, eu-west-prod"
+                     autocomplete="off"
+                     style="width: 100%; max-width: 320px;">
+              <div class="hint" style="margin-top: 6px;">empty = no name shown · max 40 chars · saves on enter or blur</div>
+            </div>
+            <div style="margin-top: 14px;">
+              <div style="font-size: 10px; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.12em; margin-bottom: 8px;">color theme</div>
+              <div id="server-instance-themes" class="instance-swatches" style="max-width: 320px;"></div>
+              <div class="hint" style="margin-top: 6px;">applied immediately · survives restarts</div>
+            </div>
+          </div>
+
+          <!-- Tunnel settings (v3.6): client MTU + server MSS clamp.
+               Both knobs work around path-MTU mismatches on broken-PMTUD
+               paths (very common on PPPoE, mobile, CGNAT, anywhere ICMP
+               is filtered). Different scopes:
+                 - client_mtu  → baked into peer .conf files
+                 - mss_clamp   → server-side iptables rule -->
+          <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border);">
+            <div style="font-size: 10px; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.14em; margin-bottom: 10px;">tunnel settings (advanced)</div>
+
+            <div class="field">
+              <label for="server-client-mtu">client MTU (in generated .conf)</label>
+              <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                <input id="server-client-mtu" type="number" min="576" max="1500"
+                       placeholder="e.g. 1412"
+                       autocomplete="off"
+                       style="width: 130px;">
+                <button class="ghost" type="button" data-mtu-preset="" title="clear: client uses kernel default">default</button>
+                <button class="ghost" type="button" data-mtu-preset="1420" title="WireGuard's own default">1420</button>
+                <button class="ghost" type="button" data-mtu-preset="1412" title="DSL/fibre with PPPoE">1412 PPPoE</button>
+                <button class="ghost" type="button" data-mtu-preset="1380" title="CGNAT / double-NAT paths">1380 CGNAT</button>
+                <button class="ghost" type="button" data-mtu-preset="1280" title="IPv6 minimum / mobile fallback">1280 safe</button>
+              </div>
+              <div class="hint" style="margin-top: 6px;">
+                empty = no override (client kernel picks ~1420). saves on enter or blur.
+                only affects newly-downloaded configs — existing clients keep their stored MTU
+                until they re-import.
+              </div>
+            </div>
+
+            <div class="field" style="margin-top: 14px;">
+              <label style="display: flex; gap: 10px; align-items: center; cursor: pointer;">
+                <input type="checkbox" id="server-mss-clamp" style="margin: 0;">
+                <span>MSS clamping (TCPMSS --clamp-mss-to-pmtu)</span>
+              </label>
+              <div class="hint" style="margin-top: 6px;">
+                installs an iptables rule that rewrites TCP SYN MSS values to fit the path MTU.
+                fixes TCP black-hole on paths where ICMP fragmentation-needed is filtered.
+                applied immediately on toggle · survives restarts.
+              </div>
+            </div>
+
+            <div style="margin-top: 14px;">
+              <button class="ghost" id="server-view-iptables" type="button" title="show full iptables filter+nat ruleset">⛬ view raw iptables</button>
+              <button class="ghost" id="server-reset-panel-order" type="button" title="restore default dashboard panel order" style="margin-left: 8px;">↺ reset panel order</button>
+            </div>
+          </div>
+
           <!-- Danger zone — only inside the server tab, not visible from
                other tabs. Extra spacing so it can't be muscle-memory-clicked. -->
           <div class="danger-zone" style="margin-top: 24px;">
@@ -1843,13 +2883,16 @@
 
       </div>
     </div>
-  </div>
-</div>
 
 <!-- Logs panel — on-demand streaming from four sources. Only the active
-     tab's WebSocket is open; switching/stopping closes it. -->
-<div class="wrap">
-  <div class="panel" id="logs-panel" style="margin-bottom: 20px;">
+     tab's WebSocket is open; switching/stopping closes it.
+     v3.6 reorder/Design A: previously in its own <div class="wrap">; now
+     a sibling of the other reorderable panels so it can drag-reorder
+     within the same parent. The wrap close has been deferred to after
+     this panel (was previously closing right before it, leaving logs
+     unconstrained at the body level — that bug was the "logs spans the
+     full window width" symptom in v3.6 in-place patch). -->
+  <div class="panel panel-reorderable" id="logs-panel" data-panel-id="logs" style="margin-bottom: 20px;">
     <div class="head">
       <h2>logs</h2>
       <div style="display:flex; gap: 12px; align-items: center;">
@@ -1860,7 +2903,7 @@
       <div class="tabs" id="logs-tabs">
         <div class="tab active" data-log="dnsmasq">dnsmasq</div>
         <div class="tab" data-log="wireguard">wireguard</div>
-        <div class="tab" data-log="iptables">iptables drops</div>
+        <div class="tab" data-log="acl-stats">acl stats</div>
         <div class="tab" data-log="access">access</div>
       </div>
 
@@ -1875,6 +2918,27 @@
       </div>
 
       <pre id="logs-viewer" class="logs-viewer">click ▶ start to begin streaming.</pre>
+
+      <!-- ACL stats panel: shown when the "acl stats" tab is active.
+           Replaces the failed iptables-LOG streaming path with periodic
+           counter polling — works regardless of how the host delivers
+           kernel logs (or doesn't, in containers). -->
+      <div id="acl-stats-panel" style="display:none; padding: 12px 14px;">
+        <div id="acl-stats-banner" style="font-size: 11px; color: var(--fg-dim); margin-bottom: 12px; line-height: 1.5;">
+          <span style="color: var(--fg-muted);">▷</span>
+          Per-rule packet + byte counters, polled every 3 seconds.
+          Counters reset when an ACL is re-saved or wgflow restarts.
+          For per-peer detail, click the rule counts under any peer name in the live peers table.
+        </div>
+        <div style="display:flex; gap: 10px; align-items: center; margin-bottom: 12px;">
+          <button class="primary" id="acl-stats-pause" title="pause / resume polling (esc to close panel)">■ pause</button>
+          <button class="ghost" id="acl-stats-reset" title="zero per-peer FORWARD chain counters">↺ reset counters</button>
+          <span class="mono-dim" id="acl-stats-status" style="font-size: 11px;">loading…</span>
+        </div>
+        <div id="acl-stats-content" style="font-size: 12px;">
+          <div class="mono-dim" style="padding: 24px; text-align: center;">loading…</div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -1990,7 +3054,7 @@
     <div class="about-brand">
       <span class="bracket">[</span>wgflow<span class="bracket">]</span>
     </div>
-    <div class="about-version">v3.1</div>
+    <div class="about-version">v3.6</div>
     <div class="about-line">wireguard control panel</div>
     <a class="about-link" href="https://github.com/gcblauth/wgflow" target="_blank" rel="noopener">
       github.com/gcblauth/wgflow
@@ -2253,6 +3317,11 @@ function render() {
     for (const p of pageSlice) {
       const l = live.find(x => x.id === p.id) || {};
       const online = !!l.online;
+      // Disabled overrides connection state semantically: a disabled
+      // peer can't have an active session anyway (syncconf removes
+      // their [Peer] block on disable). Show the disabled status
+      // prominently so it's never confused with a connection issue.
+      const isDisabled = p.enabled === false;
 
       // Build ACL chips with hit counters attached if available.
       const hitMap = new Map();
@@ -2282,10 +3351,15 @@ function render() {
         : '<span class="mono-dim">(none)</span>';
 
       // Status dot: green pulsing = online, yellow = idle (was connected
-      // before but not now), grey = never connected.
+      // before but not now), grey = never connected, red = administratively
+      // disabled. Disabled wins over all kernel-level states because the
+      // kernel doesn't have this peer at all when disabled.
       let dotClass = '';
       let dotTitle = 'never connected';
-      if (online) {
+      if (isDisabled) {
+        dotClass = 'disabled';
+        dotTitle = 'disabled — peer is paused; use the play button to re-enable';
+      } else if (online) {
         dotClass = 'online';
         dotTitle = 'online · last handshake ' + fmtAgo(l.latest_handshake);
       } else if (l.ever_connected) {
@@ -2294,21 +3368,30 @@ function render() {
       }
 
       const tr = document.createElement('tr');
+      // Apply 'row-disabled' class so CSS can dim everything in one rule
+      // rather than scattering opacity overrides across each cell.
+      if (isDisabled) tr.classList.add('row-disabled');
       tr.innerHTML = `
         <td><span class="status-dot ${dotClass}" title="${escape(dotTitle)}"></span></td>
         <td>
-          <div style="font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escape(p.name)}">${escape(p.name)}</div>
+          <div style="font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escape(p.name)}">${escape(p.name)}${isDisabled ? ' <span class="peer-disabled-badge" title="disabled — paused by operator">disabled</span>' : ''}</div>
           <div style="font-size: 11px; margin-top: 2px; white-space: nowrap;">
             ${(() => {
               const denies = p.acl.filter(e => e.startsWith('!')).length;
               const allows = p.acl.length - denies;
-              const tip = denies > 0
+              const tip = (denies > 0
                 ? `${allows} allow · ${denies} deny`
-                : `${allows} rule${allows === 1 ? '' : 's'}`;
+                : `${allows} rule${allows === 1 ? '' : 's'}`) + ' · click to edit';
+              // Whole counts cluster is a button so a click anywhere on
+              // either number opens the ACL editor — matches the
+              // "actions → acl" path. Button (not span) for native
+              // keyboard activation + screen-reader semantics; the
+              // .acl-counts CSS resets the button chrome so it visually
+              // matches the prior text-only display.
               if (denies > 0) {
-                return `<span title="${tip}" style="cursor:default; color: var(--accent); font-family: var(--f-body);">${allows}</span><span style="color: var(--fg-muted); margin: 0 2px;">/</span><span title="${tip}" style="cursor:default; color: var(--danger); font-family: var(--f-body);">${denies}</span>`;
+                return `<button class="acl-counts" data-acl-edit="${p.id}" title="${tip}"><span style="color: var(--accent); font-family: var(--f-body);">${allows}</span><span style="color: var(--fg-muted); margin: 0 2px;">/</span><span style="color: var(--danger); font-family: var(--f-body);">${denies}</span></button>`;
               }
-              return `<span title="${tip}" style="cursor:default; color: var(--accent); font-family: var(--f-body);">${allows}</span>`;
+              return `<button class="acl-counts" data-acl-edit="${p.id}" title="${tip}"><span style="color: var(--accent); font-family: var(--f-body);">${allows}</span></button>`;
             })()}
           </div>
         </td>
@@ -2323,6 +3406,7 @@ function render() {
         <td>
           <div class="actions">
             <button class="ghost icon" data-inspect="${p.id}" title="inspect connection">⌕</button>
+            <button class="ghost icon" data-toggle-enabled="${p.id}" data-currently-enabled="${!isDisabled}" title="${isDisabled ? 'enable peer' : 'disable peer (preserves config + ACLs)'}">${isDisabled ? '▶' : '⏸'}</button>
             <button class="ghost" data-actions="${p.id}" title="conf · qr · ps1 · acl">actions</button>
             <button class="ghost danger icon" data-del="${p.id}" title="delete">✕</button>
           </div>
@@ -2488,6 +3572,9 @@ async function loadServer() {
         <div class="hint" style="margin-top:8px">set via <code>WG_DEFAULT_ACL</code> env var in docker-compose.yml</div>
       </div>
     `;
+    // Re-sync the migration toggle row so opening the server tab from
+    // another browser tab/session reflects the current state.
+    if (typeof loadMigrationState === 'function') loadMigrationState();
   } catch (e) { $('#server-info').textContent = 'error: ' + e.message; }
 }
 
@@ -2630,6 +3717,13 @@ function connectWS() {
   };
   ws.onmessage = (ev) => {
     wsPayload = JSON.parse(ev.data);
+
+    // v3.6: feed the live-icon tooltip with the WS counter snapshot.
+    // The function is defined later in the file; guard so this doesn't
+    // break if message handler fires before that script block parses.
+    if (typeof liveIconUpdateWSCount === 'function' && wsPayload.ws_count) {
+      liveIconUpdateWSCount(wsPayload.ws_count);
+    }
 
     // Feed the live ring buffer. The collector keeps its own ring server-side;
     // we just mirror the most recent point so the chart animates in real time
@@ -3039,6 +4133,48 @@ $('#peers-tbody').addEventListener('click', async (ev) => {
   if (t.dataset.ps1) { downloadInstallerZip(t.dataset.ps1); return; }
   if (t.dataset.inspect) { openInspect(parseInt(t.dataset.inspect, 10)); return; }
 
+  // Click on the rule-counts cluster opens the ACL editor for that
+  // peer — same end state as `actions → acl` but one click instead of
+  // two. The button is rendered inline in the second column.
+  if (t.dataset.aclEdit) {
+    const id = t.dataset.aclEdit;
+    const peer = peersDB.find(p => p.id == id);
+    if (!peer) return;
+    openAclEditor(peer);
+    return;
+  }
+
+  if (t.dataset.toggleEnabled) {
+    // The data attribute reflects the state at render time. We invert
+    // it here rather than re-reading peersDB because the user may have
+    // clicked a button on a row that's between renders, and the
+    // visible state is what they reacted to.
+    const id = t.dataset.toggleEnabled;
+    const wasEnabled = t.dataset.currentlyEnabled === 'true';
+    const newEnabled = !wasEnabled;
+    const peer = peersDB.find(p => p.id == id);
+    const verb = newEnabled ? 'enable' : 'disable';
+    // Disable is destructive in the sense that it cuts an active session
+    // immediately; ask for confirmation. Enabling is non-destructive so
+    // we don't bother (worst case: peer reconnects, which is what was wanted).
+    if (!newEnabled) {
+      const okMsg = `disable peer "${peer ? peer.name : id}"? `
+        + `any active session will be cut immediately. config and ACLs `
+        + `are preserved; re-enable any time.`;
+      if (!confirm(okMsg)) return;
+    }
+    t.disabled = true;
+    try {
+      await api('PUT', `/api/peers/${id}/enabled`, { enabled: newEnabled });
+      await loadPeers();
+      toast(`${verb}d ${peer ? peer.name : 'peer'}`);
+    } catch (e) {
+      t.disabled = false;
+      toast(`${verb} failed: ${e.message}`, 'error');
+    }
+    return;
+  }
+
   if (t.dataset.del) {
     const id = t.dataset.del;
     const peer = peersDB.find(p => p.id == id);
@@ -3107,7 +4243,10 @@ function openAclEditor(peer) {
       <div class="hint" style="margin-top: 4px;">
         ip / cidr / ip:port/proto · prefix <code>!</code> to
         <span style="color: var(--danger); font-weight: 600;">deny</span>
-        (e.g. <code>!192.168.1.0/24</code>) — any deny triggers full-tunnel mode (AllowedIPs = 0.0.0.0/0)
+        (e.g. <code>!192.168.1.0/24</code>) — any deny triggers full-tunnel mode.
+        <br>add <code># comment</code> after a rule for a human label
+        (e.g. <code>192.168.50.0/24 # office vlan</code>) — comments persist
+        and show in the live peers + acl stats views.
       </div>
     </div>
     <div id="acl-preview" style="margin-bottom: 12px; display: flex; flex-wrap: wrap; gap: 4px; min-height: 24px;"></div>
@@ -3121,15 +4260,25 @@ function openAclEditor(peer) {
     const modeEl  = $('#acl-mode-hint');
     if (!preview) return;
 
-    const dc = lines.filter(l => l.startsWith('!')).length;
-    const denyLines = lines.filter(l => l.startsWith('!'));
+    // Strip the comment portion for deny-counting; the deny prefix
+    // applies to the rule before the # only.
+    const ruleOf = (line) => line.split('#', 1)[0].trim();
+    const dc = lines.filter(l => ruleOf(l).startsWith('!')).length;
+    const denyLines = lines.filter(l => ruleOf(l).startsWith('!'));
 
     preview.innerHTML = lines.map(line => {
-      const isDeny = line.startsWith('!');
+      const rulePart = ruleOf(line);
+      const commentPart = line.includes('#') ? line.substring(line.indexOf('#') + 1).trim() : '';
+      const isDeny = rulePart.startsWith('!');
       const style  = isDeny
         ? 'border: 1px solid var(--danger); color: var(--danger); background: transparent; padding: 2px 8px; font-size: 11px; font-family: var(--f-body);'
         : 'border: 1px solid var(--accent); color: var(--accent); background: transparent; padding: 2px 8px; font-size: 11px; font-family: var(--f-body);';
-      return `<span style="${style}">${escape(line)}</span>`;
+      // Render rule and comment together; the comment is muted within
+      // the chip via opacity so the rule reads as primary.
+      const commentHtml = commentPart
+        ? `<span style="opacity: 0.55; margin-left: 6px; font-style: italic;">— ${escape(commentPart)}</span>`
+        : '';
+      return `<span style="${style}">${escape(rulePart)}${commentHtml}</span>`;
     }).join('');
 
     if (modeEl) {
@@ -3147,8 +4296,10 @@ function openAclEditor(peer) {
         // Extract bare IP from server_address (e.g. "10.1.68.1/24" → "10.1.68.1").
         const serverIp = serverConfig.server_address.split('/')[0];
         const coversDashboard = denyLines.some(line => {
+          // First strip any inline comment so the parser sees only the rule.
+          const rulePart = ruleOf(line);
           // Strip leading ! and any port/proto suffix to get the CIDR/IP.
-          const cidr = line.replace(/^!/, '').replace(/:[^/]+\/.*$/, '').replace(/:.*$/, '');
+          const cidr = rulePart.replace(/^!/, '').replace(/:[^/]+\/.*$/, '').replace(/:.*$/, '');
           // Exact IP match, or /0 catch-all, or matching /24 subnet heuristic.
           // We do a simple prefix check which is correct for typical cases.
           // Full CIDR containment would need a library; the common cases are:
@@ -4195,6 +5346,10 @@ $('#login-submit').onclick = async () => {
       connectWS();
       loadPeers();
       loadDns();
+      // Re-fetch instance identity too in case it changed in another
+      // tab/session while this page was sitting on the login overlay.
+      // Cheap GET; idempotent.
+      loadInstanceConfig();
     }
   }
 };
@@ -4367,11 +5522,29 @@ function logsSwitchSource(source) {
   if (logsState.source === source) return;
   // Stop any active stream first.
   logsStopStream();
+  // If we were in acl-stats mode, stop its polling too.
+  aclStatsStopPolling();
   logsState.source = source;
   logsState.buffer = [];
   $$('.tab', $('#logs-tabs')).forEach(t => {
     t.classList.toggle('active', t.dataset.log === source);
   });
+
+  // The acl-stats tab uses a different UI shape — counter table instead
+  // of streaming pre. Toggle the toolbar/viewer vs the stats panel
+  // depending on which tab is active. This avoids two separate code
+  // paths for the rest of the logs framework (start/stop, filter, etc).
+  const isStats = (source === 'acl-stats');
+  $('#logs-toolbar').style.display = isStats ? 'none' : '';
+  $('#logs-viewer').style.display = isStats ? 'none' : '';
+  $('#acl-stats-panel').style.display = isStats ? 'block' : 'none';
+
+  if (isStats) {
+    $('#logs-stats').textContent = 'polling';
+    aclStatsStartPolling();
+    return;
+  }
+
   $('#logs-viewer').textContent = 'click ▶ start to begin streaming.';
   $('#logs-stats').textContent = 'stream off';
   // Refresh availability hint for the new source.
@@ -4412,6 +5585,337 @@ function logsExport() {
   URL.revokeObjectURL(url);
   toast(`exported ${logsState.buffer.length} entries`);
 }
+
+// =============================================================================
+// ACL stats panel (replaces iptables drops streaming)
+// =============================================================================
+// Polls /api/peers/acl-stats every 3 seconds while the tab is visible.
+// Computes per-rule deltas client-side so the operator sees a "live"
+// packet rate column. Stops polling when the tab isn't selected (or the
+// page is hidden) so we don't burn CPU + iptables exec for no reason.
+
+const aclStatsState = {
+  pollTimer: null,    // setInterval handle, null when not polling
+  prevSnapshot: null, // last response for delta computation
+  peers: {},          // peer_id → {name, address} cache for label rendering
+  paused: false,      // operator-controlled pause (separate from
+                      // visibility/tab-switch which are automatic).
+                      // When true, both tab-switch-resume and
+                      // visibilitychange-resume become no-ops until the
+                      // user clicks the pause button again. Resets to
+                      // false on page reload (intentionally not
+                      // persisted — paused state is a momentary thing,
+                      // not a setting).
+};
+
+async function aclStatsStartPolling() {
+  // Honor the operator's manual pause. They might have left the tab
+  // paused, then switched panels and come back — we don't want to
+  // silently resume polling without their consent.
+  if (aclStatsState.paused) {
+    aclStatsRenderStatusLine();
+    return;
+  }
+  // Cache peer names so the table can label rules with peer.name rather
+  // than peer.id. Done once at start; updated implicitly when the live
+  // peers list is refetched (peersDB is shared module-level state).
+  for (const p of (peersDB || [])) {
+    aclStatsState.peers[p.id] = { name: p.name, address: p.address };
+  }
+  // First fetch is immediate so the operator sees data on tab open
+  // without waiting for the 3-second tick.
+  await aclStatsRefresh();
+  // Subsequent ticks. visibilitychange handler also pauses this when
+  // the page is hidden, so unfocused tabs don't keep polling.
+  if (aclStatsState.pollTimer === null) {
+    // Polling interval is configurable via the live-icon right-click
+    // popup. Falls back to 3000 if state hasn't been hydrated yet
+    // (e.g. acl-stats panel opened before /api/server/polling resolved).
+    const ms = (typeof _liveIconState !== 'undefined' && _liveIconState.pollIntervalMs) || 3000;
+    aclStatsState.pollTimer = setInterval(aclStatsRefresh, ms);
+  }
+}
+
+function aclStatsStopPolling() {
+  if (aclStatsState.pollTimer !== null) {
+    clearInterval(aclStatsState.pollTimer);
+    aclStatsState.pollTimer = null;
+  }
+  // Reset prev snapshot so re-entering the tab doesn't show stale
+  // deltas (would be misleading: a 5-minute gap between polls would
+  // show a huge "rate" on the next tick).
+  aclStatsState.prevSnapshot = null;
+}
+
+function aclStatsRenderStatusLine() {
+  // Single source of truth for the status text. Different states:
+  //   - paused (operator)              → "paused · last poll HH:MM:SS"
+  //   - polling, fresh data            → "last poll HH:MM:SS · refreshing every 3s"
+  //   - just opened, no data yet       → "loading…" (initial state from HTML)
+  //   - error                          → set inline by aclStatsRefresh
+  const el = $('#acl-stats-status');
+  if (!el) return;
+  const ts = aclStatsState.prevSnapshot
+    ? new Date(aclStatsState.prevSnapshot.snapshot_ts * 1000).toLocaleTimeString()
+    : null;
+  if (aclStatsState.paused) {
+    el.textContent = ts ? `paused · last poll ${ts}` : 'paused';
+  } else if (ts) {
+    el.textContent = `last poll ${ts} · refreshing every 3s`;
+  }
+}
+
+async function aclStatsRefresh() {
+  // Defensive: if a tick fires while paused (race between pause click
+  // and the next setInterval firing), bail. The interval should be
+  // cleared by aclStatsStopPolling on pause, but belt + suspenders.
+  if (aclStatsState.paused) return;
+  let snap;
+  try {
+    snap = await api('GET', '/api/peers/acl-stats');
+  } catch (e) {
+    $('#acl-stats-status').textContent = 'error: ' + (e.message || 'fetch failed');
+    return;
+  }
+  aclStatsRender(snap, aclStatsState.prevSnapshot);
+  aclStatsState.prevSnapshot = snap;
+  aclStatsRenderStatusLine();
+}
+
+function aclStatsRender(snap, prev) {
+  // Build a fast lookup: prev[(peer_id, rule_index, direction)] → packets.
+  // We use array index as the rule key because match strings can change
+  // when a peer's ACL is re-saved; the index comparison only matters
+  // between adjacent polls (3s), within which re-saves are unlikely.
+  // After a re-save the deltas may briefly show garbage on one tick,
+  // then settle — acceptable.
+  const prevForward = new Map();   // "peerid:idx" → pkts
+  const prevInput = new Map();
+  if (prev) {
+    for (const [pid, pdata] of Object.entries(prev.peers || {})) {
+      (pdata.rules || []).forEach((r, idx) => {
+        prevForward.set(`${pid}:${idx}`, r.packets);
+      });
+    }
+    for (const [pid, rules] of Object.entries(prev.input_denies || {})) {
+      rules.forEach((r, idx) => {
+        prevInput.set(`${pid}:${idx}`, r.packets);
+      });
+    }
+  }
+  const dt = prev ? Math.max(0.5, (snap.snapshot_ts - prev.snapshot_ts)) : 1;
+
+  const peerIds = new Set([
+    ...Object.keys(snap.peers || {}),
+    ...Object.keys(snap.input_denies || {}),
+  ]);
+  if (peerIds.size === 0) {
+    $('#acl-stats-content').innerHTML =
+      '<div class="mono-dim" style="padding: 24px; text-align: center;">' +
+      'no per-peer ACL chains found.<br>' +
+      'add peers and configure their ACLs to see counters here.</div>';
+    return;
+  }
+
+  // Sort peers by name (fall back to id if peer not in cache yet).
+  const sortedPeerIds = Array.from(peerIds).sort((a, b) => {
+    const na = (aclStatsState.peers[a] || {}).name || `peer ${a}`;
+    const nb = (aclStatsState.peers[b] || {}).name || `peer ${b}`;
+    return na.localeCompare(nb);
+  });
+
+  let html = '';
+  for (const pid of sortedPeerIds) {
+    const peer = aclStatsState.peers[pid] || { name: `peer ${pid}`, address: '?' };
+    const pdata = (snap.peers || {})[pid];
+    const inputs = (snap.input_denies || {})[pid] || [];
+
+    html += `<div style="margin-bottom: 18px; border: 1px solid var(--border); padding: 10px 12px;">`;
+    html += `<div style="display:flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px;">`;
+    html += `<div><span style="color: var(--accent); font-weight: 500;">${escape(peer.name)}</span>`;
+    html += ` <span class="mono-dim" style="font-size: 10px;">${escape(peer.address)}</span></div>`;
+    html += `<button class="ghost" data-acl-edit="${pid}" style="font-size: 10px;">edit acl ↗</button>`;
+    html += `</div>`;
+
+    // Forward chain rules
+    if (pdata && pdata.rules && pdata.rules.length) {
+      html += aclStatsRulesTable(
+        'forward (peer → lan)',
+        pdata.rules,
+        (idx, r) => prevForward.get(`${pid}:${idx}`),
+        dt,
+      );
+    }
+    // Input chain (explicit denies guarding the wg server itself)
+    if (inputs.length) {
+      html += aclStatsRulesTable(
+        'input (peer → wg server)',
+        inputs,
+        (idx, r) => prevInput.get(`${pid}:${idx}`),
+        dt,
+      );
+    }
+    if ((!pdata || !pdata.rules || !pdata.rules.length) && !inputs.length) {
+      html += `<div class="mono-dim" style="font-size: 11px; padding: 6px 0;">no rules</div>`;
+    }
+    html += `</div>`;
+  }
+  $('#acl-stats-content').innerHTML = html;
+}
+
+function aclStatsRulesTable(label, rules, prevLookup, dt) {
+  let html = `<div class="mono-dim" style="font-size: 9px; text-transform: uppercase; letter-spacing: 0.12em; margin: 4px 0;">${label}</div>`;
+  html += `<table style="width: 100%; font-size: 11px; border-collapse: collapse;">`;
+  html += `<thead><tr style="border-bottom: 1px solid var(--border);">`;
+  html += `<th style="text-align: left; padding: 4px 6px;">kind</th>`;
+  html += `<th style="text-align: left; padding: 4px 6px;">match</th>`;
+  html += `<th style="text-align: right; padding: 4px 6px;">packets</th>`;
+  html += `<th style="text-align: right; padding: 4px 6px;">bytes</th>`;
+  html += `<th style="text-align: right; padding: 4px 6px;">pkts/s</th>`;
+  html += `</tr></thead><tbody>`;
+  rules.forEach((r, idx) => {
+    const prevPkts = prevLookup(idx, r);
+    let rate = '';
+    if (prevPkts !== undefined) {
+      const delta = r.packets - prevPkts;
+      // Negative deltas can occur if counters were reset between polls
+      // (e.g. operator hit the reset button, or apply_peer_acls re-fired).
+      // Show 0 in that case rather than a confusing negative.
+      if (delta < 0) rate = '<span class="mono-dim">—</span>';
+      else if (delta === 0) rate = '<span class="mono-dim">0</span>';
+      else rate = `<span style="color: var(--accent);">${(delta / dt).toFixed(1)}</span>`;
+    } else {
+      rate = '<span class="mono-dim">—</span>';
+    }
+    // Color the kind cell so deny/allow/log are scannable at a glance.
+    const kindColor = r.kind === 'deny' ? 'var(--danger)'
+                    : r.kind === 'allow' ? 'var(--accent)'
+                    : r.kind === 'log' ? 'var(--fg-muted)'
+                    : 'var(--fg-dim)';
+    // Render comment (v3.6) inline after the match, muted.
+    // Comments come from the DB lookup keyed on (peer, cidr, port,
+    // proto, action). LOG variants share the deny's comment.
+    const commentHtml = r.comment
+      ? `<span class="acl-comment">${escape(r.comment)}</span>`
+      : '';
+    html += `<tr>`;
+    html += `<td style="padding: 4px 6px; color: ${kindColor};">${escape(r.kind)}</td>`;
+    html += `<td style="padding: 4px 6px;" class="mono-dim">${escape(r.match)}${commentHtml}</td>`;
+    html += `<td style="padding: 4px 6px; text-align: right;">${r.packets.toLocaleString()}</td>`;
+    html += `<td style="padding: 4px 6px; text-align: right;" class="mono-dim">${fmtBytes(r.bytes)}</td>`;
+    html += `<td style="padding: 4px 6px; text-align: right;">${rate}</td>`;
+    html += `</tr>`;
+  });
+  html += `</tbody></table>`;
+  return html;
+}
+
+// Reset button.
+const _aclResetBtn = document.getElementById('acl-stats-reset');
+if (_aclResetBtn) {
+  _aclResetBtn.addEventListener('click', async () => {
+    if (!confirm('zero per-peer FORWARD chain counters?\n\n'
+                 + 'rules are preserved; only counters reset. '
+                 + 'INPUT chain counters (explicit denies on the wg server) '
+                 + 'are not affected — re-save the peer\'s ACL to reset those.')) {
+      return;
+    }
+    _aclResetBtn.disabled = true;
+    try {
+      await api('POST', '/api/peers/acl-stats/reset');
+      // Force an immediate refresh so the zeroed counters appear right away.
+      // Also wipe prevSnapshot so we don't show negative deltas on the
+      // next tick (the comparison would be against pre-reset values).
+      aclStatsState.prevSnapshot = null;
+      await aclStatsRefresh();
+      toast('counters reset');
+    } catch (e) {
+      toast('reset failed: ' + (e.message || 'unknown'), 'error');
+    } finally {
+      _aclResetBtn.disabled = false;
+    }
+  });
+}
+
+// Pause/resume button. Operator-controlled override that takes priority
+// over the automatic visibility-based pause/resume — when the user
+// pauses manually, switching tabs and coming back DOESN'T resume.
+// Same shape as the logs panel's start/stop toggle.
+const _aclPauseBtn = document.getElementById('acl-stats-pause');
+if (_aclPauseBtn) {
+  // Visual states for the button:
+  //   class="primary" + "■ pause"  → currently polling
+  //   class="ghost"   + "▶ resume" → currently paused
+  // Toggling reflects what clicking it WILL do (which matches the
+  // convention in the logs panel's button).
+  const setBtnState = () => {
+    if (aclStatsState.paused) {
+      _aclPauseBtn.textContent = '▶ resume';
+      _aclPauseBtn.className = 'ghost';
+      _aclPauseBtn.title = 'resume polling';
+    } else {
+      _aclPauseBtn.textContent = '■ pause';
+      _aclPauseBtn.className = 'primary';
+      _aclPauseBtn.title = 'pause polling (counters keep accumulating server-side)';
+    }
+  };
+  _aclPauseBtn.addEventListener('click', async () => {
+    aclStatsState.paused = !aclStatsState.paused;
+    if (aclStatsState.paused) {
+      // Pause: stop the timer but DON'T wipe prevSnapshot — the operator
+      // wants to look at what was there. The status line will show
+      // "paused · last poll HH:MM:SS" so the freshness is honest.
+      // Note: aclStatsStopPolling() wipes prevSnapshot. Inline the
+      // timer-clear part only, keeping prevSnapshot intact for display.
+      if (aclStatsState.pollTimer !== null) {
+        clearInterval(aclStatsState.pollTimer);
+        aclStatsState.pollTimer = null;
+      }
+    } else {
+      // Resume: kick off the polling cycle again. startPolling itself
+      // honors the paused flag, so we already know it's false here.
+      await aclStatsStartPolling();
+    }
+    setBtnState();
+    aclStatsRenderStatusLine();
+  });
+  setBtnState();
+}
+
+// Pause polling when the document is hidden (other tab focused, window
+// minimized). Resume when it becomes visible again, but only if the
+// acl-stats tab is still the active log source.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    aclStatsStopPolling();
+  } else if (logsState.source === 'acl-stats') {
+    aclStatsStartPolling();
+  }
+});
+
+// Make sure polling stops when the user navigates away.
+window.addEventListener('beforeunload', () => aclStatsStopPolling());
+
+// Wire data-acl-edit buttons inside the acl-stats panel to open the
+// same editor modal as the live-peers table. Same data attribute name
+// as the live-peers row buttons; we just need a separate delegate
+// because the events bubble within #acl-stats-content, not the peers
+// tbody. Lookups against peersDB (shared module-level state) keep the
+// button working even if peersDB hasn't refreshed since the user
+// opened the panel.
+$('#acl-stats-content').addEventListener('click', (ev) => {
+  const t = ev.target.closest('button[data-acl-edit]');
+  if (!t) return;
+  const id = t.dataset.aclEdit;
+  const peer = peersDB.find(p => p.id == id);
+  if (!peer) {
+    toast('peer not found in current view (refresh and try again)', 'warn');
+    return;
+  }
+  openAclEditor(peer);
+});
+
+// =============================================================================
 
 // Wire up handlers.
 $$('.tab', $('#logs-tabs')).forEach(t => {
@@ -5474,6 +6978,12 @@ async function bootApp() {
     _cumulativeTimer = setInterval(fetchCumulative, 30000);
   }
   logsUpdateAvailability();
+  // Instance identity (name + color theme). Called from bootApp — not
+  // a standalone IIFE — so it fires AFTER auth has been established
+  // by the bootApp call site. A pre-auth call would 401, fall through
+  // to defaults, and never re-run, leaving the operator looking at
+  // default chrome even after their saved values exist in the DB.
+  loadInstanceConfig();
   await intro;
 }
 
@@ -5535,6 +7045,1390 @@ if (_aboutOverlay) {
 function cookiePresent(name) {
   return document.cookie.split(';').some(c => c.trim().startsWith(name + '='));
 }
+
+// =============================================================================
+// migrate (importer) tab
+// =============================================================================
+// Three-step UI:
+//   1. upload   — drop a file or click to pick; POST to /api/import/upload
+//   2. preview  — render per-peer rows with status badges; let operator
+//                 toggle which peers to import; show server-keypair diff
+//   3. commit   — POST /api/import/commit with chosen indices + confirm token
+//
+// State lives in module-local `migrateState`. We don't persist anything
+// across tab switches — switching away and back resets the form, since
+// the preview lives server-side via preview_id and re-fetches stale
+// status data anyway.
+
+const migrateState = {
+  preview: null,    // last preview JSON from /api/import/upload or /preview/{id}
+};
+
+function migrateReset() {
+  migrateState.preview = null;
+  document.getElementById('migrate-step-upload').style.display = '';
+  document.getElementById('migrate-step-preview').style.display = 'none';
+  document.getElementById('migrate-step-done').style.display = 'none';
+  document.getElementById('migrate-upload-error').style.display = 'none';
+  document.getElementById('migrate-confirm-input').value = '';
+  document.getElementById('migrate-commit-btn').disabled = true;
+  document.getElementById('migrate-commit-error').style.display = 'none';
+  document.getElementById('migrate-file-input').value = '';
+  // The post-commit nudge is per-commit; re-show on next visit so a
+  // subsequent commit (rare but possible if operator imports from two
+  // sources) gets the prompt again.
+  const nudge = document.getElementById('migrate-done-nudge');
+  if (nudge) nudge.classList.remove('dismissed');
+}
+
+async function migrateUpload(file) {
+  const errBox = document.getElementById('migrate-upload-error');
+  errBox.style.display = 'none';
+  const fd = new FormData();
+  fd.append('file', file);
+  let resp;
+  try {
+    resp = await fetch('/api/import/upload', { method: 'POST', body: fd });
+  } catch (e) {
+    errBox.textContent = `network error: ${e.message}`;
+    errBox.style.display = '';
+    return;
+  }
+  const text = await resp.text();
+  let data; try { data = text ? JSON.parse(text) : null; } catch { data = null; }
+  if (!resp.ok) {
+    errBox.textContent = (data && data.detail) || resp.statusText || 'upload failed';
+    errBox.style.display = '';
+    return;
+  }
+  migrateState.preview = data;
+  migrateRenderPreview();
+}
+
+function migrateRenderPreview() {
+  const p = migrateState.preview;
+  if (!p) return;
+  document.getElementById('migrate-step-upload').style.display = 'none';
+  document.getElementById('migrate-step-preview').style.display = '';
+  document.getElementById('migrate-step-done').style.display = 'none';
+
+  // Source label.
+  const srcLabels = {
+    'wg-easy-v14': 'wg-easy v1-v14 (wg0.json)',
+    'wg-easy-v15': 'wg-easy v15+ (sqlite)',
+    'pivpn':       'pivpn',
+    'bare-wg':     'bare wireguard (wg0.conf)',
+  };
+  document.getElementById('migrate-source').textContent = srcLabels[p.source] || p.source;
+
+  // Summary pills.
+  const sm = p.summary || {};
+  const pills = [];
+  if (sm.ok)                         pills.push(`<span class="pill ok">${sm.ok} importable</span>`);
+  if (sm['address-out-of-range'])    pills.push(`<span class="pill warn">${sm['address-out-of-range']} reassign</span>`);
+  if (sm['name-conflict'])           pills.push(`<span class="pill danger">${sm['name-conflict']} name-conflict</span>`);
+  if (sm['pubkey-conflict'])         pills.push(`<span class="pill danger">${sm['pubkey-conflict']} pubkey-conflict</span>`);
+  if (sm['address-conflict'])        pills.push(`<span class="pill danger">${sm['address-conflict']} addr-conflict</span>`);
+  if (sm.invalid)                    pills.push(`<span class="pill danger">${sm.invalid} invalid</span>`);
+  document.getElementById('migrate-summary').innerHTML = pills.join('') ||
+    '<span style="color:var(--fg-muted)">no peers found in upload</span>';
+
+  // Warnings panel.
+  const warnBox = document.getElementById('migrate-warnings');
+  if (p.warnings && p.warnings.length) {
+    warnBox.innerHTML = '<ul>' + p.warnings.map(w => `<li>${escapeHtml(w)}</li>`).join('') + '</ul>';
+    warnBox.style.display = '';
+  } else {
+    warnBox.style.display = 'none';
+  }
+
+  // Server keypair adoption block.
+  const kpBlock = document.getElementById('migrate-server-keypair-block');
+  const adoptCheckbox = document.getElementById('migrate-adopt-key');
+  if (p.server_keypair && p.server_keypair.has_private_key) {
+    kpBlock.style.display = '';
+    adoptCheckbox.checked = true;
+    adoptCheckbox.disabled = false;
+    // Render the key-diff display. We use the source's incoming pubkey
+    // and the wgflow current server pubkey, fetched from peersDB (server
+    // info is in the 'server' tab's load — also exposed at /api/server).
+    const incomingPub = p.server_keypair.public_key || '(will derive at commit time)';
+    fetch('/api/server').then(r => r.json()).then(srv => {
+      const currentPub = (srv && srv.public_key) || '(unknown)';
+      document.getElementById('migrate-key-diff').innerHTML = `
+        <div class="row outgoing"><span class="lbl">current</span><span class="val">${escapeHtml(shortenKey(currentPub))}</span></div>
+        <div class="row"><span class="lbl">incoming</span><span class="val">${escapeHtml(shortenKey(incomingPub))}</span></div>
+      `;
+    }).catch(() => {
+      document.getElementById('migrate-key-diff').innerHTML =
+        '<div class="row"><span class="lbl">incoming</span><span class="val">' +
+        escapeHtml(shortenKey(incomingPub)) + '</span></div>';
+    });
+  } else {
+    kpBlock.style.display = 'none';
+    adoptCheckbox.checked = false;
+  }
+
+  // Per-peer rows.
+  const tbody = document.getElementById('migrate-peers-body');
+  tbody.innerHTML = '';
+  for (const peer of p.peers) {
+    const tr = document.createElement('tr');
+    const importable = peer.status !== 'invalid' &&
+                       peer.status !== 'name-conflict' &&
+                       peer.status !== 'pubkey-conflict' &&
+                       peer.status !== 'address-conflict';
+    if (!importable) tr.classList.add('invalid');
+
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.dataset.idx = String(peer.index);
+    cb.checked = importable;
+    cb.disabled = !importable;
+
+    const nameTd = document.createElement('td');
+    nameTd.textContent = peer.name || '(unnamed)';
+    if (peer.invalid_reason) {
+      nameTd.innerHTML += `<div class="invalid-reason">${escapeHtml(peer.invalid_reason)}</div>`;
+    }
+
+    const addrTd = document.createElement('td');
+    addrTd.textContent = peer.address || '—';
+    if (peer.assigned_address && peer.assigned_address !== peer.address) {
+      addrTd.innerHTML += `<div class="reassigned">→ ${escapeHtml(peer.assigned_address)}</div>`;
+    }
+
+    const statusTd = document.createElement('td');
+    const badgeClass = {
+      'ok':                   'ok',
+      'address-out-of-range': 'warn',
+      'name-conflict':        'danger',
+      'pubkey-conflict':      'danger',
+      'address-conflict':     'danger',
+      'invalid':              'danger',
+    }[peer.status] || 'warn';
+    statusTd.innerHTML = `<span class="badge ${badgeClass}">${peer.status}</span>`;
+
+    const privTd = document.createElement('td');
+    privTd.innerHTML = peer.has_private_key
+      ? '<span style="color:var(--fg)">✓</span>'
+      : '<span class="privkey-no">no — bare wg</span>';
+
+    const cbTd = document.createElement('td');
+    cbTd.appendChild(cb);
+    tr.appendChild(cbTd);
+    tr.appendChild(nameTd);
+    tr.appendChild(addrTd);
+    tr.appendChild(statusTd);
+    tr.appendChild(privTd);
+    tbody.appendChild(tr);
+  }
+
+  // Reset confirm flow.
+  document.getElementById('migrate-confirm-input').value = '';
+  document.getElementById('migrate-commit-btn').disabled = true;
+  document.getElementById('migrate-commit-error').style.display = 'none';
+}
+
+function shortenKey(k) {
+  if (!k || k.length < 20) return k || '';
+  return k.slice(0, 12) + '…' + k.slice(-6);
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+async function migrateCommit() {
+  const errBox = document.getElementById('migrate-commit-error');
+  errBox.style.display = 'none';
+  const indices = Array.from(
+    document.querySelectorAll('#migrate-peers-body input[type="checkbox"]:checked')
+  ).map(cb => parseInt(cb.dataset.idx, 10));
+  const adopt = document.getElementById('migrate-adopt-key').checked &&
+                document.getElementById('migrate-server-keypair-block').style.display !== 'none';
+  const confirmText = document.getElementById('migrate-confirm-input').value;
+  let result;
+  try {
+    result = await api('POST', '/api/import/commit', {
+      preview_id: migrateState.preview.preview_id,
+      accepted_indices: indices,
+      adopt_server_keypair: adopt,
+      confirm_token: confirmText,
+    });
+  } catch (e) {
+    errBox.textContent = e.message;
+    errBox.style.display = '';
+    return;
+  }
+  // Show done screen.
+  document.getElementById('migrate-step-preview').style.display = 'none';
+  document.getElementById('migrate-step-done').style.display = '';
+  const lines = [
+    `imported <strong style="color:var(--accent)">${result.imported}</strong> peer${result.imported === 1 ? '' : 's'}`,
+  ];
+  if (result.skipped_conflict)  lines.push(`skipped ${result.skipped_conflict} conflict${result.skipped_conflict === 1 ? '' : 's'}`);
+  if (result.skipped_invalid)   lines.push(`skipped ${result.skipped_invalid} invalid`);
+  if (result.server_keypair_adopted) {
+    lines.push(`server keypair replaced — new pubkey <code>${escapeHtml(shortenKey(result.new_server_pubkey || ''))}</code>`);
+  }
+  document.getElementById('migrate-done-msg').innerHTML = lines.join('<br>');
+  // Refresh the peer list in the rest of the UI so newly imported peers appear.
+  if (typeof loadPeers === 'function') loadPeers();
+}
+
+// =============================================================================
+// migration toggle (separate from the import flow itself)
+// =============================================================================
+// Migration is a one-time operation per deployment; once done, operators
+// typically want the /api/import/* endpoints locked behind 403 to shrink
+// the attack surface. Toggle is in network_settings (DB-persisted) so
+// it survives container restarts. UI surfaces it three places:
+//   1. The migrate tab itself is hidden via tabs visibility on page load
+//   2. A toggle row in the server tab to flip it on/off any time
+//   3. A post-commit nudge banner with a one-click "disable" button
+
+async function loadMigrationState() {
+  // Fetch the current toggle state and reflect it in the UI. Called at
+  // boot from bootApp (so tab visibility is correct on first paint),
+  // and again from loadServer (so the toggle row mirrors the truth).
+  let state;
+  try {
+    state = await api('GET', '/api/server/migration');
+  } catch (e) {
+    // If the endpoint doesn't exist (running against an older server)
+    // or auth failed, default to leaving the tab visible — fail-open
+    // so a transient issue doesn't make a feature seem to vanish.
+    state = { enabled: true };
+  }
+  applyMigrationVisibility(state.enabled);
+  // Sync the server-tab toggle if it's rendered.
+  const checkbox = document.getElementById('server-migration-toggle');
+  if (checkbox) {
+    checkbox.checked = state.enabled;
+    const label = document.getElementById('server-migration-label');
+    if (label) label.textContent = state.enabled ? 'enabled' : 'disabled';
+  }
+}
+
+function applyMigrationVisibility(enabled) {
+  // Hide both the tab header and the pane. If the migrate tab was the
+  // currently-active one when the operator disables it, we'd leave them
+  // looking at an empty area — fall back to the 'single' tab in that
+  // case. Symmetric: if currently on a different tab, leave it alone.
+  const migrateTab = document.querySelector('[data-tab="migrate"]');
+  const migratePane = document.querySelector('[data-pane="migrate"]');
+  if (!migrateTab || !migratePane) return;
+  migrateTab.style.display = enabled ? '' : 'none';
+  if (!enabled) {
+    migratePane.style.display = 'none';
+    if (migrateTab.classList.contains('active')) {
+      // Switch to the 'add one' tab. We can't call switchTab() here
+      // unconditionally since this runs before bootApp completes;
+      // simulate a click instead so the existing tab logic handles
+      // the active-class swap.
+      const fallback = document.querySelector('[data-tab="single"]');
+      if (fallback) fallback.click();
+    }
+  }
+}
+
+async function setMigrationState(enabled) {
+  // Persists via PUT, then re-applies visibility. Returns the new state
+  // (or throws on failure for the caller to surface).
+  const result = await api('PUT', '/api/server/migration', { enabled });
+  applyMigrationVisibility(result.enabled);
+  const checkbox = document.getElementById('server-migration-toggle');
+  if (checkbox) checkbox.checked = result.enabled;
+  const label = document.getElementById('server-migration-label');
+  if (label) label.textContent = result.enabled ? 'enabled' : 'disabled';
+  return result.enabled;
+}
+
+// Wire up event handlers when DOM is ready.
+(function initMigrate() {
+  const drop = document.getElementById('migrate-drop');
+  const fileInput = document.getElementById('migrate-file-input');
+  if (!drop || !fileInput) return;
+
+  drop.addEventListener('click', () => fileInput.click());
+  drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('dragover'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('dragover'));
+  drop.addEventListener('drop', e => {
+    e.preventDefault();
+    drop.classList.remove('dragover');
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      migrateUpload(e.dataTransfer.files[0]);
+    }
+  });
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files && fileInput.files[0]) {
+      migrateUpload(fileInput.files[0]);
+    }
+  });
+
+  // Confirm-token gating: enable commit button only when text is exactly 'IMPORT'.
+  const confirmInput = document.getElementById('migrate-confirm-input');
+  confirmInput.addEventListener('input', () => {
+    document.getElementById('migrate-commit-btn').disabled = confirmInput.value !== 'IMPORT';
+  });
+
+  // Select-all behavior.
+  const selectAll = document.getElementById('migrate-select-all');
+  selectAll.addEventListener('change', () => {
+    document.querySelectorAll('#migrate-peers-body input[type="checkbox"]:not(:disabled)')
+      .forEach(cb => { cb.checked = selectAll.checked; });
+  });
+
+  document.getElementById('migrate-cancel').addEventListener('click', migrateReset);
+  document.getElementById('migrate-done-back').addEventListener('click', migrateReset);
+  document.getElementById('migrate-commit-btn').addEventListener('click', migrateCommit);
+
+  // Server-tab toggle row. Wired here (not in loadServer) because the
+  // checkbox itself is rendered statically, not by loadServer's innerHTML
+  // template. Single source of state truth: PUT /api/server/migration.
+  const serverToggle = document.getElementById('server-migration-toggle');
+  if (serverToggle) {
+    serverToggle.addEventListener('change', async () => {
+      try {
+        await setMigrationState(serverToggle.checked);
+      } catch (e) {
+        // Roll back the checkbox on failure so its visual state stays
+        // consistent with the server. Then surface the error.
+        serverToggle.checked = !serverToggle.checked;
+        alert('failed to update migration toggle: ' + e.message);
+      }
+    });
+  }
+
+  // Post-commit nudge → disable importer in one click. The nudge is
+  // dismissed (not removed) so a subsequent commit in the same session
+  // still gets the prompt by way of migrateReset re-showing it.
+  const nudgeBtn = document.getElementById('migrate-disable-now');
+  if (nudgeBtn) {
+    nudgeBtn.addEventListener('click', async () => {
+      nudgeBtn.disabled = true;
+      try {
+        await setMigrationState(false);
+        const nudge = document.getElementById('migrate-done-nudge');
+        if (nudge) {
+          nudge.innerHTML = '<strong style="color: var(--accent)">✓ migration disabled.</strong> '
+            + 'the import endpoints now return 403. re-enable from the server tab any time.';
+        }
+      } catch (e) {
+        nudgeBtn.disabled = false;
+        alert('failed to disable migration: ' + e.message);
+      }
+    });
+  }
+
+  // Initial load — set tab visibility before the user can click anything.
+  loadMigrationState();
+})();
+
+// =============================================================================
+// instance identity (name + color theme)
+// =============================================================================
+// Two entry points: header chrome (right-click on the name, or ⚙ icon on
+// hover) and the server-tab card (discoverable + mobile-friendly).
+// Both are wired to the same load/save functions; mutating one mirrors
+// to the other live, so opening the popover after editing in server tab
+// shows the just-saved values without a refresh.
+
+// Catalog of the 10 themes. Hex values match the CSS for swatch rendering;
+// the CSS is the source of truth for the actual page colors. Ordering
+// here determines the swatch order in the picker. The first 5 are the
+// original v3.5 themes; the remaining 5 were added in the v3.5 update.
+const THEMES = [
+  { id: 'phosphor', label: 'phosphor green', color: '#8bff6a' },
+  { id: 'amber',    label: 'amber',          color: '#ffb000' },
+  { id: 'cyan',     label: 'cyan',           color: '#5fffe0' },
+  { id: 'magenta',  label: 'magenta',        color: '#ff5fb0' },
+  { id: 'ice',      label: 'ice blue',       color: '#a0c8ff' },
+  { id: 'lime',     label: 'lime',           color: '#c5ff4a' },
+  { id: 'pink',     label: 'hot pink',       color: '#ff3d8e' },
+  { id: 'purple',   label: 'deep purple',    color: '#b388ff' },
+  { id: 'gold',     label: 'gold',           color: '#ffd24a' },
+  { id: 'mint',     label: 'mint',           color: '#7affc7' },
+];
+
+// In-memory mirror of the server's instance config. Updated on every
+// successful load/save. Used so subsequent UI updates (e.g. opening the
+// popover) don't have to re-fetch.
+const instanceState = { name: '', color_theme: 'phosphor' };
+
+async function loadInstanceConfig() {
+  // Diagnostic logging — temporary, remove after the "doesn't refresh
+  // at first login" symptom is confirmed fixed. Look for these in
+  // browser devtools Console after a fresh login.
+  console.debug('[wgflow] loadInstanceConfig: starting');
+  let cfg;
+  try {
+    cfg = await api('GET', '/api/server/instance');
+    console.debug('[wgflow] loadInstanceConfig: got', cfg);
+  } catch (e) {
+    // Endpoint missing (older server) or auth not yet established. Fall
+    // through to defaults — the UI keeps working, just without the new
+    // chrome.
+    console.warn('[wgflow] loadInstanceConfig: GET failed, using defaults:', e.message);
+    cfg = { name: '', color_theme: 'phosphor' };
+  }
+  instanceState.name = cfg.name || '';
+  instanceState.color_theme = cfg.color_theme || 'phosphor';
+  applyInstanceTheme(instanceState.color_theme);
+  applyInstanceName(instanceState.name);
+  console.debug('[wgflow] loadInstanceConfig: applied name=%o theme=%o',
+                instanceState.name, instanceState.color_theme);
+  // Keep the server-tab card in sync if it's already rendered.
+  const nameInput = document.getElementById('server-instance-name');
+  if (nameInput && document.activeElement !== nameInput) {
+    nameInput.value = instanceState.name;
+  }
+  renderServerTabSwatches();
+}
+
+function applyInstanceTheme(themeId) {
+  // Set the data-attribute on <html>. CSS does the rest via the per-theme
+  // [data-instance-theme="…"] blocks. Phosphor is the default and has no
+  // override block — set the attribute regardless so the bookkeeping is
+  // consistent even if it's a no-op visually.
+  document.documentElement.setAttribute('data-instance-theme', themeId);
+}
+
+function applyInstanceName(name) {
+  const chrome = document.getElementById('instance-chrome');
+  const span = document.getElementById('instance-name');
+  if (!chrome || !span) return;
+  span.textContent = name;
+  // The has-name class controls visibility of the entire chrome block
+  // (separator + name + ⚙). Empty name = hidden, matching v3.4 visual.
+  if (name && name.length > 0) {
+    chrome.classList.add('has-name');
+  } else {
+    chrome.classList.remove('has-name');
+  }
+}
+
+async function saveInstanceConfig(patch) {
+  // patch is {name?, color_theme?}. The server PUT accepts partial bodies.
+  // On success, we update the in-memory mirror and re-render.
+  try {
+    const cfg = await api('PUT', '/api/server/instance', patch);
+    instanceState.name = cfg.name || '';
+    instanceState.color_theme = cfg.color_theme || 'phosphor';
+    applyInstanceTheme(instanceState.color_theme);
+    applyInstanceName(instanceState.name);
+    // Sync server-tab card.
+    const nameInput = document.getElementById('server-instance-name');
+    if (nameInput && document.activeElement !== nameInput) {
+      nameInput.value = instanceState.name;
+    }
+    renderServerTabSwatches();
+    return cfg;
+  } catch (e) {
+    // Surface but don't throw — caller decides whether to roll back UI.
+    if (typeof toast === 'function') toast('save failed: ' + e.message, 'error');
+    throw e;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Header popover (right-click + ⚙)
+// ---------------------------------------------------------------------------
+
+let _instancePopover = null;
+
+function openInstancePopover() {
+  closeInstancePopover();  // ensure idempotent
+  const chrome = document.getElementById('instance-chrome');
+  if (!chrome) return;
+  const popover = document.createElement('div');
+  popover.className = 'instance-popover open';
+  popover.id = 'instance-popover';
+  popover.innerHTML = `
+    <div class="instance-popover-section">
+      <div class="instance-popover-label">name</div>
+      <input class="instance-popover-input" id="instance-popover-name" type="text"
+             maxlength="40" autocomplete="off" placeholder="e.g. home-server">
+      <div class="instance-popover-hint">enter to save · esc to close</div>
+    </div>
+    <div class="instance-popover-divider"></div>
+    <div class="instance-popover-section">
+      <div class="instance-popover-label">color</div>
+      <div class="instance-swatches" id="instance-popover-swatches"></div>
+    </div>
+  `;
+  chrome.appendChild(popover);
+  chrome.classList.add('menu-open');
+  _instancePopover = popover;
+
+  // Pre-fill name input + focus.
+  const nameInput = popover.querySelector('#instance-popover-name');
+  nameInput.value = instanceState.name;
+  setTimeout(() => nameInput.focus(), 0);  // defer past the click event
+  nameInput.addEventListener('keydown', async (ev) => {
+    if (ev.key === 'Enter') {
+      ev.preventDefault();
+      try {
+        await saveInstanceConfig({ name: nameInput.value });
+        closeInstancePopover();
+        if (typeof toast === 'function') toast('instance name saved');
+      } catch (_) { /* error already toasted */ }
+    } else if (ev.key === 'Escape') {
+      closeInstancePopover();
+    }
+  });
+
+  // Render swatches.
+  const onSwatchPick = async (themeId) => {
+    try {
+      await saveInstanceConfig({ color_theme: themeId });
+      // Don't close the popover — let the operator try a different
+      // theme without having to re-open. Re-render the active marker.
+      renderSwatchesInto(popover.querySelector('#instance-popover-swatches'),
+                         onSwatchPick);
+    } catch (_) {}
+  };
+  renderSwatchesInto(popover.querySelector('#instance-popover-swatches'),
+                     onSwatchPick);
+
+  // Click-outside-to-close. Defer so the click that opened the popover
+  // doesn't immediately close it. mousedown to catch before any click
+  // handlers steal focus.
+  setTimeout(() => {
+    document.addEventListener('mousedown', _outsideClickHandler);
+    document.addEventListener('keydown', _escKeyHandler);
+  }, 0);
+}
+
+function closeInstancePopover() {
+  const chrome = document.getElementById('instance-chrome');
+  if (chrome) chrome.classList.remove('menu-open');
+  if (_instancePopover) {
+    _instancePopover.remove();
+    _instancePopover = null;
+  }
+  document.removeEventListener('mousedown', _outsideClickHandler);
+  document.removeEventListener('keydown', _escKeyHandler);
+}
+
+function _outsideClickHandler(ev) {
+  const chrome = document.getElementById('instance-chrome');
+  if (chrome && !chrome.contains(ev.target)) closeInstancePopover();
+}
+
+function _escKeyHandler(ev) {
+  if (ev.key === 'Escape') closeInstancePopover();
+}
+
+// ---------------------------------------------------------------------------
+// Swatch rendering (shared between popover and server tab)
+// ---------------------------------------------------------------------------
+
+function renderSwatchesInto(container, onPick) {
+  if (!container) return;
+  container.innerHTML = '';
+  THEMES.forEach(t => {
+    const sw = document.createElement('div');
+    sw.className = 'instance-swatch' + (t.id === instanceState.color_theme ? ' active' : '');
+    sw.title = t.label;
+    sw.style.setProperty('--swatch-color', t.color);
+    sw.addEventListener('click', () => onPick(t.id));
+    container.appendChild(sw);
+  });
+}
+
+function renderServerTabSwatches() {
+  // Re-render the server-tab swatches with the current active theme
+  // marked. Called from loadInstanceConfig so the card mirrors the
+  // popover live.
+  const container = document.getElementById('server-instance-themes');
+  if (!container) return;
+  renderSwatchesInto(container, async (themeId) => {
+    try {
+      await saveInstanceConfig({ color_theme: themeId });
+      if (typeof toast === 'function') toast(`theme: ${themeId}`);
+    } catch (_) {}
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Wire-up
+// ---------------------------------------------------------------------------
+
+(function initInstanceChrome() {
+  // Right-click on the name span opens the popover.
+  const nameSpan = document.getElementById('instance-name');
+  if (nameSpan) {
+    nameSpan.addEventListener('contextmenu', (ev) => {
+      ev.preventDefault();
+      openInstancePopover();
+    });
+  }
+  // Click on the ⚙ icon also opens.
+  const editBtn = document.getElementById('instance-edit-btn');
+  if (editBtn) {
+    editBtn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      openInstancePopover();
+    });
+  }
+
+  // Server-tab name input: save on blur or enter, but NOT on every
+  // keystroke (would hammer the server with PUTs as the user types).
+  const serverNameInput = document.getElementById('server-instance-name');
+  if (serverNameInput) {
+    const commit = async () => {
+      const newName = serverNameInput.value;
+      if (newName === instanceState.name) return;  // no-op
+      try {
+        await saveInstanceConfig({ name: newName });
+        if (typeof toast === 'function') toast('instance name saved');
+      } catch (_) {
+        // Roll back the input to the last-known-good value
+        serverNameInput.value = instanceState.name;
+      }
+    };
+    serverNameInput.addEventListener('blur', commit);
+    serverNameInput.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        serverNameInput.blur();  // triggers commit via blur handler
+      }
+    });
+  }
+})();
+
+// Hook the boot — see bootApp() above; loadInstanceConfig is now invoked
+// there, AFTER the auth flow has established a session cookie. The
+// previous standalone IIFE here fired ~200ms after DOMContentLoaded
+// which on a fresh page load (no session yet) hit /api/server/instance
+// before login, got 401, fell through to defaults, and never re-ran.
+// Symptom: operator's saved name + theme appeared lost across page
+// reloads because every reload silently reverted to defaults at boot.
+
+// =============================================================================
+// v3.6: tunnel settings (client MTU + MSS clamp) + iptables modal + reorder
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Tunnel settings — load on boot, wire inputs to PUT /api/server/tunnel
+// ---------------------------------------------------------------------------
+
+async function loadTunnelSettings() {
+  let cfg;
+  try {
+    cfg = await api('GET', '/api/server/tunnel');
+  } catch (e) {
+    // Pre-3.6 server or auth not yet established — fall through silently.
+    return;
+  }
+  const mtuInput = document.getElementById('server-client-mtu');
+  const clampInput = document.getElementById('server-mss-clamp');
+  if (mtuInput && document.activeElement !== mtuInput) {
+    mtuInput.value = cfg.client_mtu || '';
+  }
+  if (clampInput) {
+    clampInput.checked = !!cfg.mss_clamp;
+  }
+}
+
+(function initTunnelSettings() {
+  const mtuInput = document.getElementById('server-client-mtu');
+  const clampInput = document.getElementById('server-mss-clamp');
+  if (!mtuInput || !clampInput) return;
+
+  // MTU saves on blur or enter — same pattern as instance-name input.
+  // Skip the PUT entirely on no-op (avoid touching the kernel for nothing).
+  let _lastMtu = '';
+  const commitMtu = async () => {
+    const v = mtuInput.value.trim();
+    if (v === _lastMtu) return;
+    try {
+      await api('PUT', '/api/server/tunnel', { client_mtu: v });
+      _lastMtu = v;
+      if (typeof toast === 'function') toast(v ? `MTU set to ${v}` : 'MTU override cleared');
+    } catch (e) {
+      if (typeof toast === 'function') toast('MTU save failed: ' + (e.message || ''), 'error');
+      // Roll input back to last-known-good value on validation error
+      // (e.g. number out of 576..1500 range).
+      mtuInput.value = _lastMtu;
+    }
+  };
+  mtuInput.addEventListener('blur', commitMtu);
+  mtuInput.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') { ev.preventDefault(); mtuInput.blur(); }
+  });
+  // Track the loaded value as the no-op baseline.
+  setTimeout(() => { _lastMtu = mtuInput.value.trim(); }, 250);
+
+  // Preset buttons — set the input value and trigger commit.
+  document.querySelectorAll('[data-mtu-preset]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      mtuInput.value = btn.dataset.mtuPreset || '';
+      commitMtu();
+    });
+  });
+
+  // MSS clamp toggle — fires on every change (cheap, single iptables rule).
+  clampInput.addEventListener('change', async () => {
+    try {
+      await api('PUT', '/api/server/tunnel', { mss_clamp: clampInput.checked });
+      if (typeof toast === 'function') {
+        toast(clampInput.checked ? 'MSS clamping enabled' : 'MSS clamping disabled');
+      }
+    } catch (e) {
+      if (typeof toast === 'function') toast('MSS clamp save failed: ' + (e.message || ''), 'error');
+      // Revert checkbox state on failure.
+      clampInput.checked = !clampInput.checked;
+    }
+  });
+})();
+
+// ---------------------------------------------------------------------------
+// Iptables raw viewer modal
+// ---------------------------------------------------------------------------
+
+const iptablesViewer = {
+  pollTimer: null,
+  filterValue: '',
+  rawText: '',
+};
+
+async function iptablesOpen() {
+  const overlay = document.getElementById('iptables-overlay');
+  if (!overlay) return;
+  overlay.style.display = 'flex';
+  document.getElementById('iptables-status').textContent = 'loading…';
+  document.getElementById('iptables-meta').textContent = '—';
+  await iptablesRefresh();
+  if (iptablesViewer.pollTimer === null) {
+    const ms = (typeof _liveIconState !== 'undefined' && _liveIconState.pollIntervalMs) || 3000;
+    iptablesViewer.pollTimer = setInterval(iptablesRefresh, ms);
+  }
+}
+
+function iptablesClose() {
+  const overlay = document.getElementById('iptables-overlay');
+  if (overlay) overlay.style.display = 'none';
+  if (iptablesViewer.pollTimer !== null) {
+    clearInterval(iptablesViewer.pollTimer);
+    iptablesViewer.pollTimer = null;
+  }
+}
+
+async function iptablesRefresh() {
+  try {
+    const r = await fetch('/api/iptables/dump', { credentials: 'same-origin' });
+    if (!r.ok) throw new Error('http ' + r.status);
+    const text = await r.text();
+    iptablesViewer.rawText = text;
+    iptablesRender();
+    const ts = new Date().toLocaleTimeString();
+    document.getElementById('iptables-status').textContent =
+      `last poll ${ts} · refreshing every 3s`;
+    document.getElementById('iptables-meta').textContent =
+      `${text.split('\n').length} lines`;
+  } catch (e) {
+    document.getElementById('iptables-status').textContent =
+      'error: ' + (e.message || 'fetch failed');
+  }
+}
+
+function iptablesRender() {
+  const body = document.getElementById('iptables-body');
+  if (!body) return;
+  const lines = iptablesViewer.rawText.split('\n');
+  const filter = iptablesViewer.filterValue.toLowerCase();
+  // Build HTML with simple highlighting for WGFLOW-related lines and
+  // chain header lines. We escape per-line and inject highlight spans.
+  const out = [];
+  for (const line of lines) {
+    const lower = line.toLowerCase();
+    if (filter && !lower.includes(filter)) continue;
+    let cls = '';
+    if (line.includes('WGFLOW')) cls = 'ipt-wgflow';
+    else if (/^Chain /.test(line)) cls = 'ipt-chain';
+    out.push(cls
+      ? `<span class="${cls}">${escape(line)}</span>`
+      : escape(line));
+  }
+  body.innerHTML = out.join('\n');
+}
+
+(function initIptablesModal() {
+  // The modal HTML lives AFTER this script's closing tag (it's
+  // appended at the end of the body). At IIFE evaluation time those
+  // elements don't exist yet, so getElementById returns null and the
+  // wire-up silently no-ops — that was the v3.6 RC bug where the close
+  // button didn't work. We defer the wire-up to run after the DOM is
+  // fully parsed. DOMContentLoaded if still loading; setTimeout(0)
+  // otherwise (script may have been injected dynamically post-load).
+  const wire = () => {
+    const btn = document.getElementById('server-view-iptables');
+    if (btn) btn.addEventListener('click', iptablesOpen);
+    const closeBtn = document.getElementById('iptables-close');
+    if (closeBtn) closeBtn.addEventListener('click', iptablesClose);
+    const refreshBtn = document.getElementById('iptables-refresh');
+    if (refreshBtn) refreshBtn.addEventListener('click', iptablesRefresh);
+    const filterInput = document.getElementById('iptables-filter');
+    if (filterInput) {
+      filterInput.addEventListener('input', (ev) => {
+        iptablesViewer.filterValue = ev.target.value || '';
+        iptablesRender();
+      });
+    }
+    // Click the overlay backdrop (outside the .iptables-frame) to close.
+    // Same UX pattern as Esc; gives the user a third way out.
+    const overlay = document.getElementById('iptables-overlay');
+    if (overlay) {
+      overlay.addEventListener('click', (ev) => {
+        if (ev.target === overlay) iptablesClose();
+      });
+    }
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', wire);
+  } else {
+    setTimeout(wire, 0);
+  }
+
+  // Esc-to-close and visibility-pause are document-level listeners and
+  // don't depend on modal DOM existing at attach time, so they can stay
+  // unconditional.
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Escape') return;
+    const overlay = document.getElementById('iptables-overlay');
+    if (overlay && overlay.style.display !== 'none') iptablesClose();
+  });
+  document.addEventListener('visibilitychange', () => {
+    const overlay = document.getElementById('iptables-overlay');
+    if (!overlay || overlay.style.display === 'none') return;
+    if (document.hidden) {
+      if (iptablesViewer.pollTimer !== null) {
+        clearInterval(iptablesViewer.pollTimer);
+        iptablesViewer.pollTimer = null;
+      }
+    } else if (iptablesViewer.pollTimer === null) {
+      iptablesRefresh();
+      const ms = (typeof _liveIconState !== 'undefined' && _liveIconState.pollIntervalMs) || 3000;
+      iptablesViewer.pollTimer = setInterval(iptablesRefresh, ms);
+    }
+  });
+
+  // Final safety net: kill the timer on page close. The browser would
+  // free the interval anyway when the document tears down, but this is
+  // explicit and means there's never a moment between "user closed tab"
+  // and "browser GC'd the document" where iptablesRefresh fires against
+  // a half-torn-down DOM.
+  window.addEventListener('beforeunload', () => {
+    if (iptablesViewer.pollTimer !== null) {
+      clearInterval(iptablesViewer.pollTimer);
+      iptablesViewer.pollTimer = null;
+    }
+  });
+})();
+
+// ---------------------------------------------------------------------------
+// Drag-to-reorder panels
+// ---------------------------------------------------------------------------
+// 5 reorderable panels marked with data-panel-id and class "panel-reorderable".
+// Each has a drag handle injected into its header. Order persists to
+// /api/server/panel-order. Applied at boot via reorderApplyFromConfig.
+//
+// Implementation: HTML5 native drag-and-drop. Drop targets compute
+// "above or below" based on cursor Y position relative to the target's
+// midpoint, draw a colored top/bottom border to indicate the insertion
+// point, and on drop reinsert the dragged element accordingly.
+
+const _reorderState = {
+  draggedId: null,
+};
+
+function reorderInjectHandles() {
+  // Find all reorderable panels and inject a drag handle into each
+  // panel's header. We look for `.head` (the existing class on every
+  // panel header in this codebase) and append the handle to it.
+  document.querySelectorAll('.panel-reorderable').forEach(panel => {
+    if (panel.querySelector('.panel-drag-handle')) return;  // already present
+    const header = panel.querySelector('.head');
+    if (!header) return;
+    const handle = document.createElement('span');
+    handle.className = 'panel-drag-handle';
+    handle.textContent = '⋮⋮';
+    handle.title = 'drag to reorder this panel';
+    handle.draggable = true;
+    handle.addEventListener('dragstart', (ev) => {
+      _reorderState.draggedId = panel.dataset.panelId;
+      panel.classList.add('dragging');
+      // Required by Firefox: setData on the dataTransfer object or
+      // dragstart silently no-ops.
+      try { ev.dataTransfer.setData('text/plain', panel.dataset.panelId); } catch (_) {}
+      ev.dataTransfer.effectAllowed = 'move';
+    });
+    handle.addEventListener('dragend', () => {
+      panel.classList.remove('dragging');
+      document.querySelectorAll('.panel-reorderable').forEach(p => {
+        p.classList.remove('drop-above', 'drop-below');
+      });
+      _reorderState.draggedId = null;
+    });
+    header.appendChild(handle);
+  });
+
+  // Each panel is also a drop target. We can't put dragover on .head
+  // alone because handles overlap visually with content; the whole panel
+  // accepts drops.
+  document.querySelectorAll('.panel-reorderable').forEach(panel => {
+    if (panel._reorderBound) return;
+    panel._reorderBound = true;
+    panel.addEventListener('dragover', (ev) => {
+      if (!_reorderState.draggedId) return;
+      if (panel.dataset.panelId === _reorderState.draggedId) return;
+      ev.preventDefault();
+      const rect = panel.getBoundingClientRect();
+      const above = (ev.clientY - rect.top) < rect.height / 2;
+      panel.classList.toggle('drop-above', above);
+      panel.classList.toggle('drop-below', !above);
+    });
+    panel.addEventListener('dragleave', () => {
+      panel.classList.remove('drop-above', 'drop-below');
+    });
+    panel.addEventListener('drop', async (ev) => {
+      ev.preventDefault();
+      const dragged = document.querySelector(
+        `.panel-reorderable[data-panel-id="${CSS.escape(_reorderState.draggedId)}"]`
+      );
+      if (!dragged || dragged === panel) return;
+      const rect = panel.getBoundingClientRect();
+      const above = (ev.clientY - rect.top) < rect.height / 2;
+      const parent = panel.parentNode;
+      if (above) {
+        parent.insertBefore(dragged, panel);
+      } else {
+        parent.insertBefore(dragged, panel.nextSibling);
+      }
+      panel.classList.remove('drop-above', 'drop-below');
+      // Persist new order to the server.
+      const newOrder = Array.from(
+        document.querySelectorAll('.panel-reorderable')
+      ).map(p => p.dataset.panelId);
+      try {
+        await api('PUT', '/api/server/panel-order', { order: newOrder });
+      } catch (e) {
+        if (typeof toast === 'function') {
+          toast('reorder save failed: ' + (e.message || ''), 'error');
+        }
+      }
+    });
+  });
+}
+
+async function reorderApplyFromConfig() {
+  let cfg;
+  try {
+    cfg = await api('GET', '/api/server/panel-order');
+  } catch (e) {
+    return;  // pre-3.6 server or unauth — keep DOM source order
+  }
+  const order = cfg.order || [];
+  if (!order.length) return;
+  // Find the parent of the first reorderable panel — all panels share
+  // the same parent (the dashboard wrapper).
+  const first = document.querySelector('.panel-reorderable');
+  if (!first) return;
+  const parent = first.parentNode;
+  // For each id in the saved order, move that panel to the END of the
+  // parent. Iterating saved-order top-to-bottom and appending each puts
+  // them in the saved order at the bottom of the wrapper. Anything
+  // unknown stays where it is in DOM source order (defensive against
+  // schema drift between client and server versions).
+  for (const id of order) {
+    const panel = parent.querySelector(
+      `.panel-reorderable[data-panel-id="${CSS.escape(id)}"]`
+    );
+    if (panel) parent.appendChild(panel);
+  }
+}
+
+// Kick off on boot. Handles need to wait for the panels to exist in the
+// DOM, so we run this after a microtask + delay matching the other
+// post-auth boot calls (loadInstanceConfig pattern).
+(function initReorder() {
+  const start = () => {
+    setTimeout(() => {
+      reorderInjectHandles();
+      reorderApplyFromConfig();
+      // Also re-load tunnel settings here, same boot context.
+      loadTunnelSettings();
+      // v3.6 in-place patch: minimize state + polling config.
+      // Minimize buttons go in the same headers as drag handles, so
+      // injection order matters: drag first (so the auto-margin slot
+      // is filled), then minimize (slots in next to it).
+      minimizeInjectButtons();
+      minimizeApplyFromConfig();
+      liveIconLoadConfig();
+
+      // Reset-to-default button. Sends an empty order array to the
+      // server, which clears the override; on next page load the
+      // panels appear in DOM source order. We don't move panels in
+      // the current DOM — that would require knowing what the
+      // "default" order is from JS, which would duplicate the source
+      // order info. Instead the button reloads the page after saving,
+      // forcing a fresh DOM order from the server's HTML.
+      const resetBtn = document.getElementById('server-reset-panel-order');
+      if (resetBtn) {
+        resetBtn.addEventListener('click', async () => {
+          if (!confirm('reset panel order to default? this will reload the page.')) return;
+          try {
+            await api('PUT', '/api/server/panel-order', { order: [] });
+            location.reload();
+          } catch (e) {
+            if (typeof toast === 'function') {
+              toast('reset failed: ' + (e.message || ''), 'error');
+            }
+          }
+        });
+      }
+    }, 250);
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start);
+  } else {
+    start();
+  }
+})();
+
+// =============================================================================
+// v3.6 in-place patch: minimize panels + live-icon tooltip + polling config
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Minimize panels
+// ---------------------------------------------------------------------------
+// Each reorderable panel gets a `−` / `+` button next to its drag handle.
+// State is persisted server-side via /api/server/panels-minimized so the
+// layout survives reloads. Per the user's design call: minimize is purely
+// visual — background work continues for all panels (logs WebSocket stays
+// open, throughput chart redraws, etc.). The live-icon tooltip is the
+// instrumentation that makes the cost visible.
+
+const _minimizedState = {
+  // panel-id → bool. Hydrated from /api/server/panels-minimized at boot.
+  // Updated optimistically on click; PUT to server is fire-and-forget
+  // (a failure leaves local state ahead of server, but the next reload
+  // reconciles).
+  panels: {},
+};
+
+async function minimizeTogglePanel(panel, btn) {
+  // Single source of truth for collapse/expand. Called by both the
+  // minimize button click and the head double-click handler.
+  const id = panel.dataset.panelId;
+  if (!id) return;
+  const willBeMinimized = !panel.classList.contains('minimized');
+  panel.classList.toggle('minimized', willBeMinimized);
+  if (btn) btn.textContent = willBeMinimized ? '+' : '−';
+  _minimizedState.panels[id] = willBeMinimized;
+  // Persist. Failure is non-fatal — local state is ahead of server,
+  // next reload reconciles.
+  try {
+    await api('PUT', '/api/server/panels-minimized',
+              { minimized: _minimizedState.panels });
+  } catch (e) {
+    if (typeof toast === 'function') {
+      toast('minimize save failed: ' + (e.message || ''), 'error');
+    }
+  }
+}
+
+function minimizeInjectButtons() {
+  // Run after reorderInjectHandles (which adds the drag handle). The
+  // drag handle uses margin-left:auto to push to the right edge; the
+  // minimize button slots in next to it (margin-left:4px, no auto, so
+  // it sits adjacent rather than jumping left).
+  document.querySelectorAll('.panel-reorderable').forEach(panel => {
+    if (panel.querySelector('.panel-min-btn')) return;  // already injected
+    const head = panel.querySelector('.head');
+    if (!head) return;
+    const btn = document.createElement('button');
+    btn.className = 'panel-min-btn';
+    btn.type = 'button';
+    btn.title = 'collapse / expand panel (or double-click header)';
+    btn.textContent = panel.classList.contains('minimized') ? '+' : '−';
+    btn.addEventListener('click', (ev) => {
+      // Stop propagation so the click doesn't bubble into anything
+      // header-level (e.g. sort handlers on the live-peers head).
+      ev.stopPropagation();
+      minimizeTogglePanel(panel, btn);
+    });
+    head.appendChild(btn);
+
+    // Double-click the header to toggle. Skip when the click lands on
+    // interactive elements within the header (refresh button, search
+    // input, count text wrapped in a span — actually spans are fine,
+    // only avoid focusable controls). Also ignore double-clicks on
+    // the drag handle and minimize button themselves so they don't
+    // double-fire the toggle.
+    head.addEventListener('dblclick', (ev) => {
+      const t = ev.target;
+      if (t.closest('button, input, select, textarea, a')) return;
+      // The minimize button is itself a button so it's covered by the
+      // closest('button') check above. Drag handle is technically a
+      // span but happens not to be inside a button — explicitly bail.
+      if (t.classList.contains('panel-drag-handle')) return;
+      ev.preventDefault();
+      minimizeTogglePanel(panel, btn);
+    });
+    // Hint: cursor pointer on the head (when not over an interactive
+    // child) signals that double-click is meaningful. Only applies to
+    // h2 since dblclick on the toolbar buttons would be confusing.
+    const h2 = head.querySelector('h2');
+    if (h2) {
+      h2.style.cursor = 'pointer';
+      h2.title = 'double-click to collapse / expand';
+    }
+  });
+}
+
+async function minimizeApplyFromConfig() {
+  let cfg;
+  try {
+    cfg = await api('GET', '/api/server/panels-minimized');
+  } catch (e) {
+    return;  // pre-3.6 server — leave everything expanded
+  }
+  _minimizedState.panels = cfg.minimized || {};
+  for (const [id, isMin] of Object.entries(_minimizedState.panels)) {
+    if (!isMin) continue;
+    const panel = document.querySelector(
+      `.panel-reorderable[data-panel-id="${CSS.escape(id)}"]`
+    );
+    if (panel) {
+      panel.classList.add('minimized');
+      const btn = panel.querySelector('.panel-min-btn');
+      if (btn) btn.textContent = '+';
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Live-icon tooltip + right-click polling config
+// ---------------------------------------------------------------------------
+// The header's #conn-state element is the "live icon." Hovering shows
+// a tooltip with WS count + breakdown (data flowing in via /ws/status
+// payload's ws_count field). Right-clicking opens a small popup with a
+// slider to adjust the global polling interval.
+
+const _liveIconState = {
+  lastWSCount: { total: 0, breakdown: {} },
+  tooltipEl: null,
+  popupEl: null,
+  pollIntervalMs: 3000,   // hydrated from /api/server/polling at boot
+};
+
+// Called by the existing /ws/status handler whenever a payload arrives.
+// We just stash the latest count; the tooltip uses it on hover.
+function liveIconUpdateWSCount(wsCount) {
+  if (!wsCount || typeof wsCount !== 'object') return;
+  _liveIconState.lastWSCount = {
+    total: wsCount.total || 0,
+    breakdown: wsCount.breakdown || {},
+  };
+  // If the tooltip is currently visible, re-render its content so
+  // counts update live without the user having to re-hover.
+  if (_liveIconState.tooltipEl && _liveIconState.tooltipEl.isConnected) {
+    liveIconRenderTooltip(_liveIconState.tooltipEl);
+  }
+}
+
+function liveIconRenderTooltip(el) {
+  const c = _liveIconState.lastWSCount;
+  let html = `<div class="ws-total">${c.total} WebSocket${c.total === 1 ? '' : 's'} open</div>`;
+  if (c.total > 0) {
+    for (const [src, n] of Object.entries(c.breakdown)) {
+      html += `<div class="ws-row"><span>${escape(src)}</span><span>${n}</span></div>`;
+    }
+  } else {
+    html += `<div class="ws-row" style="color: var(--fg-muted);">no active streams</div>`;
+  }
+  html += `<div class="ws-hint">poll interval: ${_liveIconState.pollIntervalMs}ms · right-click to configure</div>`;
+  el.innerHTML = html;
+}
+
+function liveIconShowTooltip(anchor) {
+  liveIconHideTooltip();
+  const el = document.createElement('div');
+  el.className = 'live-indicator-tooltip';
+  liveIconRenderTooltip(el);
+  document.body.appendChild(el);
+  // Position below+left of the anchor (it's near the right edge of the
+  // header, so opening downward+leftward keeps it on screen).
+  const rect = anchor.getBoundingClientRect();
+  const top = rect.bottom + 6;
+  const right = window.innerWidth - rect.right;
+  el.style.top = `${top}px`;
+  el.style.right = `${right}px`;
+  _liveIconState.tooltipEl = el;
+}
+
+function liveIconHideTooltip() {
+  if (_liveIconState.tooltipEl) {
+    _liveIconState.tooltipEl.remove();
+    _liveIconState.tooltipEl = null;
+  }
+}
+
+function liveIconShowPollingPopup(anchor) {
+  liveIconHidePopup();
+  const el = document.createElement('div');
+  el.className = 'polling-popup';
+  el.innerHTML = `
+    <label>polling interval</label>
+    <div class="row">
+      <input type="range" id="polling-slider" min="1000" max="6000" step="500"
+             value="${_liveIconState.pollIntervalMs}">
+      <span class="value" id="polling-value">${_liveIconState.pollIntervalMs}ms</span>
+    </div>
+    <div class="hint">
+      affects ACL stats, DNS recent, iptables modal.<br>
+      lower = more responsive, higher CPU + iptables exec cost.<br>
+      saves on release.
+    </div>
+  `;
+  document.body.appendChild(el);
+  const rect = anchor.getBoundingClientRect();
+  el.style.top = `${rect.bottom + 6}px`;
+  el.style.right = `${window.innerWidth - rect.right}px`;
+  _liveIconState.popupEl = el;
+
+  const slider = document.getElementById('polling-slider');
+  const valueEl = document.getElementById('polling-value');
+  // Live-update the value display as the user drags. Don't PUT on
+  // every tick — that would hammer the server during a drag. We save
+  // on `change` (which fires when the user releases the slider).
+  slider.addEventListener('input', () => {
+    valueEl.textContent = `${slider.value}ms`;
+  });
+  slider.addEventListener('change', async () => {
+    const ms = parseInt(slider.value, 10);
+    try {
+      await api('PUT', '/api/server/polling', { interval_ms: ms });
+      _liveIconState.pollIntervalMs = ms;
+      // Apply to currently-running polling intervals. The cleanest way
+      // to swap an interval is to stop and restart it; the helper
+      // restartPollingIntervals does that for the panels that care.
+      restartPollingIntervals();
+      if (typeof toast === 'function') toast(`poll interval: ${ms}ms`);
+    } catch (e) {
+      if (typeof toast === 'function') {
+        toast('polling save failed: ' + (e.message || ''), 'error');
+      }
+      slider.value = _liveIconState.pollIntervalMs;
+      valueEl.textContent = `${_liveIconState.pollIntervalMs}ms`;
+    }
+  });
+
+  // Click outside the popup to dismiss. Defer the listener registration
+  // so the right-click that opened it doesn't immediately close it.
+  setTimeout(() => {
+    const onClick = (ev) => {
+      if (!el.contains(ev.target)) {
+        liveIconHidePopup();
+        document.removeEventListener('click', onClick, true);
+      }
+    };
+    document.addEventListener('click', onClick, true);
+  }, 0);
+}
+
+function liveIconHidePopup() {
+  if (_liveIconState.popupEl) {
+    _liveIconState.popupEl.remove();
+    _liveIconState.popupEl = null;
+  }
+}
+
+function restartPollingIntervals() {
+  // The polling intervals we know about: ACL stats, DNS recent (if
+  // it has one), iptables modal. Each maintains its own pollTimer
+  // handle. We restart any that are currently active by stopping +
+  // starting through their normal entry points so the new interval
+  // is picked up. Callers of these don't need to know — they just
+  // call setInterval(refreshFn, getPollingMs()) and the next call
+  // honors the new value.
+  //
+  // Implementation: each polling site reads _liveIconState.pollIntervalMs
+  // when starting. To swap intervals, we stop the timer (which
+  // clearIntervals it) and call the start function again.
+  if (typeof aclStatsState !== 'undefined' && aclStatsState.pollTimer !== null) {
+    clearInterval(aclStatsState.pollTimer);
+    aclStatsState.pollTimer = setInterval(aclStatsRefresh, _liveIconState.pollIntervalMs);
+  }
+  if (typeof iptablesViewer !== 'undefined' && iptablesViewer.pollTimer !== null) {
+    clearInterval(iptablesViewer.pollTimer);
+    iptablesViewer.pollTimer = setInterval(iptablesRefresh, _liveIconState.pollIntervalMs);
+  }
+}
+
+async function liveIconLoadConfig() {
+  try {
+    const cfg = await api('GET', '/api/server/polling');
+    if (cfg && typeof cfg.interval_ms === 'number') {
+      _liveIconState.pollIntervalMs = cfg.interval_ms;
+    }
+  } catch (e) {
+    // Pre-3.6 server or auth not yet established — keep default 3000.
+  }
+}
+
+(function initLiveIcon() {
+  const wire = () => {
+    const el = document.getElementById('conn-state');
+    if (!el) return;
+    el.style.cursor = 'help';
+    el.addEventListener('mouseenter', () => liveIconShowTooltip(el));
+    el.addEventListener('mouseleave', () => liveIconHideTooltip());
+    el.addEventListener('contextmenu', (ev) => {
+      ev.preventDefault();
+      liveIconHideTooltip();
+      liveIconShowPollingPopup(el);
+    });
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', wire);
+  } else {
+    setTimeout(wire, 0);
+  }
+})();
+
 </script>
+
+<!-- iptables raw viewer modal (v3.6).
+     Read-only inspection of the full filter+nat tables. Auto-refreshes
+     every 3 seconds while open; pause-on-hidden via visibilitychange.
+     Filter input hides non-matching lines client-side (substring match,
+     case-insensitive). -->
+<div id="iptables-overlay" style="display:none">
+  <div class="iptables-frame">
+    <header class="iptables-header">
+      <div class="iptables-title">
+        <span class="bracket">[</span>iptables ruleset<span class="bracket">]</span>
+        <span class="mono-dim" style="font-size: 11px; margin-left: 12px;" id="iptables-status">loading…</span>
+      </div>
+      <button class="ghost" id="iptables-close" title="close (esc)">close ✕</button>
+    </header>
+    <div class="iptables-toolbar">
+      <input type="text" id="iptables-filter" placeholder="filter lines (substring, case-insensitive)…" autocomplete="off">
+      <button class="ghost" id="iptables-refresh" title="manual refresh">↻</button>
+      <span class="mono-dim" style="font-size: 11px;" id="iptables-meta">—</span>
+    </div>
+    <pre id="iptables-body" class="iptables-body">loading…</pre>
+  </div>
+</div>
+
 </body>
 </html>

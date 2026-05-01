@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -21,7 +22,7 @@ CREATE TABLE IF NOT EXISTS peers (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     name            TEXT NOT NULL UNIQUE,
     public_key      TEXT NOT NULL UNIQUE,
-    private_key     TEXT NOT NULL,          -- stored so we can re-render the client config
+    private_key     TEXT NOT NULL,          -- stored so we can re-render the client config; "" for bare-WG imports
     preshared_key   TEXT NOT NULL,
     address         TEXT NOT NULL UNIQUE,   -- e.g. "10.13.13.5/32"
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
@@ -32,7 +33,13 @@ CREATE TABLE IF NOT EXISTS peers (
     --   ''    → empty string sentinel: omit DNS line entirely (split-tunnel friendly)
     --   else  → use this string as the DNS value (one or more comma-separated IPs)
     -- Three states deliberately: "unset" vs "explicitly disabled" vs "explicit value".
-    dns             TEXT
+    dns             TEXT,
+    -- True (1) for normal wgflow-managed peers — wgflow holds their privkey
+    -- and can render a downloadable client config. False (0) for peers
+    -- imported from bare-WG sources where only the public key is known
+    -- (operator's clients have the privkeys; wgflow can't re-issue configs).
+    -- The UI gates the "download config" button on this flag.
+    has_private_key INTEGER NOT NULL DEFAULT 1
 );
 
 -- Migrate older databases that pre-date the last_handshake_at column.
@@ -48,6 +55,7 @@ CREATE TABLE IF NOT EXISTS peer_acls (
     port        INTEGER,               -- NULL = any
     proto       TEXT,                  -- NULL = any, else 'tcp' or 'udp'
     action      TEXT NOT NULL DEFAULT 'allow',   -- 'allow' or 'deny'
+    comment     TEXT,                  -- v3.6: optional human label, ≤ 80 chars
     UNIQUE(peer_id, cidr, port, proto, action)
 );
 
@@ -176,6 +184,13 @@ class DB:
             # (preserves legacy behavior). New peers can opt in to a custom
             # DNS or disable it via the empty-string sentinel.
             conn.execute("ALTER TABLE peers ADD COLUMN dns TEXT")
+        if "has_private_key" not in cols:
+            # Added in 3.3 alongside the import feature. Existing peers
+            # all had wgflow-generated keypairs, so backfill to 1 (true).
+            # Imports from bare-WG insert with 0 to skip config-download.
+            conn.execute(
+                "ALTER TABLE peers ADD COLUMN has_private_key INTEGER NOT NULL DEFAULT 1"
+            )
 
         # peer_acls.action added when deny-rule support landed.
         # Existing rows get DEFAULT 'allow' — fully backward compatible.
@@ -191,6 +206,12 @@ class DB:
             "UPDATE peer_acls SET action = 'allow' WHERE action IS NULL"
         )
 
+        # peer_acls.comment added in v3.6 — optional human label per ACL
+        # entry. NULL on existing rows; the UI treats NULL == "" for
+        # display purposes.
+        if acl_cols and "comment" not in acl_cols:
+            conn.execute("ALTER TABLE peer_acls ADD COLUMN comment TEXT")
+
         # speedtest_history.endpoint added when multi-endpoint support landed.
         # Existing rows get NULL → the UI treats them as "unknown endpoint",
         # color-coded as gray, which is honest.
@@ -202,6 +223,82 @@ class DB:
             # Table may not exist yet on a brand-new DB — that's fine, the
             # CREATE TABLE statement above already includes the column.
             pass
+
+        # Persist a unique instance_id for telemetry tracking.
+        row = conn.execute("SELECT value FROM network_settings WHERE key = 'instance_id'").fetchone()
+        if not row:
+            conn.execute(
+                "INSERT INTO network_settings (key, value) VALUES ('instance_id', ?)",
+                (str(uuid.uuid4()),)
+            )
+
+        # Seed migration_enabled on first install. The env var
+        # WGFLOW_MIGRATION_DEFAULT_ENABLED only acts as the seed value —
+        # once this row exists, runtime UI/API toggles are authoritative
+        # and the env var is ignored on subsequent restarts. This matches
+        # how `auto_interval_min` works: env var seeds defaults, DB wins
+        # at runtime, so an operator who toggles the UI doesn't have it
+        # silently overwritten by their .env on the next `docker compose up`.
+        row = conn.execute(
+            "SELECT value FROM network_settings WHERE key = 'migration_enabled'"
+        ).fetchone()
+        if not row:
+            from .config import SETTINGS  # local import to avoid cycles
+            initial = "1" if SETTINGS.migration_default_enabled else "0"
+            conn.execute(
+                "INSERT INTO network_settings (key, value) VALUES ('migration_enabled', ?)",
+                (initial,)
+            )
+
+        # Instance identity (added 3.5). `instance_name` is a free-form
+        # display string shown in the header next to the wgflow logo —
+        # default empty so existing installs upgrade silently with no
+        # name shown. `instance_color_theme` selects one of five
+        # phosphor-CRT-inspired palettes; default 'phosphor' matches
+        # the historical accent green so the upgrade is visually identical.
+        for key, default in (("instance_name", ""),
+                             ("instance_color_theme", "phosphor")):
+            row = conn.execute(
+                "SELECT value FROM network_settings WHERE key = ?", (key,)
+            ).fetchone()
+            if not row:
+                conn.execute(
+                    "INSERT INTO network_settings (key, value) VALUES (?, ?)",
+                    (key, default),
+                )
+
+        # v3.6 additions:
+        # - client_mtu: when set, generated peer .conf files include
+        #   `MTU = <value>` under [Interface]. Empty string = let the
+        #   client kernel pick the default (typically 1420). Values are
+        #   stored as strings (we validate in the API endpoint, not DB).
+        # - mss_clamp: when "1", install a TCPMSS --clamp-mss-to-pmtu rule
+        #   in iptables mangle/FORWARD. Helps TCP black-hole problems on
+        #   paths with broken PMTUD. "0" or empty = no rule.
+        # - panel_order: JSON array of panel-id strings setting the
+        #   vertical order of dashboard panels. Empty string = default
+        #   order (defined in the frontend). When non-empty, applied at
+        #   page load to override DOM source order.
+        # - panels_minimized: JSON object mapping panel-id → bool. true
+        #   means the panel is currently collapsed to its header. Empty
+        #   string = nothing minimized. Added in v3.6 in-place patch.
+        # - polling_interval_ms: integer in milliseconds, applied to
+        #   ACL stats, DNS recent, iptables modal, and similar polling
+        #   loops. Default "3000" (3 seconds). Range 1000..6000 enforced
+        #   in the API. Added in v3.6 in-place patch.
+        for key, default in (("client_mtu", ""),
+                             ("mss_clamp",  "0"),
+                             ("panel_order", ""),
+                             ("panels_minimized", ""),
+                             ("polling_interval_ms", "3000")):
+            row = conn.execute(
+                "SELECT value FROM network_settings WHERE key = ?", (key,)
+            ).fetchone()
+            if not row:
+                conn.execute(
+                    "INSERT INTO network_settings (key, value) VALUES (?, ?)",
+                    (key, default),
+                )
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, check_same_thread=False, timeout=10.0)

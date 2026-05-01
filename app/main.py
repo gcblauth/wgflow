@@ -35,14 +35,25 @@ from . import network_diag
 from . import wg_manager as wg
 from .config import SETTINGS
 from .db import DB
+from .importers import commit as importer_commit
+from .importers import detector as importer_detector
+from .importers import preview_store as importer_store
+from .importers import serialize as importer_serialize
+from .telemetry import run_telemetry_loop
 from .metrics import MetricsState
 from .models import (
     ACLUpdate,
     BatchByCount,
     BatchByNames,
+    ImportCommit,
+    InstanceConfig,
+    MigrationToggle,
+    PanelOrder,
     PeerCreate,
+    PeerEnabledUpdate,
     PeerLive,
     PeerOut,
+    TunnelSettings,
 )
 
 # ---------------------------------------------------------------------------
@@ -61,7 +72,7 @@ def get_db() -> DB:
 
 def _row_to_peer_out(conn, row) -> PeerOut:
     acl_rows = conn.execute(
-        "SELECT cidr, port, proto, action FROM peer_acls WHERE peer_id = ? ORDER BY id",
+        "SELECT cidr, port, proto, action, comment FROM peer_acls WHERE peer_id = ? ORDER BY id",
         (row["id"],),
     ).fetchall()
     entries = [
@@ -70,10 +81,24 @@ def _row_to_peer_out(conn, row) -> PeerOut:
             port=r["port"],
             proto=r["proto"],
             action=r["action"] if (r["action"] in ("allow", "deny")) else "allow",
+            # Comment may be NULL on rows from pre-3.6 DBs that haven't
+            # been touched since the column was added. Coerce to "" so
+            # downstream code (renderers, str()) doesn't have to handle
+            # None separately.
+            comment=r["comment"] or "",
         )
         for r in acl_rows
     ]
     dns_val = row["dns"] if "dns" in row.keys() else None
+    # has_private_key may be missing on rows from databases that haven't
+    # run the 3.3 migration yet (defensive — startup migration should
+    # have populated it, but we don't want a KeyError if some path
+    # bypasses it).
+    has_priv = bool(row["has_private_key"]) if "has_private_key" in row.keys() else True
+    # `enabled` is in the original schema (3.0+) so it should always be
+    # present, but be defensive here too. Default to True so an
+    # accidentally-NULL row gets safe behavior (visible + active).
+    enabled_val = bool(row["enabled"]) if "enabled" in row.keys() and row["enabled"] is not None else True
     return PeerOut(
         id=row["id"],
         name=row["name"],
@@ -82,6 +107,8 @@ def _row_to_peer_out(conn, row) -> PeerOut:
         created_at=row["created_at"],
         acl=[str(e) for e in entries],
         dns=dns_val,
+        has_private_key=has_priv,
+        enabled=enabled_val,
     )
 
 
@@ -103,7 +130,7 @@ def _load_all_peers_for_sync() -> List[wg.PeerConfig]:
 
 def _load_peer_acls(peer_id: int) -> List[acl_mod.ACLEntry]:
     rows = get_db().conn.execute(
-        "SELECT cidr, port, proto, action FROM peer_acls WHERE peer_id = ? ORDER BY id",
+        "SELECT cidr, port, proto, action, comment FROM peer_acls WHERE peer_id = ? ORDER BY id",
         (peer_id,),
     ).fetchall()
     return [
@@ -115,6 +142,7 @@ def _load_peer_acls(peer_id: int) -> List[acl_mod.ACLEntry]:
             # ADD COLUMN only sets DEFAULT for new inserts, not existing rows).
             # Treat NULL as "allow" to preserve the row's original intent.
             action=r["action"] if (r["action"] in ("allow", "deny")) else "allow",
+            comment=r["comment"] or "",
         )
         for r in rows
     ]
@@ -137,6 +165,19 @@ def _replay_state_to_kernel() -> None:
         ipt.create_peer_chain(row["id"], row["address"])
         ipt.apply_peer_acls(row["id"], _load_peer_acls(row["id"]),
                             peer_address=row["address"])
+
+    # MSS clamp (v3.6): the iptables mangle rule isn't part of the per-peer
+    # chains so it doesn't get cleared by apply_peer_acls's flush. We sync
+    # it explicitly here against the persisted toggle so a container/host
+    # restart restores the toggle's last known state.
+    mss_row = conn.execute(
+        "SELECT value FROM network_settings WHERE key = 'mss_clamp'"
+    ).fetchone()
+    mss_enabled = (mss_row and mss_row["value"] == "1")
+    if mss_enabled:
+        ipt.enable_mss_clamp()
+    else:
+        ipt.disable_mss_clamp()
 
 
 def _peer_id_for_ip(peer_ip: str) -> Optional[int]:
@@ -209,6 +250,21 @@ async def lifespan(app: FastAPI):
         _speedtest_scheduler_loop(), name="wgflow-speedtest-sched"
     )
 
+    # Anonymous telemetry. Off-by-default would be more privacy-forward but
+    # leaves the project blind; the README is upfront about what's sent and
+    # how to disable. The loop has its own internal first-tick delay so
+    # operators have time to disable on first boot if they choose.
+    if SETTINGS.telemetry_enabled:
+        telemetry_task = asyncio.get_event_loop().create_task(
+            run_telemetry_loop(db), name="wgflow-telemetry"
+        )
+        print("[wgflow] telemetry ENABLED — see README#telemetry to opt out",
+              flush=True)
+    else:
+        telemetry_task = None
+        print("[wgflow] telemetry DISABLED via WGFLOW_TELEMETRY_ENABLED",
+              flush=True)
+
     try:
         yield
     finally:
@@ -217,6 +273,12 @@ async def lifespan(app: FastAPI):
             await speedtest_task
         except asyncio.CancelledError:
             pass
+        if telemetry_task is not None:
+            telemetry_task.cancel()
+            try:
+                await telemetry_task
+            except asyncio.CancelledError:
+                pass
         if prune_task is not None:
             prune_task.cancel()
             try:
@@ -307,6 +369,58 @@ def _persist_speedtest(result: dict) -> None:
 app = FastAPI(title="wgflow", lifespan=lifespan)
 
 
+# ---------------------------------------------------------------------------
+# WebSocket counter (v3.6 in-place patch)
+# ---------------------------------------------------------------------------
+# Tracks how many WebSocket connections are currently open, broken down by
+# source ("/ws/status" vs "/ws/logs/<source>"). Surfaced to the UI via the
+# /ws/status payload so the live indicator can show a tooltip with the
+# count + breakdown.
+#
+# Threading model: WebSocket handlers all run on the asyncio event loop,
+# so we don't need locks here — increments and decrements are atomic from
+# the perspective of any single coroutine. A simple dict + int counters
+# suffice.
+#
+# Why this exists at all: diagnosing the v3.5 WS leak required `lsof | grep
+# wgflow` from outside the container. Surfacing the count in the UI makes
+# leaks visible at a glance — if the operator sees the count growing
+# without bound while only one tab is open, that's a regression we can
+# react to immediately.
+
+class _WSCounter:
+    """Thread-safe-ish (single-loop) WebSocket connection accounting."""
+
+    def __init__(self):
+        # Maps source_label → current open connection count. We use
+        # a flat dict keyed by string, not a separate counter per
+        # endpoint, because new WS endpoints may be added later and
+        # we want them to register without code changes elsewhere.
+        self._counts: Dict[str, int] = {}
+
+    def increment(self, source: str) -> None:
+        self._counts[source] = self._counts.get(source, 0) + 1
+
+    def decrement(self, source: str) -> None:
+        if source in self._counts:
+            self._counts[source] -= 1
+            if self._counts[source] <= 0:
+                # Drop zero-count entries so the breakdown stays clean.
+                # No use to the operator for "/ws/logs/dnsmasq: 0".
+                del self._counts[source]
+
+    def snapshot(self) -> Dict[str, Any]:
+        """Returns {'total': int, 'breakdown': {source: count}}."""
+        # dict copy so the consumer can't mutate our state by accident.
+        return {
+            "total": sum(self._counts.values()),
+            "breakdown": dict(self._counts),
+        }
+
+
+ws_counter = _WSCounter()
+
+
 # Auth middleware. Runs on every HTTP request; WebSocket handshakes bypass
 # this (Starlette's BaseHTTPMiddleware only intercepts HTTP scope), which
 # is what we want — the WS handler does its own cookie check via
@@ -390,8 +504,9 @@ def _create_peer_row(
         peer_id = cur.lastrowid
         for e in acl_entries:
             conn.execute(
-                "INSERT INTO peer_acls (peer_id, cidr, port, proto, action) VALUES (?, ?, ?, ?, ?)",
-                (peer_id, e.cidr, e.port, e.proto, e.action),
+                "INSERT INTO peer_acls (peer_id, cidr, port, proto, action, comment) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (peer_id, e.cidr, e.port, e.proto, e.action, e.comment or None),
             )
     return peer_id
 
@@ -602,8 +717,9 @@ def update_peer_acl(peer_id: int, body: ACLUpdate):
         c.execute("DELETE FROM peer_acls WHERE peer_id = ?", (peer_id,))
         for e in entries:
             c.execute(
-                "INSERT INTO peer_acls (peer_id, cidr, port, proto, action) VALUES (?, ?, ?, ?, ?)",
-                (peer_id, e.cidr, e.port, e.proto, e.action),
+                "INSERT INTO peer_acls (peer_id, cidr, port, proto, action, comment) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (peer_id, e.cidr, e.port, e.proto, e.action, e.comment or None),
             )
 
     peer_row = conn.execute("SELECT address FROM peers WHERE id = ?", (peer_id,)).fetchone()
@@ -612,6 +728,45 @@ def update_peer_acl(peer_id: int, body: ACLUpdate):
 
     row = conn.execute("SELECT * FROM peers WHERE id = ?", (peer_id,)).fetchone()
     return _row_to_peer_out(conn, row)
+
+
+@app.put("/api/peers/{peer_id}/enabled", response_model=PeerOut)
+def update_peer_enabled(peer_id: int, body: PeerEnabledUpdate):
+    """Toggle a peer's enabled state.
+
+    Disabled peers stay in the DB (with their ACLs and config preserved)
+    but are excluded from `wg syncconf` so the kernel has no [Peer] block
+    for them — they can't connect. Re-enabling reverses this fully.
+
+    iptables chains aren't touched: when the peer is disabled, no traffic
+    can reach the chain anyway (kernel doesn't have the source IP
+    associated with this peer). When re-enabled, the chain is already
+    in place and ACLs apply immediately.
+    """
+    conn = get_db().conn
+    row = conn.execute("SELECT id, enabled FROM peers WHERE id = ?", (peer_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "peer not found")
+
+    new_value = 1 if body.enabled else 0
+    if int(row["enabled"]) == new_value:
+        # No-op — return current state without touching the kernel.
+        # Avoids a redundant `wg syncconf` shell-out for a click that
+        # didn't change anything.
+        full_row = conn.execute("SELECT * FROM peers WHERE id = ?", (peer_id,)).fetchone()
+        return _row_to_peer_out(conn, full_row)
+
+    with get_db().write() as c:
+        c.execute("UPDATE peers SET enabled = ? WHERE id = ?", (new_value, peer_id))
+
+    # Push the change to the kernel. _sync_wg renders the full server
+    # config from `_load_all_peers_for_sync` (which filters by enabled=1)
+    # and runs `wg syncconf`. A disabled peer's [Peer] block disappears,
+    # killing any active session immediately.
+    _sync_wg()
+
+    full_row = conn.execute("SELECT * FROM peers WHERE id = ?", (peer_id,)).fetchone()
+    return _row_to_peer_out(conn, full_row)
 
 
 # ---------------------------------------------------------------------------
@@ -638,6 +793,21 @@ def _peer_client_conf(
     row = conn.execute("SELECT * FROM peers WHERE id = ?", (peer_id,)).fetchone()
     if not row:
         raise HTTPException(404, "peer not found")
+
+    # Bare-WG-imported peers have no privkey on the server side — the
+    # operator's clients have the keys, and we can't reconstruct a valid
+    # client .conf without them. Surface clearly so the UI can render a
+    # tooltip explaining why the download button is disabled.
+    has_priv = bool(row["has_private_key"]) if "has_private_key" in row.keys() else True
+    if not has_priv or not row["private_key"]:
+        raise HTTPException(
+            422,
+            "this peer was imported from a bare-WireGuard source; "
+            "wgflow doesn't have the client's private key, so a downloadable "
+            "config cannot be generated. The operator's existing client "
+            ".conf files continue to work.",
+        )
+
     entries = _load_peer_acls(peer_id)
 
     # AllowedIPs in the client config controls what the CLIENT routes
@@ -659,12 +829,24 @@ def _peer_client_conf(
         effective_dns = dns_override
     else:
         effective_dns = row["dns"] if "dns" in row.keys() else None
+
+    # Pull the global client MTU from network_settings (v3.6). When unset
+    # (empty string), render_client_conf omits the MTU line entirely and
+    # the client kernel picks its default. The validation of the stored
+    # value happens at write time (set_tunnel_settings); we trust whatever
+    # got persisted.
+    mtu_row = conn.execute(
+        "SELECT value FROM network_settings WHERE key = 'client_mtu'"
+    ).fetchone()
+    mtu_val = mtu_row["value"] if mtu_row else ""
+
     conf = wg.render_client_conf(
         peer_private_key=row["private_key"],
         peer_preshared_key=row["preshared_key"],
         peer_address=row["address"],
         allowed_ips=allowed,
         dns_override=effective_dns,
+        mtu=mtu_val if mtu_val else None,
     )
     safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in row["name"])
     return f"{safe_name}.conf", conf
@@ -1036,6 +1218,611 @@ async def db_import(
 
 
 # ---------------------------------------------------------------------------
+# Migration importer (wg-easy / PiVPN / bare WireGuard)
+# ---------------------------------------------------------------------------
+# Three-step flow:
+#   1. POST /api/import/upload  — multipart upload; parse + stash + return
+#                                 a preview_id and a JSON summary
+#   2. GET  /api/import/preview/{id} — re-fetch the preview (UI reload)
+#   3. POST /api/import/commit  — apply the chosen peers to the DB
+#
+# Previews live in process memory with a 10-min TTL — see
+# importers/preview_store.py. Restart loses pending previews; operators
+# re-upload, which takes seconds.
+
+# Cap on upload size. Real wg-easy/PiVPN dumps are kilobytes; the cap is
+# defense against someone uploading a 4 GB tar to OOM the worker.
+_IMPORT_MAX_BYTES = 8 * 1024 * 1024  # 8 MiB
+
+# Magic confirmation string for /api/import/commit. The UI requires the
+# operator to type this so the commit can't be triggered accidentally
+# (e.g. by a browser refresh re-submitting the form). Mirrors the existing
+# /api/db/import ?confirm=IMPORT pattern.
+_IMPORT_CONFIRM_TOKEN = "IMPORT"
+
+
+def _migration_enabled() -> bool:
+    """Read the migration toggle from network_settings.
+
+    The seed value comes from WGFLOW_MIGRATION_DEFAULT_ENABLED on first
+    install (handled in db.py during _migrate). After that, runtime UI
+    toggles are authoritative — this helper is the single source of
+    truth, called by every import endpoint guard and by the UI's
+    /api/server/migration GET.
+
+    Defensive: if the row is missing for some reason (corrupted DB,
+    manual deletion, migration didn't run), default to True. We'd rather
+    fail-open here than have an operator wonder why the migrate tab
+    disappeared, since the feature is admin-gated already.
+    """
+    row = get_db().conn.execute(
+        "SELECT value FROM network_settings WHERE key = 'migration_enabled'"
+    ).fetchone()
+    if row is None:
+        return True
+    return row["value"] in ("1", "true", "yes", "on")
+
+
+def _require_migration_enabled() -> None:
+    """Guard called at the top of each import endpoint.
+
+    Raises HTTPException(403) when migration is disabled, with a message
+    that matches what the UI expects. Centralized so all three endpoints
+    surface the same error shape.
+    """
+    if not _migration_enabled():
+        raise HTTPException(
+            403,
+            "migration is disabled. enable it from server settings before importing.",
+        )
+
+
+@app.post("/api/import/upload")
+async def import_upload(file: UploadFile = File(...)):
+    """Accept a wg-easy/PiVPN/bare-WG file, parse it, stash a preview.
+
+    Auto-detects the format. Returns a preview_id plus the parsed summary
+    for the UI to render the per-peer list with status badges. The UI
+    then calls /api/import/commit with the preview_id and the operator's
+    accept/skip choices.
+    """
+    _require_migration_enabled()
+    content = await file.read(_IMPORT_MAX_BYTES + 1)
+    if len(content) > _IMPORT_MAX_BYTES:
+        raise HTTPException(
+            413,
+            f"upload exceeds {_IMPORT_MAX_BYTES // (1024*1024)} MiB cap",
+        )
+    try:
+        parsed = importer_detector.detect_and_parse(content)
+    except ValueError as e:
+        # Unrecognised format or parse failure. The detector messages are
+        # specific enough to be operator-actionable; surface them as-is.
+        raise HTTPException(422, str(e))
+
+    # Annotate per-peer statuses against current wgflow state.
+    server_addr = None
+    try:
+        server_addr = SETTINGS.server_address.ip
+    except (AttributeError, ValueError):
+        pass
+    importer_commit.compute_statuses(
+        parsed,
+        get_db().conn,
+        SETTINGS.subnet,
+        server_address=server_addr,
+    )
+
+    preview_id = importer_store.store(parsed)
+    return importer_serialize.serialize_preview(parsed, preview_id)
+
+
+@app.get("/api/import/preview/{preview_id}")
+def import_preview(preview_id: str):
+    """Re-fetch a stashed preview. Useful if the operator reloads the
+    page mid-review — the UI calls this on mount instead of having to
+    re-upload.
+
+    Refreshes statuses against current DB state so a peer that was
+    'name-conflict' at upload time but had its conflicting peer deleted
+    in the meantime now reads as 'ok'.
+    """
+    _require_migration_enabled()
+    parsed = importer_store.get(preview_id)
+    if parsed is None:
+        raise HTTPException(404, "preview expired or not found")
+    server_addr = None
+    try:
+        server_addr = SETTINGS.server_address.ip
+    except (AttributeError, ValueError):
+        pass
+    importer_commit.compute_statuses(
+        parsed,
+        get_db().conn,
+        SETTINGS.subnet,
+        server_address=server_addr,
+    )
+    return importer_serialize.serialize_preview(parsed, preview_id)
+
+
+@app.post("/api/import/commit")
+def import_commit_endpoint(body: ImportCommit):
+    """Apply the operator's choices from the preview to the wgflow DB.
+
+    The body is small (preview_id + indices + flags); the actual peer
+    data lives in the in-memory store and never re-touches the wire.
+
+    Possible failure modes the UI handles:
+      - migration disabled            → 403
+      - confirm_token wrong          → 422
+      - preview_id missing/expired   → 404 (operator re-uploads)
+      - adopt_server_keypair=True
+        but no source keypair        → 422
+      - inserts that fail uniqueness → 500 (rolled back; operator
+                                       re-checks the preview which now
+                                       shows updated statuses)
+    """
+    _require_migration_enabled()
+    if body.confirm_token != _IMPORT_CONFIRM_TOKEN:
+        raise HTTPException(
+            422,
+            f"confirm_token must be exactly {_IMPORT_CONFIRM_TOKEN!r}",
+        )
+
+    parsed = importer_store.get(body.preview_id)
+    if parsed is None:
+        raise HTTPException(
+            404, "preview expired or not found — please re-upload"
+        )
+
+    if body.adopt_server_keypair and parsed.server_keypair is None:
+        raise HTTPException(
+            422,
+            "this source did not include a server keypair; cannot adopt",
+        )
+
+    try:
+        result = importer_commit.apply(
+            parsed=parsed,
+            accepted_indices=list(body.accepted_indices),
+            adopt_server_keypair=body.adopt_server_keypair,
+            db=get_db(),
+            server_private_key_path=SETTINGS.server_private_key_path,
+            server_public_key_path=SETTINGS.server_public_key_path,
+            default_acl=_default_acl(),
+            create_peer_chain=ipt.create_peer_chain,
+            apply_peer_acls=ipt.apply_peer_acls,
+            sync_wg=_sync_wg,
+            load_peer_acls=_load_peer_acls,
+        )
+    except sqlite3.IntegrityError as e:
+        # Most likely a uniqueness violation we missed in the status
+        # check — e.g. operator added a conflicting peer in another tab
+        # between preview and commit. The transaction rolled back; the
+        # preview's status will show the new conflict on next refresh.
+        raise HTTPException(
+            409,
+            f"commit failed due to a conflict: {e}. Refresh the preview "
+            "and check for new statuses.",
+        )
+
+    # Drop the preview only on success — failed commits can be retried
+    # against the same preview after the operator fixes their selection.
+    importer_store.drop(body.preview_id)
+
+    return {
+        "ok": True,
+        "imported": result.imported,
+        "skipped_conflict": result.skipped_conflict,
+        "skipped_invalid": result.skipped_invalid,
+        "server_keypair_adopted": result.server_keypair_adopted,
+        "new_server_pubkey": result.new_server_pubkey,
+    }
+
+
+@app.get("/api/server/migration")
+def get_migration_state():
+    """Return the current migration toggle state.
+
+    UI calls this on page load to decide whether to show the migrate
+    tab, and on the server tab to render the toggle's current value.
+    """
+    return {"enabled": _migration_enabled()}
+
+
+@app.put("/api/server/migration")
+def set_migration_state(body: MigrationToggle):
+    """Flip the migration toggle.
+
+    Persists to network_settings so the choice survives container
+    restarts. No confirm-token because (a) the action is reversible by
+    flipping back, and (b) a misclick that disables the importer is
+    annoying-but-recoverable, not data-destructive.
+
+    Returns the new state so the UI can sync without a second round-trip.
+    """
+    new_value = "1" if body.enabled else "0"
+    with get_db().write() as conn:
+        # UPSERT pattern: INSERT … ON CONFLICT … UPDATE keeps a single
+        # source of truth row whether or not it pre-existed (it should,
+        # since db._migrate seeds it on first install — but defensive).
+        conn.execute(
+            """INSERT INTO network_settings (key, value) VALUES ('migration_enabled', ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+            (new_value,),
+        )
+    return {"enabled": body.enabled}
+
+
+# Ten phosphor-CRT-inspired palettes shipped with wgflow. The UI's CSS has a
+# matching `[data-instance-theme="<name>"]` block for each. Server-side
+# we just gate writes against this allow-list so a malformed PUT can't
+# poison the DB with an unknown theme name. Five originals (3.5) plus
+# five additions (3.5 update): lime, pink, purple, gold, mint.
+_VALID_THEMES = (
+    "phosphor", "amber", "cyan", "magenta", "ice",
+    "lime", "pink", "purple", "gold", "mint",
+)
+
+# Instance name length cap. Long enough for "home-server-prod-eu-west"
+# style names; short enough to keep the header visually balanced.
+_INSTANCE_NAME_MAX_LEN = 40
+
+
+@app.get("/api/server/instance")
+def get_instance_config():
+    """Return the instance display config (name + color theme).
+
+    Called by the UI on page load to render the header chrome and apply
+    the theme attribute. Both fields always present in the response;
+    missing rows in network_settings (shouldn't happen post-migration,
+    but defensive) come back as ("", "phosphor").
+    """
+    conn = get_db().conn
+    rows = {
+        r["key"]: r["value"]
+        for r in conn.execute(
+            "SELECT key, value FROM network_settings "
+            "WHERE key IN ('instance_name', 'instance_color_theme')"
+        ).fetchall()
+    }
+    name = rows.get("instance_name", "")
+    theme = rows.get("instance_color_theme", "phosphor")
+    # If somehow a stale theme name is in the DB (downgrade from a future
+    # version, manual sqlite edit), fall back to the default rather than
+    # serving a value the UI can't render.
+    if theme not in _VALID_THEMES:
+        theme = "phosphor"
+    return {"name": name, "color_theme": theme}
+
+
+@app.put("/api/server/instance")
+def set_instance_config(body: InstanceConfig):
+    """Update the instance name and/or color theme.
+
+    Both body fields are optional — sending only `name` leaves the theme
+    alone, and vice versa. Empty string is a valid `name` (means "no
+    name shown in the header chrome"). Theme must be one of the
+    server-side allow-list; an unknown value rejects with 422.
+
+    Persists to network_settings via UPSERT.
+    """
+    updates = []  # list of (key, value) tuples to upsert in one transaction
+
+    if body.name is not None:
+        # Trim and length-cap. We don't HTML-escape here — the UI is
+        # responsible for escaping at render time (escapeHtml in the
+        # frontend). Server-side restriction is just length + control-char.
+        name = body.name.strip()
+        if len(name) > _INSTANCE_NAME_MAX_LEN:
+            raise HTTPException(
+                422,
+                f"name too long (max {_INSTANCE_NAME_MAX_LEN} chars)",
+            )
+        # Reject control characters that would make the header rendering
+        # weird or could be used to inject ANSI escapes if the value
+        # leaked into terminal logs. Tabs, newlines, NULs, etc.
+        if any(ord(c) < 0x20 for c in name):
+            raise HTTPException(422, "name contains control characters")
+        updates.append(("instance_name", name))
+
+    if body.color_theme is not None:
+        if body.color_theme not in _VALID_THEMES:
+            raise HTTPException(
+                422,
+                f"unknown theme '{body.color_theme}'; valid: {', '.join(_VALID_THEMES)}",
+            )
+        updates.append(("instance_color_theme", body.color_theme))
+
+    if not updates:
+        # Both fields omitted — return current state without writing.
+        return get_instance_config()
+
+    with get_db().write() as conn:
+        for key, value in updates:
+            conn.execute(
+                """INSERT INTO network_settings (key, value) VALUES (?, ?)
+                   ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+                (key, value),
+            )
+
+    # Echo the resulting full state for the UI's optimistic-update flow.
+    return get_instance_config()
+
+
+# ---------------------------------------------------------------------------
+# Tunnel settings (v3.6) — client MTU + MSS clamping
+# ---------------------------------------------------------------------------
+# Both knobs are about working around path-MTU mismatches:
+#   client_mtu  – sets the MTU on the peer's [Interface], baked into
+#                 generated .conf files. No iptables effect.
+#   mss_clamp   – installs an iptables mangle rule that rewrites TCP SYN
+#                 MSS values, fixing TCP black-hole on broken-PMTUD paths.
+#
+# Persisted to network_settings; mss_clamp also applies to running iptables
+# state immediately on save.
+
+# Client MTU bounds. WireGuard's own minimum is 576 (smallest IP packet
+# that doesn't fragment); 1500 is the Ethernet ceiling. Values outside
+# this range are almost always misconfigurations.
+_MTU_MIN = 576
+_MTU_MAX = 1500
+
+
+@app.get("/api/server/tunnel")
+def get_tunnel_settings():
+    """Read client_mtu + mss_clamp.
+
+    Returns:
+      {"client_mtu": "1412" | "", "mss_clamp": bool}
+    """
+    conn = get_db().conn
+    rows = {
+        r["key"]: r["value"]
+        for r in conn.execute(
+            "SELECT key, value FROM network_settings "
+            "WHERE key IN ('client_mtu', 'mss_clamp')"
+        ).fetchall()
+    }
+    return {
+        "client_mtu": rows.get("client_mtu", ""),
+        "mss_clamp": rows.get("mss_clamp", "0") == "1",
+    }
+
+
+@app.put("/api/server/tunnel")
+def set_tunnel_settings(body: TunnelSettings):
+    """Update client_mtu and/or mss_clamp.
+
+    Both fields optional — sending only one leaves the other alone.
+    MTU is validated against [_MTU_MIN, _MTU_MAX]; out-of-range is a 422.
+    Empty string clears the override.
+
+    On mss_clamp change, the iptables rule is installed/removed
+    immediately so the operator gets feedback right away.
+    """
+    updates = []
+    apply_mss = None  # None = no change; True = enable; False = disable
+
+    if body.client_mtu is not None:
+        v = body.client_mtu.strip()
+        if v != "":
+            try:
+                n = int(v)
+            except ValueError:
+                raise HTTPException(422, f"MTU must be an integer or empty, got {v!r}")
+            if not (_MTU_MIN <= n <= _MTU_MAX):
+                raise HTTPException(
+                    422,
+                    f"MTU must be between {_MTU_MIN} and {_MTU_MAX}, got {n}",
+                )
+            v = str(n)  # canonicalize
+        updates.append(("client_mtu", v))
+
+    if body.mss_clamp is not None:
+        updates.append(("mss_clamp", "1" if body.mss_clamp else "0"))
+        apply_mss = body.mss_clamp
+
+    if not updates:
+        return get_tunnel_settings()
+
+    with get_db().write() as conn:
+        for key, value in updates:
+            conn.execute(
+                """INSERT INTO network_settings (key, value) VALUES (?, ?)
+                   ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+                (key, value),
+            )
+
+    # Apply the MSS clamp toggle to live iptables state. We do this AFTER
+    # the DB write so a failure to install the rule (rare; iptables is
+    # very reliable) doesn't leave the persisted state and kernel state
+    # diverged on retry — _replay_state_to_kernel will re-apply on restart.
+    if apply_mss is True:
+        ipt.enable_mss_clamp()
+    elif apply_mss is False:
+        ipt.disable_mss_clamp()
+
+    return get_tunnel_settings()
+
+
+@app.get("/api/server/panel-order")
+def get_panel_order():
+    """Read panel order. Empty list = default UI order.
+
+    Returns: {"order": ["panel-id-1", "panel-id-2", ...]}
+    """
+    conn = get_db().conn
+    row = conn.execute(
+        "SELECT value FROM network_settings WHERE key = 'panel_order'"
+    ).fetchone()
+    raw = row["value"] if row else ""
+    if not raw:
+        return {"order": []}
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return {"order": [str(x) for x in parsed]}
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+    return {"order": []}
+
+
+@app.put("/api/server/panel-order")
+def set_panel_order(body: PanelOrder):
+    """Persist panel order (drag-to-reorder result).
+
+    The body's `order` is a list of panel-id strings (matching the
+    `data-panel-id` attribute on each reorderable panel in the DOM).
+    Unknown ids are stored as-is; the UI ignores them on render. This
+    keeps the schema forward-compatible with future panel additions —
+    an old client that doesn't know about a new panel-id won't break
+    when it sees one.
+
+    Empty list = reset to default. Stored as JSON in network_settings.
+    """
+    # Light validation: accept up to 32 ids, each ≤ 64 chars. Defensive
+    # against an attacker-controlled payload bloating the DB row.
+    if len(body.order) > 32:
+        raise HTTPException(422, "too many panel ids (max 32)")
+    for pid in body.order:
+        if not isinstance(pid, str) or len(pid) > 64:
+            raise HTTPException(422, "panel ids must be strings ≤ 64 chars")
+
+    serialized = json.dumps(body.order)
+    with get_db().write() as conn:
+        conn.execute(
+            """INSERT INTO network_settings (key, value) VALUES ('panel_order', ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+            (serialized,),
+        )
+    return get_panel_order()
+
+
+# ---------------------------------------------------------------------------
+# Panels minimized state (v3.6 in-place patch)
+# ---------------------------------------------------------------------------
+# Maps panel-id → bool. true = collapsed to header, false/missing = expanded.
+# Persists per-instance in network_settings.panels_minimized as JSON.
+# Same forward-compat policy as panel_order: unknown ids are ignored at
+# render time so old clients don't break when seeing new panel-ids.
+
+@app.get("/api/server/panels-minimized")
+def get_panels_minimized():
+    """Read minimized state.
+
+    Returns: {"minimized": {"panel-id": true, ...}}
+    """
+    conn = get_db().conn
+    row = conn.execute(
+        "SELECT value FROM network_settings WHERE key = 'panels_minimized'"
+    ).fetchone()
+    raw = row["value"] if row else ""
+    if not raw:
+        return {"minimized": {}}
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            # Filter to bool values only — defensive against malformed
+            # payloads (e.g. someone hand-edits the DB and writes strings).
+            return {"minimized": {
+                str(k): bool(v) for k, v in parsed.items()
+                if isinstance(k, str)
+            }}
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+    return {"minimized": {}}
+
+
+@app.put("/api/server/panels-minimized")
+def set_panels_minimized(body: dict):
+    """Persist minimized state.
+
+    Accepts {"minimized": {...}}. We deliberately use a plain dict for
+    the body (not a Pydantic model) because the keys are arbitrary
+    panel-ids that aren't fixed at API design time — Pydantic would
+    require a model with explicit fields.
+
+    Light validation: max 32 entries, keys ≤ 64 chars (matches the
+    panel_order limit so an attacker can't bloat the DB row via either
+    endpoint).
+    """
+    minimized = body.get("minimized")
+    if not isinstance(minimized, dict):
+        raise HTTPException(422, "body must be {'minimized': {panel-id: bool}}")
+    if len(minimized) > 32:
+        raise HTTPException(422, "too many entries (max 32)")
+    cleaned = {}
+    for k, v in minimized.items():
+        if not isinstance(k, str) or len(k) > 64:
+            raise HTTPException(422, "panel ids must be strings ≤ 64 chars")
+        cleaned[k] = bool(v)
+
+    serialized = json.dumps(cleaned) if cleaned else ""
+    with get_db().write() as conn:
+        conn.execute(
+            """INSERT INTO network_settings (key, value) VALUES ('panels_minimized', ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+            (serialized,),
+        )
+    return get_panels_minimized()
+
+
+# ---------------------------------------------------------------------------
+# Polling interval config (v3.6 in-place patch)
+# ---------------------------------------------------------------------------
+# Single global value used by all the polling-based panels (ACL stats,
+# DNS recent, iptables modal). Lower = more responsive but more network
+# + iptables exec overhead. Higher = less load but slower to see new data.
+# Range 1000..6000 ms enforced; 3000 default.
+
+_POLL_MIN_MS = 1000
+_POLL_MAX_MS = 6000
+
+
+@app.get("/api/server/polling")
+def get_polling_interval():
+    """Read polling interval (ms). Always returns a valid integer in
+    range; pre-3.6 DBs and corrupted values fall back to 3000."""
+    conn = get_db().conn
+    row = conn.execute(
+        "SELECT value FROM network_settings WHERE key = 'polling_interval_ms'"
+    ).fetchone()
+    raw = (row["value"] if row else "") or "3000"
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        val = 3000
+    if not (_POLL_MIN_MS <= val <= _POLL_MAX_MS):
+        val = 3000
+    return {"interval_ms": val}
+
+
+@app.put("/api/server/polling")
+def set_polling_interval(body: dict):
+    """Update polling interval.
+
+    Body: {"interval_ms": int}. Out-of-range → 422.
+    """
+    val = body.get("interval_ms")
+    try:
+        val = int(val)
+    except (TypeError, ValueError):
+        raise HTTPException(422, "interval_ms must be an integer")
+    if not (_POLL_MIN_MS <= val <= _POLL_MAX_MS):
+        raise HTTPException(
+            422, f"interval_ms must be {_POLL_MIN_MS}..{_POLL_MAX_MS}, got {val}"
+        )
+    with get_db().write() as conn:
+        conn.execute(
+            """INSERT INTO network_settings (key, value) VALUES ('polling_interval_ms', ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+            (str(val),),
+        )
+    return {"interval_ms": val}
+
+
+# ---------------------------------------------------------------------------
 # Live status
 # ---------------------------------------------------------------------------
 
@@ -1174,6 +1961,55 @@ def peer_acl_hits(peer_id: int):
          "pkts": h.pkts, "bytes": h.bytes}
         for h in hits
     ]
+
+
+@app.get("/api/peers/acl-stats")
+def acl_stats_snapshot():
+    """Cross-peer ACL counter snapshot for the stats panel.
+
+    This is the env-agnostic replacement for the failed iptables-LOG
+    streaming path. Reads `iptables-save -c` once per call and parses
+    the [pkts:bytes] counters per rule. The UI polls this every few
+    seconds and computes deltas client-side, giving a "live feel"
+    without requiring kernel-log delivery (which doesn't work reliably
+    inside Docker containers due to nf_log_all_netns isolation).
+
+    The response is shaped per-peer so the UI can group rules under
+    each peer name. Disabled peers are excluded (their chains stay in
+    place but no traffic hits them, so counters are useless to display).
+    """
+    return ipt.read_acl_stats()
+
+
+@app.post("/api/peers/acl-stats/reset")
+def acl_stats_reset():
+    """Zero per-peer chain counters.
+
+    Per-peer FORWARD chains are zeroed via `iptables -Z <chain>`. Rules
+    are not removed; only counters reset. Does NOT zero INPUT-chain
+    explicit-deny counters (touching INPUT could affect operator-managed
+    rules). The UI banner explains this scoping.
+    """
+    ipt.reset_acl_stats()
+    return {"ok": True, "snapshot_ts": time.time()}
+
+
+@app.get("/api/iptables/dump")
+def iptables_dump():
+    """Full iptables dump (filter + nat tables) as plain text.
+
+    Read-only. Used by the "view raw iptables" modal for inspection
+    when the operator wants to verify rule shape directly. Auto-refreshed
+    by the modal every few seconds while open.
+
+    Returns plain text rather than JSON because the consumer is a
+    fixed-width text display — parsing into structure would lose the
+    layout iptables produces, and we'd just have to re-render it
+    client-side. The text is short (a few KB) so the bandwidth cost
+    is fine even at 3-second poll intervals.
+    """
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse(ipt.dump_all())
 
 
 @app.get("/api/rdns/{ip}")
@@ -1534,6 +2370,12 @@ async def ws_logs(websocket: WebSocket, source: str):
         await websocket.close(code=4404)
         return
     await websocket.accept()
+    # Track this connection for the live-icon tooltip. Source label
+    # includes the log type so the operator can see what's open
+    # ("/ws/logs/dnsmasq" vs "/ws/logs/wireguard"). Decremented in
+    # finally so abnormal teardown still gets accounted.
+    counter_label = f"/ws/logs/{source}"
+    ws_counter.increment(counter_label)
     try:
         await handler(websocket)
     except WebSocketDisconnect:
@@ -1544,6 +2386,8 @@ async def ws_logs(websocket: WebSocket, source: str):
             await websocket.send_json({"error": f"stream failed: {e!r}"})
         except Exception:
             pass
+    finally:
+        ws_counter.decrement(counter_label)
 
 
 # ---------------------------------------------------------------------------
@@ -1709,12 +2553,32 @@ async def ws_status(websocket: WebSocket):
     (different ASGI scope), so we check the session cookie ourselves
     before accepting. Browsers include cookies on WS connects to the same
     origin so this works transparently from the UI.
+
+    Disconnect handling:
+      The loop runs as a `send_loop` task. A second `recv_drain` task
+      reads from the client; when the client closes the socket, that
+      task raises WebSocketDisconnect (or ConnectionClosed) and we
+      cancel the send loop. Without this, send_text() can keep silently
+      succeeding for up to ~2 hours after a dirty close (browser tab
+      killed, network dropped) because TCP retransmit timeouts are
+      that long; the kernel still buffers writes that never reach the
+      client. The recv-side detection is much faster: the OS surfaces
+      a closed socket on read attempts almost immediately.
+
+      Both tasks share an `asyncio.wait(..., FIRST_COMPLETED)` so
+      whichever side notices first wins and tears the other down.
     """
     if not auth.is_authenticated_ws(websocket):
         await websocket.close(code=4401)    # custom close code = unauthorized
         return
     await websocket.accept()
-    try:
+    # Track this connection in the global counter so the UI can show
+    # how many WSes are open. Counter is decremented in the finally
+    # block below so abnormal teardown still gets accounted for.
+    ws_counter.increment("/ws/status")
+
+    async def send_loop():
+        """Push a status snapshot every 1s. Raises if the socket is dead."""
         while True:
             # All of this reads metrics.* state, which is updated by the
             # collector task. No shell-outs here — pure in-memory reads
@@ -1777,13 +2641,72 @@ async def ws_status(websocket: WebSocket):
                     "online": tp.peers_online, "total": tp.peers_total,
                 } if tp else None,
                 "session_count": sum(1 for p in peer_list if p["online"]),
+                # WS counter snapshot (v3.6). Cheap to compute (sum of a
+                # small dict). UI uses this to render the live-icon
+                # tooltip showing how many WSes are open + breakdown.
+                "ws_count": ws_counter.snapshot(),
             }
             await websocket.send_text(json.dumps(payload))
             await asyncio.sleep(1.0)
+
+    async def recv_drain():
+        """Sit on receive_text() to detect client disconnect promptly.
+
+        We don't expect the client to send us anything — the protocol is
+        server→client only. But a pending recv_text() call is what makes
+        the OS surface a closed socket via WebSocketDisconnect, instead
+        of us waiting for the next send to discover the same fact ~minutes
+        or hours later. If the client DOES send something, we just discard
+        it and keep waiting; the panel UI never sends to /ws/status so
+        this branch is unreachable in practice.
+        """
+        while True:
+            await websocket.receive_text()
+
+    send_task = asyncio.create_task(send_loop(), name="ws_status_send")
+    recv_task = asyncio.create_task(recv_drain(), name="ws_status_recv")
+    try:
+        # FIRST_COMPLETED: whichever task finishes (or raises) wins.
+        # Disconnect raises in recv_task; a serialization or socket-write
+        # error raises in send_task. Either way we want to tear down both.
+        done, pending = await asyncio.wait(
+            {send_task, recv_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        # Surface the exception from whichever task completed, if it was
+        # exceptional. This makes leaks during development louder — a
+        # silent crash in send_loop would otherwise just look like a
+        # disconnect. WebSocketDisconnect is the expected case and is
+        # caught below.
+        for t in done:
+            exc = t.exception()
+            if exc and not isinstance(exc, (WebSocketDisconnect, asyncio.CancelledError)):
+                # Log but don't re-raise: we want the cleanup path to run
+                # regardless. A real bug would also produce stderr noise.
+                import traceback
+                traceback.print_exception(type(exc), exc, exc.__traceback__)
     except WebSocketDisconnect:
-        return
-    except Exception:
-        await websocket.close()
+        # Normal close path — client tab closed, network dropped, etc.
+        pass
+    finally:
+        # Cancel whichever task is still running. await-ing them after
+        # cancel() guarantees their finally blocks run before we proceed.
+        for t in (send_task, recv_task):
+            if not t.done():
+                t.cancel()
+        # Drain the cancellations. Use return_exceptions=True so a
+        # CancelledError in one task doesn't stop us awaiting the other.
+        await asyncio.gather(send_task, recv_task, return_exceptions=True)
+        # Best-effort close. Already-closed sockets raise here, which we
+        # swallow — the goal is just to ensure the close handshake is
+        # initiated if we got here via send-side error rather than
+        # client-initiated disconnect.
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+        # Always decrement the WS counter, even on abnormal teardown.
+        ws_counter.decrement("/ws/status")
 
 
 # ---------------------------------------------------------------------------

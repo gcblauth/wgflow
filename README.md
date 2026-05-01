@@ -5,7 +5,7 @@
 Run WireGuard, generate peer configs, manage per-peer ACLs, monitor live throughput, run network diagnostics, and serve everything from a self-contained web UI — all from one Docker container.
 
 ```
-[ wgflow ]   wireguard control panel · v3.1
+[ wgflow ]   wireguard control panel · v3.2
 ```
 
 ## Screenshots:
@@ -48,6 +48,7 @@ It is meant for one-operator deployments managing tens to low hundreds of peers 
 
 ### Peer management
 - Single create, batch by names list, or batch by count + prefix
+- **Migrate from existing deployments** — auto-detecting importer for wg-easy (v1-v14 `wg0.json` and v15+ `wg-easy.db`), PiVPN (tar/zip of `/etc/wireguard/`), and bare WireGuard (`wg0.conf`); dry-run preview with per-peer status before commit
 - Per-peer ACLs (host / CIDR / port / protocol) with a server-side default applied to new peers
 - Per-peer **DNS preference** at creation: inherit server default, set custom value, or omit entirely (split-tunnel friendly) — overridable at config download time via `?dns=` query param
 - Encrypted ZIP installer for Windows recipients (.ps1 + embedded .conf, AES-256, 60-bit Diceware passphrase)
@@ -91,6 +92,15 @@ Four on-demand log streams via WebSocket — opened only when you switch to that
 - Pagination, search, and column sorting on the peer table
 - Custom inline SVG charts everywhere (no chart.js dependency at runtime)
 - About modal with version + GitHub link
+
+---
+
+## Deployment paths
+
+wgflow has two install paths:
+
+- **Docker (recommended).** This is what's tested against every release and used in production. The Quick start below is the Docker flow.
+- **Bare-metal Ubuntu (experimental).** A `install-baremetal.sh` script exists for installing wgflow as a systemd service without Docker. It works (and is used in at least one production instance) but isn't routinely tested against new releases — new features may have Docker-only paths and bare-metal-specific bugs are addressed on request rather than as a release blocker. Use this if you specifically want to avoid Docker and accept the lighter maintenance.
 
 ---
 
@@ -162,6 +172,19 @@ If you set a plaintext password, wgflow prints a generated bcrypt hash in the co
 | Variable           | Default  | Notes                                          |
 |--------------------|----------|------------------------------------------------|
 | `WGFLOW_DATA_DIR`  | `/data`  | where keys, sqlite, and per-peer configs live  |
+
+### Telemetry
+
+| Variable                    | Default | Notes                                                                       |
+|-----------------------------|---------|-----------------------------------------------------------------------------|
+| `WGFLOW_TELEMETRY_ENABLED`  | `1`     | `0` disables anonymous stats (peer count, totals, uptime). See Telemetry §  |
+| `WGFLOW_TELEMETRY_SECRET`   | `""`    | HMAC key. Empty = derive per-instance from the wg server key (recommended)  |
+
+### Migration importer
+
+| Variable                            | Default | Notes                                                                |
+|-------------------------------------|---------|----------------------------------------------------------------------|
+| `WGFLOW_MIGRATION_DEFAULT_ENABLED`  | `1`     | Seeds the importer's enabled-state on first install only. Once the DB row exists, runtime UI/API toggle wins on subsequent restarts. See Migrating from another WireGuard manager § |
 
 ### Optional volumes
 
@@ -336,6 +359,16 @@ All endpoints are under `/api/`. Auth (when enabled) is via the `wgflow_session`
 |--------|----------------|--------------------------------------------------------|
 | `WS`   | `/ws/status`   | combined peer + host + throughput snapshot every 1s    |
 
+### Migration importer
+
+| Method | Path                              | Notes                                                       |
+|--------|-----------------------------------|-------------------------------------------------------------|
+| `POST` | `/api/import/upload`              | multipart `file=…` — auto-detects format, returns preview (403 when migration disabled) |
+| `GET`  | `/api/import/preview/{id}`        | re-fetch a stashed preview (403 when migration disabled)    |
+| `POST` | `/api/import/commit`              | `{preview_id, accepted_indices, adopt_server_keypair, confirm_token: "IMPORT"}` (403 when migration disabled) |
+| `GET`  | `/api/server/migration`           | `{enabled: bool}` — current importer state                  |
+| `PUT`  | `/api/server/migration`           | `{enabled: bool}` — flip importer on/off                    |
+
 ---
 
 ## Persistence
@@ -355,6 +388,54 @@ The sqlite database has these tables: `peers`, `peer_acls`, `metrics_samples`, `
 
 ---
 
+## Migrating from another WireGuard manager
+
+The **migrate** tab in the peer-management panel imports peers from an existing WireGuard deployment. Upload one file; the format is auto-detected; you get a preview of what will land, with per-peer status badges; you decide what to commit.
+
+### Supported sources
+
+| Source | What to upload | Server keypair? | Peer privkeys? |
+|---|---|---|---|
+| wg-easy v1-v14 | `wg0.json` from `/etc/wireguard/` | yes | yes |
+| wg-easy v15+ | `wg-easy.db` from `/etc/wireguard/` | yes (best-effort) | yes |
+| PiVPN | `tar czf pivpn.tar.gz /etc/wireguard/` | yes | yes |
+| Bare WireGuard | `wg0.conf` | yes (if `[Interface] PrivateKey` present) | **no** |
+
+The bare-WireGuard path is lower-fidelity by design. Server-side `wg0.conf` only stores peer **public** keys; the private keys live with the clients. wgflow imports those peers with a `has_private_key=false` flag and the "download config" button is hidden for them — their existing client `.conf` files continue to work, but wgflow can't re-issue them.
+
+### What happens during import
+
+1. **Upload.** The detector sniffs file magic and routes to the right parser. Errors at this step are specific: "this looks like JSON but lacks a `clients` object", not "unknown format".
+2. **Preview.** Each parsed peer is annotated with one of: `ok`, `name-conflict`, `pubkey-conflict`, `address-conflict`, `address-out-of-range`, `invalid`. Address conflicts appear when a source IP is already used by an existing wgflow peer; out-of-range means the source IP isn't inside wgflow's subnet, in which case wgflow precomputes a free `/32` from its own pool and the preview shows `10.6.0.5 → 10.13.13.42`.
+3. **Server keypair.** If the source provided one, you'll see a side-by-side diff of the current pubkey vs the incoming one. **Adopt** is checked by default — that's the migration-friendly choice, since clients reference the source's pubkey in their `.conf` and would otherwise break. Untick to keep wgflow's existing keypair and accept that all client configs need re-issuing.
+4. **Commit.** Type `IMPORT` to confirm, click commit. The DB writes happen in one transaction. If anything fails, the DB rolls back and you see the failure with the updated preview. Server keypair file replacement (when adopted) uses tmp-file + atomic rename — a crash mid-write leaves the old keypair intact, never half-written.
+
+### What's NOT translated
+
+- **AllowedIPs → ACLs.** Source `AllowedIPs` is a routing concept; wgflow ACLs are firewall rules. The mapping isn't clean. Imported peers come in with the server's default ACL (`WGFLOW_DEFAULT_ACL`); adjust per-peer afterwards.
+- **PostUp / PostDown.** wg-easy stores these in `wg0.json`. wgflow manages its own iptables setup; source values are ignored.
+- **Source `created_at` / `updated_at`** are not preserved. The peer's wgflow `created_at` is set to the import time. The source timestamp appears in the peer's `notes` field.
+
+### Operational notes
+
+- The 8 MiB upload cap covers the largest realistic real-world dump by orders of magnitude. Tighten `_IMPORT_MAX_BYTES` in `app/main.py` if you want a smaller blast radius.
+- Previews live in process memory with a 10-minute TTL. Restart the container and pending previews are gone — re-upload, takes seconds.
+- For wg-easy v15, upstream's schema isn't fully stable. The parser tries multiple known table/column name variants. If yours isn't recognised, the cleanest workaround is wg-easy's own "back up to `wg0.json`" feature, then upload the JSON.
+
+### Disabling the importer
+
+The importer is meant for one-time-use. Once you've migrated, lock the endpoints down:
+
+- **Server tab** has an "enabled / disabled" toggle under *migration importer*. Click once.
+- **Post-commit nudge** — after every successful import, a banner on the result screen offers a one-click "disable migration" button. Easiest path.
+- **API** — `PUT /api/server/migration {"enabled": false}` from any auth-bearing client.
+
+When disabled, all three `/api/import/*` endpoints return 403 and the migrate tab disappears from the UI. Re-enable any time from the server tab.
+
+The default state on a fresh install is **enabled** (so you can find the migrate tab without configuration). Override at provision time with `WGFLOW_MIGRATION_DEFAULT_ENABLED=0` in `.env` if you want default-off; once the install creates its `network_settings` row this env var stops mattering.
+
+---
+
 ## Operational notes
 
 - **Hot reload.** Adding, editing, or deleting peers uses `wg syncconf`. Existing peer sessions stay connected through the change.
@@ -366,6 +447,33 @@ The sqlite database has these tables: `peers`, `peer_acls`, `metrics_samples`, `
 - **NAT loopback** — if your peers are on the same LAN as the wgflow server, the public endpoint may not work due to your router's NAT. Use the DNS override editor to map the public hostname to an internal IP.
 - **iptables LOG rule rate** — capped at 10/min, burst 5. Won't flood `kern.log` even with a misbehaving peer. Bandwidth-limit features (when added) will need stricter per-rule limits.
 - **The `↺` cumulative counter reset** affects both rx and tx together (single offset row in DB).
+
+---
+
+## Telemetry
+
+wgflow ships with anonymous usage telemetry **enabled by default**. Every 30 minutes the running container POSTs a small JSON payload to `https://wgflow.2ps.in/collect`:
+
+```json
+{
+  "instance_id":     "<uuid generated on first DB init>",
+  "version":         "3.2",
+  "peers_total":     12,
+  "rx_bytes":        47294827344,
+  "tx_bytes":        51182300012,
+  "uptime_seconds":  186420
+}
+```
+
+That's the entire payload. There are no peer names, no public keys, no IPs, no DNS query history, no host identifiers, no ACL contents — just the six values above.
+
+The body is HMAC-SHA256 signed (header `X-Signature`). The HMAC key is either `WGFLOW_TELEMETRY_SECRET` if set in the environment, or — when unset — a community-known constant baked into the source (`wgflow-community-default`). The signature is therefore an *integrity* check, not proof of origin: anyone reading the wgflow source can compute valid signatures. That's intentional. The collector defends against fake-instance flooding with per-IP rate limits and a pending-review queue: a new `instance_id` only counts toward the public stats after it has checked in **at least 10 times across at least 24 hours**. One-shot or short-burst forgeries never make it out of pending.
+
+**To opt out:** set `WGFLOW_TELEMETRY_ENABLED=0` in your `.env` (or `docker-compose.yml`) and restart the container. `setup.sh` prompts for this on initial config. The startup log line `[wgflow] telemetry DISABLED via WGFLOW_TELEMETRY_ENABLED` confirms it took effect.
+
+**Why default-on:** the project genuinely benefits from knowing how it's used in the wild — peer-count distribution drives the "we should refactor at >50 peers" decisions, version mix tells us when it's safe to drop migration paths. Default-off would be more privacy-forward but leaves the project blind. We default-on, document plainly, and make opt-out a single env var.
+
+The collected aggregate stats are posted to the project's GitHub page.
 
 ---
 
