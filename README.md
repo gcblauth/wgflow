@@ -5,13 +5,22 @@
 Run WireGuard, generate peer configs, manage per-peer ACLs, monitor live throughput, run network diagnostics, and serve everything from a self-contained web UI — all from one Docker container.
 
 ```
-[ wgflow ]   wireguard control panel · v3.2
+[ wgflow ]   wireguard control panel · v3.8.3
 ```
 
 ## Screenshots:
 
+<img width="1904" height="962" alt="image" src="https://github.com/user-attachments/assets/e3af3897-34d4-44c0-ad9c-5c88418f8f55" />
+
+<img width="1906" height="990" alt="image" src="https://github.com/user-attachments/assets/407067fd-1e2f-4aa8-986c-9743828275dc" />
+
+<img width="951" height="911" alt="image" src="https://github.com/user-attachments/assets/685a83b4-f305-44e6-a754-054ea289ed79" />
+
 
 **Everything you need.**
+---
+
+## Community Driven:
 
 <img src="https://wgflow.2ps.in/stats.svg" />
 
