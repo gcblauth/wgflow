@@ -140,8 +140,18 @@ if [ "${LOCAL_DNS}" = "1" ]; then
     fi
     # Substitute. We use awk rather than sed so server-list contents (which
     # may contain '/') don't need escaping.
+    #
+    # v3.8.3: also substitute the __WGFLOW_OVERRIDES__ marker. At entrypoint
+    # time we leave it blank — the python app will re-render the file with
+    # the actual overrides from the DB shortly after startup (via
+    # dns_overrides.replay_to_dnsmasq, called from main.py's lifespan
+    # startup hook). So initial dnsmasq starts with no overrides, then
+    # quickly restarts once with the DB contents merged in. Cost is one
+    # extra restart at boot; benefit is the python code is the single
+    # source of truth for what the rendered overrides look like.
     awk -v repl="${SERVER_LINES}" '
         /^# __WGFLOW_UPSTREAMS__/ { printf "%s", repl; next }
+        /^# __WGFLOW_OVERRIDES__/ { next }
         { print }
     ' /etc/dnsmasq.conf.template > "${DNSMASQ_CONF}"
     chmod 644 "${DNSMASQ_CONF}"

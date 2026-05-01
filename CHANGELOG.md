@@ -5,6 +5,152 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [3.8.3] — 2026-05-01
+
+### Fixed
+- **DNS overrides still silently ignored on some setups**, even after
+  the v3.8.1 conf-dir fix. Operators reported overrides like
+  `reconta.cloud → 192.168.99.132` rendering correctly to
+  `/etc/dnsmasq.d/wgflow-overrides.conf`, the conf-dir directive
+  appearing in `/etc/dnsmasq.conf`, dnsmasq running and processing
+  queries — but the queries were being forwarded upstream and
+  answered with the public IP. The smoking gun in the dnsmasq query
+  log was `forwarded reconta.cloud to 8.8.8.8`, proving the
+  `address=/reconta.cloud/192.168.99.132` directive was not loaded.
+
+  Root cause undetermined — likely a subtle interaction between
+  `conf-dir` extension filter parsing (`*.conf` vs `.conf`),
+  drop-in load order, and dnsmasq build-time options. Different
+  base images parse this differently.
+
+  **Fix:** stop using a drop-in file. Render `address=` directives
+  directly into `/etc/dnsmasq.conf` itself, between marker comments
+  (`# __WGFLOW_OVERRIDES_BEGIN__` / `# __WGFLOW_OVERRIDES_END__`).
+  This eliminates the conf-dir variable entirely — if dnsmasq
+  starts with `--conf-file=/etc/dnsmasq.conf` at all, it sees the
+  directives.
+
+  Mechanics:
+  - `dnsmasq.conf.template` has a `# __WGFLOW_OVERRIDES__` marker.
+  - `entrypoint.sh` strips the marker on initial render.
+  - `app/dns_overrides.py` reads the live `/etc/dnsmasq.conf`,
+    splices the rendered address block in/out via the BEGIN/END
+    markers, writes atomically, then SIGTERM+respawns dnsmasq.
+  - On startup, the lifespan hook calls the same render path so
+    DB-stored overrides are applied immediately.
+  - Legacy `/etc/dnsmasq.d/wgflow-overrides.conf` is replaced
+    with a comment-only stub on first v3.8.3 mutation, so any
+    leftover content from v3.8.x can't sneak entries in.
+
+### Notes
+- **Existing operators MUST `docker compose down && up`** (not just
+  restart) after deploying v3.8.3. The new template + entrypoint
+  must run to render the new `/etc/dnsmasq.conf` with the
+  `__WGFLOW_OVERRIDES__` marker in place. Mere `docker compose
+  restart wgflow` re-runs entrypoint inside the existing container,
+  which IS sufficient — but a fresh `down && up` is recommended
+  to also pick up any other changes.
+- **The conf-dir directive is removed** from the template. If you
+  had drop-in `.conf` files in `/etc/dnsmasq.d/` for other reasons
+  (custom blocklists, manual overrides), they'll stop being loaded.
+  Move their contents into a custom `addn-hosts=` file or directly
+  into `/etc/dnsmasq.conf` via a docker volume mount.
+- **The blocklist still works** — it's loaded via the explicit
+  `addn-hosts=/etc/dnsmasq.d/blocklist.hosts` line, which doesn't
+  depend on conf-dir.
+
+---
+
+## [3.8.2] — 2026-05-01
+
+### Fixed
+- **DNS override respawn could fail silently.** The v3.8.1 fix
+  spawned a new dnsmasq via `subprocess.Popen` with stdout+stderr
+  both redirected to `/dev/null`, then returned without checking
+  whether the new process was actually alive. If the new dnsmasq
+  failed to bind to port 53 (because the kernel hadn't released the
+  socket yet from the old process — a brief TIME_WAIT can linger
+  after `bind-interfaces` socket close), it would exit immediately
+  with a clear error message — but we'd never see the message and
+  no dnsmasq would be running.
+
+  Symptoms: operator added an override, expected entries continued
+  to be answered from the previous dnsmasq's cache (because the new
+  dnsmasq was dead and the old one was somehow still answering), or
+  DNS broke entirely.
+
+  Fix:
+  1. Increased the wait-for-old-process-exit window to 3s
+     (was 2s), plus 200ms after exit to let the kernel release
+     bound sockets cleanly.
+  2. The respawn now captures stderr and waits 300ms after spawn
+     to see if the new dnsmasq exited immediately. If it did,
+     the captured stderr is logged so the operator can see what
+     went wrong (e.g. `dnsmasq: failed to bind listening socket
+     for 10.1.69.1: Address already in use`).
+  3. Logs the new pid on success so operators can confirm via
+     `docker exec wgflow ps aux | grep dnsmasq` that the right
+     process is running.
+
+### Notes
+- **Existing operators experiencing the bug:** restart the container
+  (`docker compose restart wgflow`) and try the override again. If
+  the override now works, the previous failure was the silent
+  respawn bug. If it still doesn't work, the captured stderr will
+  now be in the wgflow container logs (`docker compose logs wgflow`)
+  and we can investigate from there.
+
+---
+
+## [3.8.1] — 2026-05-01
+
+### Fixed
+- **DNS overrides never reached dnsmasq** (regression introduced
+  before v3.8 — bug was latent until an operator actually configured
+  an override). Two compounding causes:
+
+  1. **No `conf-dir` in dnsmasq.conf.template.** The drop-in file
+     `/etc/dnsmasq.d/wgflow-overrides.conf` was being written
+     correctly, but dnsmasq's main config never told it to load files
+     from `/etc/dnsmasq.d/`. The blocklist was loaded explicitly via
+     `addn-hosts=...` so it worked, but the overrides drop-in was
+     invisible to dnsmasq.
+     **Fix:** added `conf-dir=/etc/dnsmasq.d/,*.conf` to the template.
+     The `,*.conf` filter prevents `blocklist.hosts` from being re-loaded
+     as a config file.
+
+  2. **SIGHUP doesn't reload `address=` directives.** Even with the
+     drop-in loaded at startup, the previous code SIGHUPed dnsmasq
+     after writing the file. SIGHUP only reloads `addn-hosts`, the
+     leases file, and a handful of other runtime files — it does NOT
+     re-parse main config or `conf-dir`-loaded `*.conf` files.
+     dnsmasq parses `address=` only at startup.
+     **Fix:** `dns_overrides.write_and_reload()` now SIGTERMs the
+     running dnsmasq, waits up to 2s for it to exit cleanly, and
+     spawns a fresh dnsmasq process with the same `--conf-file=`. Brief
+     (~100ms) DNS outage during the swap, which is acceptable for an
+     operator-initiated config change.
+
+  Symptoms of the bug: operator added an override via the UI, the
+  Active Overrides table showed it, but client queries continued to
+  return NXDOMAIN with `UPSTREAM` in the dns recent queries log.
+
+### Notes
+- **The respawn path assumes the docker entrypoint shape.** The
+  spawn uses `--conf-file=/etc/dnsmasq.conf`, which is what
+  `entrypoint.sh` writes. If you've customised the entrypoint to
+  use a different path, the new dnsmasq won't have the right
+  upstreams. Bare-metal installations are unaffected because
+  they use the same conf path.
+- **Existing instances need a one-time container restart** to pick
+  up the new `conf-dir` line in the rendered dnsmasq.conf. The
+  override file is already on disk; once the new template is
+  applied + dnsmasq restarts, all overrides start working
+  immediately. Subsequent override changes don't need manual
+  intervention.
+
+---
+
 ## [3.8] — 2026-05-01
 
 ### Added

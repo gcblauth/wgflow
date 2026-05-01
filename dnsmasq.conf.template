@@ -74,6 +74,22 @@ log-async=10
 # replacements or add their own files via a volume mount.
 addn-hosts=/etc/dnsmasq.d/blocklist.hosts
 
+# ---------------------------------------------------------------------------
+# DNS overrides (managed by wgflow)
+# ---------------------------------------------------------------------------
+# v3.8.3: overrides are rendered DIRECTLY INTO this file via the marker
+# below, rather than as a conf-dir drop-in. The drop-in approach (used
+# in v3.8.1/v3.8.2) had subtle edge cases — different dnsmasq builds
+# parse `conf-dir=...,*.conf` differently, and the file occasionally
+# wasn't loaded even when it should have been. Rendering inline
+# eliminates that variable: if dnsmasq parses /etc/dnsmasq.conf at
+# all, it sees the overrides.
+#
+# The marker line below is replaced at entrypoint time (initial render
+# from the DB) and at runtime when an operator adds/removes overrides.
+# When no overrides exist, the marker becomes blank.
+# __WGFLOW_OVERRIDES__
+
 # When we block a name, return 0.0.0.0 (the entry in the hosts file)
 # rather than NXDOMAIN — this is the StevenBlack convention. Some clients
 # misbehave on NXDOMAIN; 0.0.0.0 is universally interpreted as "no route".
