@@ -2354,6 +2354,259 @@
     line-height: 1.5;
   }
 
+  /* =========================================================================
+   * v3.8: Mobile layout (≤ 768px or class "force-mobile")
+   * =========================================================================
+   * Approach: keep desktop CSS intact, add overrides under the media
+   * query. Where the form-factor toggle forces mobile on a wider
+   * viewport, we add `.force-mobile` to <body>; the same rules apply
+   * via a sibling selector. Forcing desktop on a narrow viewport adds
+   * `.force-desktop` and we negate the media-query overrides.
+   *
+   * Areas adjusted:
+   *   - Header: brand wraps, controls stack under it
+   *   - Stats: primary stays inline, secondary collapses behind toggle
+   *   - Panels: tighter padding, smaller fonts in headers
+   *   - Live peers: card layout instead of table (handled by JS render)
+   *   - Logs: max-height shrinks
+   *   - Modal: full width with reduced padding
+   */
+  .mobile-system-toggle {
+    width: 100%;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    color: var(--fg-muted);
+    font-family: var(--f-display);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    padding: 10px 14px;
+    text-align: left;
+    cursor: pointer;
+    margin: 0 0 12px 0;
+    transition: color 0.12s ease;
+  }
+  .mobile-system-toggle:hover { color: var(--accent); }
+  .mobile-system-toggle .caret {
+    display: inline-block;
+    transition: transform 0.15s ease;
+    margin-right: 6px;
+  }
+  .mobile-system-toggle[aria-expanded="true"] .caret { transform: rotate(180deg); }
+
+  @media (max-width: 768px) {
+    body:not(.force-desktop) .wrap {
+      padding-left: 12px;
+      padding-right: 12px;
+    }
+    /* Header: stack brand and controls vertically */
+    body:not(.force-desktop) header.top {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 8px;
+    }
+    body:not(.force-desktop) .header-right {
+      flex-wrap: wrap;
+      gap: 6px;
+      justify-content: flex-start;
+    }
+    body:not(.force-desktop) .net-pill {
+      font-size: 11px;
+      padding: 4px 8px;
+    }
+    body:not(.force-desktop) .server-meta {
+      flex-wrap: wrap;
+      gap: 4px;
+      font-size: 11px;
+    }
+    body:not(.force-desktop) .brand .sub {
+      font-size: 10px;
+    }
+
+    /* Stats: 2-column grid, primary stats only by default. The
+       secondary stats are toggled by the system-stats button. */
+    body:not(.force-desktop) .stats {
+      grid-template-columns: repeat(2, 1fr) !important;
+      gap: 8px;
+    }
+    body:not(.force-desktop) .stat-secondary {
+      display: none;
+    }
+    body:not(.force-desktop).system-stats-open .stat-secondary {
+      display: block;
+    }
+    body:not(.force-desktop) .mobile-system-toggle {
+      display: block !important;
+    }
+    body:not(.force-desktop) .stat {
+      padding: 10px 12px;
+    }
+    body:not(.force-desktop) .stat .v {
+      font-size: 18px;
+    }
+
+    /* Panels: tighter */
+    body:not(.force-desktop) .panel .head {
+      padding: 8px 12px;
+    }
+    body:not(.force-desktop) .panel .head h2 {
+      font-size: 11px;
+    }
+    body:not(.force-desktop) .panel .body {
+      padding: 10px 12px;
+    }
+
+    /* Logs: shrink max-height to leave more room for the rest */
+    body:not(.force-desktop) #logs-output {
+      max-height: 200px !important;
+      font-size: 11px !important;
+    }
+
+    /* Modal: full width with breathing room */
+    body:not(.force-desktop) #modal .modal-card {
+      width: 95vw;
+      max-width: 95vw;
+      padding: 16px;
+    }
+
+    /* Drag handle is hard to use on touch — fade it. Replaced by
+       long-press on the header (handled in JS). */
+    body:not(.force-desktop) .panel-drag-handle {
+      display: none;
+    }
+
+    /* Throughput chart: shorter on mobile */
+    body:not(.force-desktop) #throughput-svg {
+      height: 140px !important;
+    }
+
+    /* Live peers: hide table, show cards */
+    body:not(.force-desktop) table.peers,
+    body:not(.force-desktop) .pagination {
+      display: none !important;
+    }
+    body:not(.force-desktop) #peers-cards {
+      display: block !important;
+    }
+    /* The toolbar (search + page-size) stays — search is useful on
+       mobile, page-size we can hide since cards don't paginate. */
+    body:not(.force-desktop) .table-toolbar select,
+    body:not(.force-desktop) .table-toolbar .count-label {
+      display: none;
+    }
+  }
+
+  /* Force-mobile equivalent of the live-peers swap (toggle override) */
+  body.force-mobile table.peers,
+  body.force-mobile .pagination {
+    display: none !important;
+  }
+  body.force-mobile #peers-cards {
+    display: block !important;
+  }
+  body.force-mobile .table-toolbar select,
+  body.force-mobile .table-toolbar .count-label {
+    display: none;
+  }
+
+  /* When the toggle forces mobile on a wide viewport, apply the same
+     overrides regardless of viewport. We don't duplicate the entire
+     block — instead `.force-mobile` toggles a class that triggers the
+     same rules by structuring the selector on the body. */
+  body.force-mobile .stats {
+    grid-template-columns: repeat(2, 1fr) !important;
+    gap: 8px;
+  }
+  body.force-mobile .stat-secondary { display: none; }
+  body.force-mobile.system-stats-open .stat-secondary { display: block; }
+  body.force-mobile .mobile-system-toggle { display: block !important; }
+  body.force-mobile .panel-drag-handle { display: none; }
+
+  /* Card layout for live peers on mobile (v3.8). The cards container
+     lives in the DOM next to the existing <table>; mobile shows
+     cards + hides table, desktop does the inverse. JS render()
+     populates both so a media query swap takes effect immediately. */
+  .peers-cards .peer-card {
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    font-family: var(--f-mono);
+    font-size: 12px;
+  }
+  .peers-cards .peer-card-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 6px;
+    gap: 8px;
+  }
+  .peers-cards .peer-card-row:last-child { margin-bottom: 0; }
+  .peers-cards .peer-card-name {
+    font-family: var(--f-display);
+    font-size: 13px;
+    color: var(--fg);
+  }
+  .peers-cards .peer-card-status {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+  }
+  .peers-cards .peer-card-status.online { color: var(--accent); }
+  .peers-cards .peer-card-status.offline { color: var(--fg-muted); }
+  .peers-cards .peer-card-meta {
+    color: var(--fg-muted);
+    font-size: 11px;
+  }
+  .peers-cards .peer-card-actions {
+    display: flex;
+    gap: 4px;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+  }
+  .peers-cards .peer-card-actions button {
+    flex: 1;
+    font-size: 11px;
+    padding: 6px 8px;
+  }
+
+  /* Long-press visual feedback (v3.8). When the user holds on a
+     panel header on a touch device, we add this class while the
+     menu is being prepared. Cue: header background dims briefly. */
+  .panel-reorderable.longpress-active > .head {
+    background: var(--bg-3, var(--bg-2));
+    transition: background 0.2s ease;
+  }
+
+  /* Long-press menu popup (v3.8). Same visual style as the polling
+     popup — small card, dark bg, sharp border. */
+  .longpress-menu {
+    position: fixed;
+    z-index: 9999;
+    background: var(--bg-2);
+    border: 1px solid var(--border-hi);
+    padding: 6px;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.5);
+    min-width: 180px;
+  }
+  .longpress-menu button {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: none;
+    color: var(--fg);
+    font-family: var(--f-mono);
+    font-size: 12px;
+    padding: 10px 12px;
+    cursor: pointer;
+  }
+  .longpress-menu button:hover {
+    background: var(--bg-3, rgba(255, 255, 255, 0.05));
+    color: var(--accent);
+  }
+
 </style>
 </head>
 <body>
@@ -2370,7 +2623,7 @@
         <span class="instance-chrome" id="instance-chrome">
           <span class="instance-sep">⟫</span><span class="instance-name" id="instance-name"></span><span class="instance-edit-btn" id="instance-edit-btn" title="edit instance name and color">⚙</span>
         </span>
-        <span class="sub">wireguard control panel · v3.7 · <span id="brand-author" class="brand-author" title="about wgflow">gcblauth</span> <span id="matrix-replay" class="matrix-replay-btn" title="replay matrix intro">◆</span></span>
+        <span class="sub">wireguard control panel · v3.8 · <span id="brand-author" class="brand-author" title="about wgflow">gcblauth</span> <span id="matrix-replay" class="matrix-replay-btn" title="replay matrix intro">◆</span></span>
       </div>
     </div>
     <div class="header-right">
@@ -2390,15 +2643,15 @@
   </header>
 
   <section class="stats">
-    <div class="stat"><div class="k">peers total</div><div class="v" id="stat-total">—</div></div>
-    <div class="stat accent with-strip">
+    <div class="stat stat-primary"><div class="k">peers total</div><div class="v" id="stat-total">—</div></div>
+    <div class="stat stat-primary accent with-strip">
       <div>
         <div class="k">peers online</div>
         <div class="v" id="stat-online">—</div>
       </div>
       <svg class="session-strip" id="session-strip" preserveAspectRatio="none" viewBox="0 0 100 30"></svg>
     </div>
-    <div class="stat">
+    <div class="stat stat-secondary">
       <div class="k">rx · rate / total</div>
       <div class="v" style="font-size: 16px;">
         <span style="color: var(--accent)">↓ <span id="stat-rx-rate">—</span></span><br>
@@ -2409,7 +2662,7 @@
         </span>
       </div>
     </div>
-    <div class="stat">
+    <div class="stat stat-secondary">
       <div class="k">tx · rate / total</div>
       <div class="v" style="font-size: 16px;">
         <span style="color: var(--accent-blue)">↑ <span id="stat-tx-rate">—</span></span><br>
@@ -2420,22 +2673,33 @@
         </span>
       </div>
     </div>
-    <div class="stat">
+    <div class="stat stat-secondary">
       <div class="k">cpu</div>
       <div class="v" id="stat-cpu">—</div>
       <div class="vital-bar" id="vb-cpu"><div class="fill" style="width:0%"></div></div>
     </div>
-    <div class="stat">
+    <div class="stat stat-secondary">
       <div class="k">memory</div>
       <div class="v" id="stat-mem">—</div>
       <div class="vital-bar" id="vb-mem"><div class="fill" style="width:0%"></div></div>
     </div>
-    <div class="stat">
+    <div class="stat stat-secondary">
       <div class="k">load · 1m</div>
       <div class="v" id="stat-load">—</div>
       <div class="mono-dim" style="font-size: 10px; margin-top: 4px;" id="stat-load-detail">—</div>
     </div>
   </section>
+
+  <!-- Mobile-only "system" toggle. Hidden on desktop via CSS. Tapping
+       reveals/hides the secondary stats (rx/tx/cpu/mem/load). State
+       persists in localStorage so it survives reloads on the same
+       device. -->
+  <button class="mobile-system-toggle" id="mobile-system-toggle"
+          style="display: none;"
+          aria-expanded="false"
+          aria-controls="stats-secondary">
+    <span class="caret">▾</span> system stats
+  </button>
 
   <!-- Global throughput chart -->
   <div class="panel panel-reorderable" data-panel-id="throughput" style="margin-bottom: 20px;">
@@ -2558,6 +2822,10 @@
             <tr><td colspan="8" class="empty">no peers yet</td></tr>
           </tbody>
         </table>
+        <!-- v3.8: mobile card layout. Hidden on desktop; visible on
+             mobile (viewport ≤ 768 or .force-mobile body class). Same
+             render() function populates both — see render() in JS. -->
+        <div class="peers-cards" id="peers-cards" style="display: none;"></div>
         <div class="pagination" id="pagination" style="display: none;">
           <span id="page-info">—</span>
           <div class="pages" id="page-buttons"></div>
@@ -3135,7 +3403,7 @@
     <div class="about-brand">
       <span class="bracket">[</span>wgflow<span class="bracket">]</span>
     </div>
-    <div class="about-version">v3.7</div>
+    <div class="about-version">v3.8</div>
     <div class="about-line">wireguard control panel</div>
     <a class="about-link" href="https://github.com/gcblauth/wgflow" target="_blank" rel="noopener">
       github.com/gcblauth/wgflow
@@ -3499,6 +3767,15 @@ function render() {
     }
   }
 
+  // v3.8: also render the mobile cards container. Same data source,
+  // simpler layout. The CSS swap (table ↔ cards) keeps only one
+  // visible at a time, so always rendering both is cheap and avoids
+  // a "viewport changed mid-session" race. Note: cards intentionally
+  // skip pagination — on mobile, scrolling a list is the natural
+  // interaction; pagination buttons are an extra tap target the user
+  // doesn't want.
+  _renderPeerCards(sorted, live);
+
   // Pagination controls.
   renderPagination(sorted.length, totalPages);
 
@@ -3546,6 +3823,162 @@ function render() {
   if (currentRange === 'live') drawThroughput(throughputSeries);
   drawSessionStrip(sessionSeries);
 }
+
+// v3.8: mobile peer cards renderer.
+//
+// Builds a list of <div class="peer-card"> nodes inside #peers-cards.
+// CSS hides this container on desktop; on mobile (≤768 viewport or
+// .force-mobile body class), the table is hidden and these cards
+// are shown.
+//
+// Same actions as the table row: inspect, enable/disable, actions
+// (conf/qr/ps1/acl), delete — but stacked at the bottom of each
+// card with bigger tap targets (44px nominal).
+//
+// Shares the click delegation: #peers-tbody listener already handles
+// data-actions / data-del / data-toggle-enabled / data-inspect via
+// the dataset attributes. We attach the SAME listener to the cards
+// container so taps work without duplicating handler code.
+function _renderPeerCards(sorted, live) {
+  const wrap = document.getElementById('peers-cards');
+  if (!wrap) return;
+
+  if (!sorted.length) {
+    if (!peersDB.length) {
+      wrap.innerHTML = '<div class="mono-dim" style="padding: 18px; text-align: center;">no peers yet</div>';
+    } else {
+      wrap.innerHTML = `<div class="mono-dim" style="padding: 18px; text-align: center;">no peers match "${escape(searchQuery)}"</div>`;
+    }
+    return;
+  }
+
+  // Render in chunks via a doc fragment to avoid layout thrash.
+  const frag = document.createDocumentFragment();
+  for (const p of sorted) {
+    const l = live.find(x => x.id === p.id) || {};
+    const online = !!l.online;
+    const isDisabled = p.enabled === false;
+
+    const statusText = isDisabled ? 'disabled'
+                     : online ? 'online'
+                     : (l.ever_connected ? 'idle' : 'never');
+    const statusClass = isDisabled ? 'offline'
+                      : online ? 'online'
+                      : 'offline';
+
+    const handshakeText = isDisabled ? '—'
+                        : (l.latest_handshake ? fmtAgo(l.latest_handshake) : 'never');
+
+    const rxRate = l.rx_rate || 0;
+    const txRate = l.tx_rate || 0;
+    const rateText = (rxRate || txRate)
+      ? `↓ ${fmtRate(rxRate)} · ↑ ${fmtRate(txRate)}`
+      : '—';
+
+    const denies = p.acl.filter(e => e.startsWith('!')).length;
+    const allows = p.acl.length - denies;
+    const aclText = denies > 0
+      ? `${allows} allow · ${denies} deny`
+      : `${allows} rule${allows === 1 ? '' : 's'}`;
+
+    const card = document.createElement('div');
+    card.className = 'peer-card';
+    if (isDisabled) card.style.opacity = '0.6';
+    card.innerHTML = `
+      <div class="peer-card-row">
+        <div class="peer-card-name">${escape(p.name)}</div>
+        <div class="peer-card-status ${statusClass}">${escape(statusText)}</div>
+      </div>
+      <div class="peer-card-row peer-card-meta">
+        <span>${escape(p.address)}</span>
+        <span>${escape(handshakeText)}</span>
+      </div>
+      <div class="peer-card-row peer-card-meta">
+        <span>${escape(rateText)}</span>
+        <span><button class="ghost" data-acl-edit="${p.id}" style="font-size: 10px; padding: 2px 8px; border-color: var(--border);">${escape(aclText)}</button></span>
+      </div>
+      <div class="peer-card-actions">
+        <button class="ghost" data-inspect="${p.id}">⌕ inspect</button>
+        <button class="ghost" data-toggle-enabled="${p.id}" data-currently-enabled="${!isDisabled}">${isDisabled ? '▶ enable' : '⏸ pause'}</button>
+        <button class="ghost" data-actions="${p.id}">actions</button>
+        <button class="ghost danger" data-del="${p.id}">✕</button>
+      </div>
+    `;
+    frag.appendChild(card);
+  }
+
+  wrap.innerHTML = '';
+  wrap.appendChild(frag);
+
+  // Wire click delegation. Same handlers as the table row click
+  // listener (data-actions / data-del / data-inspect / etc.) — we
+  // don't duplicate the logic, just dispatch to the existing one
+  // by simulating a click on the matching row's button. Simpler:
+  // attach a listener with the same body shape.
+  if (!wrap._delegationBound) {
+    wrap._delegationBound = true;
+    wrap.addEventListener('click', async (ev) => {
+      const t = ev.target.closest('button');
+      if (!t) return;
+      // Reuse the same dataset-driven dispatch as the table row
+      // delegation. Each branch matches the one in the existing
+      // #peers-tbody handler.
+      if (t.dataset.actions) {
+        const id = t.dataset.actions;
+        const peer = peersDB.find(p => p.id == id);
+        if (peer) openActionsMenu(peer);
+        return;
+      }
+      if (t.dataset.aclEdit) {
+        const id = t.dataset.aclEdit;
+        const peer = peersDB.find(p => p.id == id);
+        if (peer) openAclEditor(peer);
+        return;
+      }
+      if (t.dataset.inspect) {
+        openInspect(parseInt(t.dataset.inspect, 10));
+        return;
+      }
+      if (t.dataset.toggleEnabled) {
+        const id = t.dataset.toggleEnabled;
+        const wasEnabled = t.dataset.currentlyEnabled === 'true';
+        const newEnabled = !wasEnabled;
+        const peer = peersDB.find(p => p.id == id);
+        const verb = newEnabled ? 'enable' : 'disable';
+        if (!newEnabled) {
+          const okMsg = `disable peer "${peer ? peer.name : id}"? `
+            + `any active session will be cut immediately.`;
+          if (!confirm(okMsg)) return;
+        }
+        t.disabled = true;
+        try {
+          await api('PUT', `/api/peers/${id}/enabled`, { enabled: newEnabled });
+          await loadPeers();
+          toast(`${verb}d ${peer ? peer.name : 'peer'}`);
+        } catch (e) {
+          toast(e.message, 'error');
+        } finally {
+          t.disabled = false;
+        }
+        return;
+      }
+      if (t.dataset.del) {
+        const id = t.dataset.del;
+        const peer = peersDB.find(p => p.id == id);
+        const name = peer ? peer.name : id;
+        if (!confirm(`delete peer "${name}"? this is irreversible.`)) return;
+        try {
+          await api('DELETE', `/api/peers/${id}`);
+          await loadPeers();
+          toast(`deleted ${name}`);
+        } catch (e) {
+          toast(e.message, 'error');
+        }
+      }
+    });
+  }
+}
+
 
 function renderPagination(totalRows, totalPages) {
   const wrap = $('#pagination');
@@ -8616,9 +9049,13 @@ function reorderInjectHandles() {
       const newOrder = Array.from(
         document.querySelectorAll('.panel-reorderable')
       ).map(p => p.dataset.panelId);
+      _layoutLog('order-save', 'form=' + _formFactor.detect(), 'order=', newOrder);
       try {
-        await api('PUT', '/api/server/panel-order', { order: newOrder });
+        await api('PUT', '/api/server/panel-order' + _formFactor.qs(),
+                  { order: newOrder });
+        _layoutLog('order-save', 'OK');
       } catch (e) {
+        _layoutLog('order-save', 'FAILED', e);
         if (typeof toast === 'function') {
           toast('reorder save failed: ' + (e.message || ''), 'error');
         }
@@ -8630,22 +9067,17 @@ function reorderInjectHandles() {
 async function reorderApplyFromConfig() {
   let cfg;
   try {
-    cfg = await api('GET', '/api/server/panel-order');
+    cfg = await api('GET', '/api/server/panel-order' + _formFactor.qs());
   } catch (e) {
-    return;  // pre-3.6 server or unauth — keep DOM source order
+    _layoutLog('order-load', 'failed', e);
+    return;
   }
+  _layoutLog('order-load', 'form=' + _formFactor.detect(), 'cfg=', cfg);
   const order = cfg.order || [];
   if (!order.length) return;
-  // Find the parent of the first reorderable panel — all panels share
-  // the same parent (the dashboard wrapper).
   const first = document.querySelector('.panel-reorderable');
   if (!first) return;
   const parent = first.parentNode;
-  // For each id in the saved order, move that panel to the END of the
-  // parent. Iterating saved-order top-to-bottom and appending each puts
-  // them in the saved order at the bottom of the wrapper. Anything
-  // unknown stays where it is in DOM source order (defensive against
-  // schema drift between client and server versions).
   for (const id of order) {
     const panel = parent.querySelector(
       `.panel-reorderable[data-panel-id="${CSS.escape(id)}"]`
@@ -8686,9 +9118,16 @@ async function reorderApplyFromConfig() {
       const resetBtn = document.getElementById('server-reset-panel-order');
       if (resetBtn) {
         resetBtn.addEventListener('click', async () => {
-          if (!confirm('reset panel order to default? this will reload the page.')) return;
+          const ff = _formFactor.detect();
+          if (!confirm(`reset ${ff} panel order to default? this will reload the page.`)) return;
           try {
-            await api('PUT', '/api/server/panel-order', { order: [] });
+            // v3.8: only clears the current form-factor's slots. So if
+            // you're on desktop, the mobile layout is preserved. The
+            // reload re-runs detection so the right slots are loaded.
+            await api('PUT', '/api/server/panel-order' + _formFactor.qs(),
+                      { order: [] });
+            await api('PUT', '/api/server/panels-minimized' + _formFactor.qs(),
+                      { minimized: {} });
             location.reload();
           } catch (e) {
             if (typeof toast === 'function') {
@@ -8707,6 +9146,69 @@ async function reorderApplyFromConfig() {
 })();
 
 // =============================================================================
+// =============================================================================
+// v3.8: per-form-factor saved layouts
+// =============================================================================
+// The dashboard layout (panel order + minimize state) is now keyed by
+// form factor. Two slots per setting in the DB:
+//   panel_order             ← desktop (legacy slot, backwards compat)
+//   panel_order_mobile      ← mobile
+//   panels_minimized        ← desktop
+//   panels_minimized_mobile ← mobile
+//
+// Detection: viewport width ≤ 768 → mobile. The boundary matches the
+// CSS media query convention. Operators can override via the live-icon
+// popup (see "form-factor toggle" below); the override is stored in
+// localStorage so it persists across reloads but not across browsers
+// (which is appropriate — per-browser preference, not server-wide).
+
+const _formFactor = {
+  // 'mobile' or 'desktop'. Lazily resolved on first read.
+  current: null,
+  // localStorage key for the manual override.
+  OVERRIDE_KEY: 'wgflow_form_factor_override',
+
+  detect() {
+    if (this.current) return this.current;
+    // Manual override wins over detection.
+    let override = null;
+    try { override = localStorage.getItem(this.OVERRIDE_KEY); } catch (_) {}
+    if (override === 'mobile' || override === 'desktop') {
+      this.current = override;
+      return override;
+    }
+    // Detect by viewport width. 768 is the standard tablet-portrait
+    // boundary. Tablets in landscape (≥ 768px wide) get desktop;
+    // phones and tablets in portrait get mobile.
+    this.current = (window.innerWidth <= 768) ? 'mobile' : 'desktop';
+    return this.current;
+  },
+
+  setOverride(value) {
+    try {
+      if (value) localStorage.setItem(this.OVERRIDE_KEY, value);
+      else localStorage.removeItem(this.OVERRIDE_KEY);
+    } catch (_) {}
+    this.current = null;  // force re-detect on next read
+  },
+
+  // Append ?form=mobile|desktop to API URLs that need it.
+  qs() {
+    return '?form=' + this.detect();
+  },
+};
+
+// Diagnostic logger for the persistence flow. Toggled with
+// localStorage.setItem('wgflow_layout_debug', '1'). When on, every
+// load and save of layout state hits the console with a tag so you
+// can tell whether a save is firing and what's coming back.
+function _layoutLog(tag, ...args) {
+  let on = false;
+  try { on = localStorage.getItem('wgflow_layout_debug') === '1'; } catch (_) {}
+  if (!on) return;
+  console.log(`[wgflow:layout:${tag}]`, ...args);
+}
+
 // v3.6 in-place patch: minimize panels + live-icon tooltip + polling config
 // =============================================================================
 
@@ -8737,12 +9239,15 @@ async function minimizeTogglePanel(panel, btn) {
   panel.classList.toggle('minimized', willBeMinimized);
   if (btn) btn.textContent = willBeMinimized ? '+' : '−';
   _minimizedState.panels[id] = willBeMinimized;
-  // Persist. Failure is non-fatal — local state is ahead of server,
-  // next reload reconciles.
+  _layoutLog('min-save', 'form=' + _formFactor.detect(),
+             'panel=' + id, 'min=' + willBeMinimized,
+             'all=', _minimizedState.panels);
   try {
-    await api('PUT', '/api/server/panels-minimized',
+    await api('PUT', '/api/server/panels-minimized' + _formFactor.qs(),
               { minimized: _minimizedState.panels });
+    _layoutLog('min-save', 'OK');
   } catch (e) {
+    _layoutLog('min-save', 'FAILED', e);
     if (typeof toast === 'function') {
       toast('minimize save failed: ' + (e.message || ''), 'error');
     }
@@ -8801,11 +9306,29 @@ function minimizeInjectButtons() {
 async function minimizeApplyFromConfig() {
   let cfg;
   try {
-    cfg = await api('GET', '/api/server/panels-minimized');
+    cfg = await api('GET', '/api/server/panels-minimized' + _formFactor.qs());
   } catch (e) {
-    return;  // pre-3.6 server — leave everything expanded
+    _layoutLog('min-load', 'failed', e);
+    return;
   }
+  _layoutLog('min-load', 'form=' + _formFactor.detect(), 'cfg=', cfg);
   _minimizedState.panels = cfg.minimized || {};
+
+  // v3.8: mobile-first-load default. If the operator is on mobile and
+  // has nothing saved yet, collapse the lower-priority panels so the
+  // initial scroll surface focuses on what matters most (live peers
+  // + logs). The choice persists as soon as the operator interacts
+  // with any panel (because that triggers a save).
+  const isFresh = (Object.keys(_minimizedState.panels).length === 0);
+  if (isFresh && _formFactor.detect() === 'mobile') {
+    _minimizedState.panels = {
+      'throughput': true,
+      'dns-recent': true,
+      'server-management': true,
+    };
+    _layoutLog('min-load', 'applied mobile defaults');
+  }
+
   for (const [id, isMin] of Object.entries(_minimizedState.panels)) {
     if (!isMin) continue;
     const panel = document.querySelector(
@@ -8895,6 +9418,20 @@ function liveIconShowPollingPopup(anchor) {
   // and don't deserve their own surface elsewhere. Clipboard timeout
   // 0 disables auto-clear (operator opts out, accepts the risk).
   const cbSec = (typeof _clipboardConfig !== 'undefined' && _clipboardConfig.timeoutSec) || 30;
+  // v3.8: form-factor selector. Three values:
+  //   'auto'    → detect from viewport width (≤768 = mobile)
+  //   'desktop' → force desktop layout regardless of viewport
+  //   'mobile'  → force mobile layout regardless of viewport
+  // Stored in localStorage (per-browser, per-device — appropriate
+  // because operators may have different preferences on different
+  // devices accessing the same wgflow instance).
+  let ffOverride = 'auto';
+  try {
+    const stored = localStorage.getItem(_formFactor.OVERRIDE_KEY);
+    if (stored === 'mobile' || stored === 'desktop') ffOverride = stored;
+  } catch (_) {}
+  const ffActive = _formFactor.detect();
+
   el.innerHTML = `
     <label>polling interval</label>
     <div class="row">
@@ -8912,9 +9449,20 @@ function liveIconShowPollingPopup(anchor) {
       <input type="range" id="clipboard-slider" min="0" max="120" step="10" value="${cbSec}">
       <span class="value" id="clipboard-value">${cbSec === 0 ? 'off' : cbSec + 's'}</span>
     </div>
-    <div class="hint">
+    <div class="hint" style="margin-bottom: 14px;">
       after viewing private keys / peer.conf, overwrite clipboard.<br>
       0 = disable auto-clear · best-effort (browsers may refuse).
+    </div>
+
+    <label>layout · ${ffActive}</label>
+    <div class="row" style="gap: 4px;">
+      <button class="ghost" data-ff="auto" style="${ffOverride === 'auto' ? 'border-color: var(--accent); color: var(--accent);' : ''} flex: 1; font-size: 11px; padding: 4px 8px;">auto</button>
+      <button class="ghost" data-ff="desktop" style="${ffOverride === 'desktop' ? 'border-color: var(--accent); color: var(--accent);' : ''} flex: 1; font-size: 11px; padding: 4px 8px;">desktop</button>
+      <button class="ghost" data-ff="mobile" style="${ffOverride === 'mobile' ? 'border-color: var(--accent); color: var(--accent);' : ''} flex: 1; font-size: 11px; padding: 4px 8px;">mobile</button>
+    </div>
+    <div class="hint">
+      'auto' uses viewport width (≤768px = mobile). override saved per-browser.<br>
+      changing reloads the page to apply.
     </div>
   `;
   document.body.appendChild(el);
@@ -8966,6 +9514,17 @@ function liveIconShowPollingPopup(anchor) {
       cbSlider.value = _clipboardConfig.timeoutSec;
       cbValueEl.textContent = (_clipboardConfig.timeoutSec === 0) ? 'off' : _clipboardConfig.timeoutSec + 's';
     }
+  });
+
+  // Form-factor toggle buttons (v3.8). Reload after saving so the
+  // chosen layout takes effect — easier than rebuilding everything
+  // in-place.
+  el.querySelectorAll('button[data-ff]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const choice = btn.dataset.ff;
+      _formFactor.setOverride(choice === 'auto' ? null : choice);
+      location.reload();
+    });
   });
 
   // Click outside the popup to dismiss. Defer the listener registration
@@ -9040,6 +9599,182 @@ async function liveIconLoadConfig() {
     setTimeout(wire, 0);
   }
 })();
+
+// =============================================================================
+// v3.8: mobile bootstrap — body classes, system-stats toggle, long-press
+// =============================================================================
+
+(function initMobile() {
+  const start = () => {
+    // Apply force-mobile / force-desktop body classes if there's an
+    // override. Detection-only mode (no override) lets the media query
+    // handle everything via viewport width.
+    let override = null;
+    try { override = localStorage.getItem(_formFactor.OVERRIDE_KEY); } catch (_) {}
+    if (override === 'mobile') document.body.classList.add('force-mobile');
+    if (override === 'desktop') document.body.classList.add('force-desktop');
+
+    // System-stats collapse toggle. The button is in the HTML but
+    // `display: none` until mobile rules show it. State persists in
+    // localStorage so it survives reloads on the same device.
+    const toggle = document.getElementById('mobile-system-toggle');
+    if (toggle) {
+      let open = false;
+      try { open = localStorage.getItem('wgflow_system_stats_open') === '1'; } catch (_) {}
+      if (open) {
+        document.body.classList.add('system-stats-open');
+        toggle.setAttribute('aria-expanded', 'true');
+      }
+      toggle.addEventListener('click', () => {
+        open = !open;
+        document.body.classList.toggle('system-stats-open', open);
+        toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+        try {
+          localStorage.setItem('wgflow_system_stats_open', open ? '1' : '0');
+        } catch (_) {}
+      });
+    }
+
+    // Long-press reorder for touch devices (v3.8). HTML5 drag-and-drop
+    // does not work reliably on iOS Safari; long-press on the panel
+    // header opens a small menu with move-up / move-down / minimize
+    // options. Fires on `touchstart` + 500ms hold; cancelled by
+    // `touchmove` (so scrolling doesn't trigger it).
+    if (_formFactor.detect() === 'mobile' || override === 'mobile') {
+      _wireLongPressReorder();
+    }
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start);
+  } else {
+    start();
+  }
+})();
+
+function _wireLongPressReorder() {
+  // Defer to ensure panels exist + drag handles are injected.
+  setTimeout(() => {
+    document.querySelectorAll('.panel-reorderable').forEach(panel => {
+      const head = panel.querySelector('.head');
+      if (!head || head._lpBound) return;
+      head._lpBound = true;
+      let timer = null;
+
+      const cancel = () => {
+        if (timer) { clearTimeout(timer); timer = null; }
+        panel.classList.remove('longpress-active');
+      };
+
+      head.addEventListener('touchstart', (ev) => {
+        // Skip if the touch lands on an interactive child (button,
+        // input). The minimize button + similar should keep working
+        // normally on tap.
+        if (ev.target.closest('button, input, select, a')) return;
+        panel.classList.add('longpress-active');
+        timer = setTimeout(() => {
+          cancel();
+          // Get touch coordinates for menu placement.
+          const t = ev.touches[0];
+          _showLongPressMenu(panel, t ? t.clientX : 0, t ? t.clientY : 0);
+        }, 500);
+      }, { passive: true });
+
+      head.addEventListener('touchmove', cancel, { passive: true });
+      head.addEventListener('touchend', cancel, { passive: true });
+      head.addEventListener('touchcancel', cancel, { passive: true });
+    });
+  }, 400);
+}
+
+function _showLongPressMenu(panel, x, y) {
+  // Tear down any existing menu so multiple long-presses don't stack.
+  document.querySelectorAll('.longpress-menu').forEach(m => m.remove());
+
+  const id = panel.dataset.panelId;
+  const isMin = panel.classList.contains('minimized');
+  const parent = panel.parentNode;
+  const siblings = Array.from(parent.querySelectorAll('.panel-reorderable'));
+  const idx = siblings.indexOf(panel);
+  const canMoveUp = idx > 0;
+  const canMoveDown = idx < siblings.length - 1;
+
+  const menu = document.createElement('div');
+  menu.className = 'longpress-menu';
+  menu.innerHTML = `
+    ${canMoveUp ? '<button data-act="up">↑ move up</button>' : ''}
+    ${canMoveDown ? '<button data-act="down">↓ move down</button>' : ''}
+    <button data-act="toggle-min">${isMin ? '+ expand' : '− minimize'}</button>
+    <button data-act="cancel">cancel</button>
+  `;
+  document.body.appendChild(menu);
+
+  // Position: prefer below-and-right of the touch, but flip if it
+  // would go off-screen.
+  const rect = menu.getBoundingClientRect();
+  let top = y + 8;
+  let left = x;
+  if (left + rect.width > window.innerWidth - 10) {
+    left = window.innerWidth - rect.width - 10;
+  }
+  if (top + rect.height > window.innerHeight - 10) {
+    top = y - rect.height - 8;
+  }
+  menu.style.top = `${Math.max(10, top)}px`;
+  menu.style.left = `${Math.max(10, left)}px`;
+
+  // Wire actions.
+  menu.querySelectorAll('button[data-act]').forEach(btn => {
+    btn.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      const act = btn.dataset.act;
+      menu.remove();
+      if (act === 'up' && canMoveUp) {
+        parent.insertBefore(panel, siblings[idx - 1]);
+        await _saveCurrentOrder();
+      } else if (act === 'down' && canMoveDown) {
+        parent.insertBefore(panel, siblings[idx + 1].nextSibling);
+        await _saveCurrentOrder();
+      } else if (act === 'toggle-min') {
+        const minBtn = panel.querySelector('.panel-min-btn');
+        if (typeof minimizeTogglePanel === 'function') {
+          minimizeTogglePanel(panel, minBtn);
+        }
+      }
+      // 'cancel' just dismisses.
+    }, { once: true });
+  });
+
+  // Tap outside to dismiss.
+  setTimeout(() => {
+    const onTap = (ev) => {
+      if (!menu.contains(ev.target)) {
+        menu.remove();
+        document.removeEventListener('touchstart', onTap, true);
+        document.removeEventListener('click', onTap, true);
+      }
+    };
+    document.addEventListener('touchstart', onTap, true);
+    document.addEventListener('click', onTap, true);
+  }, 0);
+}
+
+async function _saveCurrentOrder() {
+  const newOrder = Array.from(
+    document.querySelectorAll('.panel-reorderable')
+  ).map(p => p.dataset.panelId);
+  _layoutLog('order-save-mobile', 'form=' + _formFactor.detect(), 'order=', newOrder);
+  try {
+    await api('PUT', '/api/server/panel-order' + _formFactor.qs(),
+              { order: newOrder });
+    _layoutLog('order-save-mobile', 'OK');
+    if (typeof toast === 'function') toast('order saved');
+  } catch (e) {
+    _layoutLog('order-save-mobile', 'FAILED', e);
+    if (typeof toast === 'function') {
+      toast('reorder save failed: ' + (e.message || ''), 'error');
+    }
+  }
+}
 
 </script>
 

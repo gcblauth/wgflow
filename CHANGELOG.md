@@ -5,6 +5,82 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [3.8] — 2026-05-01
+
+### Added
+- **Mobile layout.** The dashboard now adapts to small screens
+  (viewport ≤ 768px). Layout changes:
+  - **Header** stacks vertically (brand on top, controls below).
+  - **Stat strip** collapses from 7 cards to a 2-column grid showing
+    only peers total + peers online by default. The other five
+    (rx/tx/cpu/memory/load) hide behind a `▾ system stats` toggle
+    (state persists per-device in localStorage).
+  - **Live peers** swap from a wide table to stacked cards. Each card
+    has the peer name + online indicator, address, handshake age,
+    rx/tx rate, ACL summary, and a row of action buttons (inspect,
+    enable/disable, actions, delete) sized for touch.
+  - **Panels** get tighter header padding and smaller fonts.
+  - **Logs** + throughput chart shrink in height to leave room for
+    cards and content.
+  - **Modals** become near-full-width.
+  - **Drag handles** are hidden — replaced by long-press reorder.
+- **Long-press reorder for touch devices.** On mobile, holding any
+  panel's header for 500ms opens a small menu with `↑ move up`,
+  `↓ move down`, and minimize toggle. Cancels on touchmove (so
+  scrolling the panel list doesn't trigger the menu). HTML5
+  drag-and-drop doesn't work on iOS Safari, so this is the dedicated
+  touch path.
+- **Per-form-factor saved layouts.** Panel order and minimize state
+  are now stored separately for desktop and mobile, so the same
+  wgflow instance can have a custom layout for each.
+  - **Backend:** new keys `panel_order_mobile` and
+    `panels_minimized_mobile`. Existing `panel_order` and
+    `panels_minimized` continue as the desktop slots (backwards
+    compat — pre-3.8 clients hitting unparametered endpoints still
+    read/write the legacy slots).
+  - **Endpoints:** `GET/PUT /api/server/panel-order` and
+    `GET/PUT /api/server/panels-minimized` accept an optional
+    `?form=mobile|desktop` query parameter. Default = desktop.
+  - **Frontend:** detects form factor at boot from `window.innerWidth`
+    (≤ 768 = mobile) and sends the matching `?form=` param on every
+    save and load.
+- **Form-factor toggle override.** The live-icon right-click popup
+  now has a 3-button selector: `auto / desktop / mobile`. Selection
+  persists in localStorage (per-browser, per-device). Reloads the
+  page to apply.
+- **Mobile-first-load defaults.** When a mobile session starts with
+  no saved minimize state, throughput / dns-recent / server-management
+  begin minimized so the visible scroll surface is live-peers + logs.
+  As soon as the operator interacts with any panel, their choices
+  persist as usual.
+- **Layout diagnostic logging.** Set
+  `localStorage.setItem('wgflow_layout_debug', '1')` in the browser
+  console to enable verbose console logging of every save and load
+  of panel order + minimize state. Logs include the active form
+  factor and the result. Use to diagnose persistence issues.
+
+### Database migrations
+- Two new `network_settings` keys seeded with safe empty defaults:
+  `panel_order_mobile`, `panels_minimized_mobile`.
+- No table-level changes.
+
+### Notes
+- **Backwards compatibility.** A v3.7 client running against a v3.8
+  server keeps working — the old endpoints (no form param) write to
+  the legacy desktop slot, which is what the v3.7 client expects.
+- **Force-mobile on a wide viewport produces a cramped layout.**
+  Stat grid becomes 2 cols on a 1920px screen with lots of empty
+  space, peers cards are narrower than they need to be. The toggle
+  is provided because you asked for one, but the natural use case
+  is forcing-desktop on a tablet, not the inverse.
+- **Long-press reorder is best-effort on touch.** iOS Safari's
+  touchstart/touchmove/scrollstart interaction is fiddly; if you
+  find the long-press fights with scroll on a particular device,
+  file it. The fallback is the existing minimize button (always
+  works).
+
+---
+
 ## [3.7] — 2026-04-30
 
 ### Added

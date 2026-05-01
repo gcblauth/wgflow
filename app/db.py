@@ -437,7 +437,16 @@ class DB:
                              ("panel_order", ""),
                              ("panels_minimized", ""),
                              ("polling_interval_ms", "3000"),
-                             ("clipboard_timeout_sec", "30")):
+                             ("clipboard_timeout_sec", "30"),
+                             # v3.8: per-form-factor saved layouts. The
+                             # existing panel_order/panels_minimized are
+                             # used as the desktop layout (unchanged for
+                             # backwards compat); these new keys hold the
+                             # mobile-specific layout. Frontend chooses
+                             # which to load/save based on viewport
+                             # width + an optional manual toggle.
+                             ("panel_order_mobile", ""),
+                             ("panels_minimized_mobile", "")):
             row = conn.execute(
                 "SELECT value FROM network_settings WHERE key = ?", (key,)
             ).fetchone()

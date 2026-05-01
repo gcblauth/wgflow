@@ -1818,57 +1818,74 @@ def set_tunnel_settings(body: TunnelSettings):
     return get_tunnel_settings()
 
 
+# Helper: which DB key to use for layout, based on form factor.
+# v3.8: separates desktop (default, backwards-compat) from mobile.
+def _panel_order_key(form: Optional[str]) -> str:
+    """Map a form-factor query param to the network_settings key.
+
+    'desktop' (default, or any unrecognised value) → 'panel_order'
+    'mobile'                                        → 'panel_order_mobile'
+
+    The default-to-desktop choice is deliberate: a v3.7 client that
+    doesn't pass the form param continues to work against v3.8, hitting
+    the same row it always did. New v3.8 clients explicitly pass
+    'desktop' or 'mobile' so each form factor reads/writes its own slot.
+    """
+    return "panel_order_mobile" if form == "mobile" else "panel_order"
+
+
+def _panels_minimized_key(form: Optional[str]) -> str:
+    return "panels_minimized_mobile" if form == "mobile" else "panels_minimized"
+
+
 @app.get("/api/server/panel-order")
-def get_panel_order():
+def get_panel_order(form: Optional[str] = None):
     """Read panel order. Empty list = default UI order.
 
     Returns: {"order": ["panel-id-1", "panel-id-2", ...]}
+
+    Optional `?form=mobile` selects the mobile layout. Default
+    (no param or `desktop`) returns the legacy `panel_order` key.
     """
+    key = _panel_order_key(form)
     conn = get_db().conn
     row = conn.execute(
-        "SELECT value FROM network_settings WHERE key = 'panel_order'"
+        "SELECT value FROM network_settings WHERE key = ?", (key,)
     ).fetchone()
     raw = row["value"] if row else ""
     if not raw:
-        return {"order": []}
+        return {"order": [], "form": form or "desktop"}
     try:
         parsed = json.loads(raw)
         if isinstance(parsed, list):
-            return {"order": [str(x) for x in parsed]}
+            return {"order": [str(x) for x in parsed], "form": form or "desktop"}
     except (json.JSONDecodeError, TypeError, ValueError):
         pass
-    return {"order": []}
+    return {"order": [], "form": form or "desktop"}
 
 
 @app.put("/api/server/panel-order")
-def set_panel_order(body: PanelOrder):
+def set_panel_order(body: PanelOrder, form: Optional[str] = None):
     """Persist panel order (drag-to-reorder result).
 
-    The body's `order` is a list of panel-id strings (matching the
-    `data-panel-id` attribute on each reorderable panel in the DOM).
-    Unknown ids are stored as-is; the UI ignores them on render. This
-    keeps the schema forward-compatible with future panel additions —
-    an old client that doesn't know about a new panel-id won't break
-    when it sees one.
-
-    Empty list = reset to default. Stored as JSON in network_settings.
+    Optional `?form=mobile` writes to the mobile-specific slot.
+    Default (no param or `desktop`) writes to the legacy slot.
     """
-    # Light validation: accept up to 32 ids, each ≤ 64 chars. Defensive
-    # against an attacker-controlled payload bloating the DB row.
     if len(body.order) > 32:
         raise HTTPException(422, "too many panel ids (max 32)")
     for pid in body.order:
         if not isinstance(pid, str) or len(pid) > 64:
             raise HTTPException(422, "panel ids must be strings ≤ 64 chars")
 
+    key = _panel_order_key(form)
     serialized = json.dumps(body.order)
     with get_db().write() as conn:
         conn.execute(
-            """INSERT INTO network_settings (key, value) VALUES ('panel_order', ?)
+            """INSERT INTO network_settings (key, value) VALUES (?, ?)
                ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
-            (serialized,),
+            (key, serialized),
         )
-    return get_panel_order()
+    return get_panel_order(form=form)
 
 
 # ---------------------------------------------------------------------------
@@ -1880,45 +1897,34 @@ def set_panel_order(body: PanelOrder):
 # render time so old clients don't break when seeing new panel-ids.
 
 @app.get("/api/server/panels-minimized")
-def get_panels_minimized():
-    """Read minimized state.
-
-    Returns: {"minimized": {"panel-id": true, ...}}
-    """
+def get_panels_minimized(form: Optional[str] = None):
+    """Read minimized state. Optional `?form=mobile` for mobile slot."""
+    key = _panels_minimized_key(form)
     conn = get_db().conn
     row = conn.execute(
-        "SELECT value FROM network_settings WHERE key = 'panels_minimized'"
+        "SELECT value FROM network_settings WHERE key = ?", (key,)
     ).fetchone()
     raw = row["value"] if row else ""
     if not raw:
-        return {"minimized": {}}
+        return {"minimized": {}, "form": form or "desktop"}
     try:
         parsed = json.loads(raw)
         if isinstance(parsed, dict):
-            # Filter to bool values only — defensive against malformed
-            # payloads (e.g. someone hand-edits the DB and writes strings).
-            return {"minimized": {
-                str(k): bool(v) for k, v in parsed.items()
-                if isinstance(k, str)
-            }}
+            return {
+                "minimized": {
+                    str(k): bool(v) for k, v in parsed.items()
+                    if isinstance(k, str)
+                },
+                "form": form or "desktop",
+            }
     except (json.JSONDecodeError, TypeError, ValueError):
         pass
-    return {"minimized": {}}
+    return {"minimized": {}, "form": form or "desktop"}
 
 
 @app.put("/api/server/panels-minimized")
-def set_panels_minimized(body: dict):
-    """Persist minimized state.
-
-    Accepts {"minimized": {...}}. We deliberately use a plain dict for
-    the body (not a Pydantic model) because the keys are arbitrary
-    panel-ids that aren't fixed at API design time — Pydantic would
-    require a model with explicit fields.
-
-    Light validation: max 32 entries, keys ≤ 64 chars (matches the
-    panel_order limit so an attacker can't bloat the DB row via either
-    endpoint).
-    """
+def set_panels_minimized(body: dict, form: Optional[str] = None):
+    """Persist minimized state. Optional `?form=mobile` for mobile slot."""
     minimized = body.get("minimized")
     if not isinstance(minimized, dict):
         raise HTTPException(422, "body must be {'minimized': {panel-id: bool}}")
@@ -1930,14 +1936,15 @@ def set_panels_minimized(body: dict):
             raise HTTPException(422, "panel ids must be strings ≤ 64 chars")
         cleaned[k] = bool(v)
 
+    key = _panels_minimized_key(form)
     serialized = json.dumps(cleaned) if cleaned else ""
     with get_db().write() as conn:
         conn.execute(
-            """INSERT INTO network_settings (key, value) VALUES ('panels_minimized', ?)
+            """INSERT INTO network_settings (key, value) VALUES (?, ?)
                ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
-            (serialized,),
+            (key, serialized),
         )
-    return get_panels_minimized()
+    return get_panels_minimized(form=form)
 
 
 # ---------------------------------------------------------------------------
