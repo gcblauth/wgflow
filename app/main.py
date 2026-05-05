@@ -3837,30 +3837,51 @@ def multisite_create_from_registration(body: MultisiteCreateLinkRequest):
         ).fetchone():
             raise HTTPException(409, f"link '{name}' already exists")
 
-        # Allocate our overlay. Default .1 if free, else next free.
-        # Must not collide with the importer's overlay (which is
-        # already pinned by the registration).
-        used = {importer_overlay}
-        existing = conn.execute(
-            "SELECT local_overlay_addr, remote_overlay_addr "
-            "FROM federation_links"
-        ).fetchall()
-        for r in existing:
-            for col in ("local_overlay_addr", "remote_overlay_addr"):
-                v = (r[col] or "").split("/", 1)[0].strip()
-                if v:
-                    used.add(v)
-        local_overlay = None
-        if multisite_mod.DEFAULT_CREATOR_OVERLAY_ADDR not in used:
-            local_overlay = multisite_mod.DEFAULT_CREATOR_OVERLAY_ADDR
-        else:
-            for octet in range(1, 255):
-                cand = f"10.99.0.{octet}"
-                if cand not in used:
-                    local_overlay = cand
-                    break
-        if not local_overlay:
-            raise HTTPException(500, "overlay address pool exhausted")
+        # Multi-wgflow safety: the registration's importer_overlay
+        # must not collide with an address already used on this side
+        # for a DIFFERENT remote. If it does, the operator on the
+        # OTHER side accidentally chose an address we already have
+        # routed to a different paired wgflow — accepting this would
+        # produce two routes to the same overlay /32 via different
+        # tunnels.
+        existing_collision = conn.execute(
+            "SELECT id, name FROM federation_links "
+            "WHERE remote_overlay_addr LIKE ?",
+            (f"{importer_overlay}/%",),
+        ).fetchone()
+        if existing_collision:
+            raise HTTPException(409,
+                f"the registration claims overlay address "
+                f"{importer_overlay}, but that's already used by link "
+                f"'{existing_collision['name']}' on this wgflow. ask "
+                f"the operator on the OTHER side to re-run + import "
+                f"with a different overlay address.")
+
+        # Allocate our local overlay using the stable-identity rule:
+        # if any prior link exists on this wgflow, reuse its
+        # local_overlay_addr (our identity must be stable across
+        # links). For the very first link, prefer .1 (creator
+        # convention).
+        try:
+            local_overlay = multisite_mod.allocate_overlay_addr(
+                conn,
+                prefer=multisite_mod.DEFAULT_CREATOR_OVERLAY_ADDR,
+            )
+        except multisite_mod.MultisiteError as e:
+            raise HTTPException(500, str(e))
+        # Defense: the importer's overlay (carried in the registration)
+        # must not collide with ours. If it does, the operator picked
+        # the same address we already use for ourselves, which is
+        # impossible to honor.
+        if importer_overlay == local_overlay:
+            raise HTTPException(
+                409,
+                f"overlay address collision: this wgflow uses "
+                f"{local_overlay} as its own identity, but the "
+                f"registration claims that address for the remote. "
+                f"the operator on the OTHER side should re-run "
+                f"+ import with a different address.",
+            )
 
         # AllowedIPs for the wgB-as-peer entry on our side: wgB's
         # overlay /32 + each network wgB advertised.
@@ -3992,6 +4013,37 @@ def multisite_import_complete(link_id: int, body: MultisiteImportCompleteRequest
             raise HTTPException(400,
                 f"bundle is for overlay {parsed.importer_overlay_addr}, "
                 f"this link expects {our_overlay}. wrong bundle pasted?")
+
+        # Multi-wgflow safety: refuse the bundle if the creator's
+        # overlay address collides with an address we already have
+        # in use for a DIFFERENT remote. This catches the case where
+        # wgB is paired with wgA (remote=10.99.0.1) and now tries to
+        # pair with wgC who independently picked the creator-default
+        # 10.99.0.1 — we'd otherwise end up with two routes to .1
+        # via different tunnels and the kernel would silently pick
+        # one, leaving the other peer unreachable.
+        creator_overlay = parsed.creator_overlay_addr
+        existing_collision = conn.execute(
+            "SELECT id, name, remote_overlay_addr FROM federation_links "
+            "WHERE id != ? AND remote_overlay_addr LIKE ?",
+            (link_id, f"{creator_overlay}/%"),
+        ).fetchone()
+        if existing_collision:
+            raise HTTPException(409,
+                f"overlay address {creator_overlay} is already used by "
+                f"link '{existing_collision['name']}' on this wgflow. "
+                f"the operator on the OTHER side ({parsed.creator_instance_name or 'unknown'}) "
+                f"should re-run + create from registration with a "
+                f"different local overlay address. recommended: pick "
+                f"a value not in use by any of YOUR other links.")
+        # Same check vs our own local — defensive, the registration-
+        # vs-creator dialog should have prevented this, but a hand-
+        # edited bundle could slip past.
+        if creator_overlay == our_overlay:
+            raise HTTPException(409,
+                f"the bundle's creator overlay {creator_overlay} matches "
+                f"this wgflow's own overlay address. someone needs to "
+                f"pick a different address.")
 
         # AllowedIPs for wgA-as-peer: wgA's overlay /32 + each
         # network wgA advertised.

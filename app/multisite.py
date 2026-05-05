@@ -100,31 +100,99 @@ def generate_psk() -> str:
 # Address allocation
 # ---------------------------------------------------------------------------
 
-def allocate_overlay_addr(conn, prefer: Optional[str] = None) -> str:
-    """Pick an overlay address not already used by any federation_links row.
+def _existing_local_overlay(conn) -> Optional[str]:
+    """Return this wgflow's existing overlay address, if any link already
+    has one. With multiple links, all rows MUST share the same
+    local_overlay_addr — that's our identity on the overlay subnet.
+    Returns the first non-empty local_overlay_addr found, or None if
+    no prior link exists.
+    """
+    rows = conn.execute(
+        "SELECT local_overlay_addr FROM federation_links"
+    ).fetchall()
+    for r in rows:
+        v = (r["local_overlay_addr"] or "").split("/", 1)[0].strip()
+        if v:
+            return v
+    return None
 
-    Args:
-        conn: sqlite connection
-        prefer: address to return if free (importer typically prefers .2,
-            creator typically prefers .1). Falls back to next-free if
-            taken.
 
-    Returns the bare address ("10.99.0.5"), no /32. Caller adds mask.
+def _used_remote_overlays(conn, exclude_local: Optional[str] = None) -> set:
+    """Return the set of overlay addresses currently used as
+    remote_overlay_addr across all federation_links rows on this
+    wgflow. Optionally also includes a specific local address to
+    exclude (typically our own local_overlay_addr).
     """
     used: set = set()
     rows = conn.execute(
-        "SELECT local_overlay_addr, remote_overlay_addr FROM federation_links"
+        "SELECT remote_overlay_addr FROM federation_links"
     ).fetchall()
     for r in rows:
-        for col in ("local_overlay_addr", "remote_overlay_addr"):
-            v = (r[col] or "").split("/", 1)[0].strip()
-            if v:
-                used.add(v)
+        v = (r["remote_overlay_addr"] or "").split("/", 1)[0].strip()
+        if v:
+            used.add(v)
+    if exclude_local:
+        used.add(exclude_local)
+    return used
 
+
+def allocate_overlay_addr(conn, prefer: Optional[str] = None) -> str:
+    """Pick a LOCAL overlay address for THIS wgflow.
+
+    Stable-identity rule: once this wgflow has established a
+    local_overlay_addr in any prior link, every subsequent link
+    must reuse the same value. Our overlay address is our identity
+    on the 10.99.0.0/24 subnet — it has to be the same regardless
+    of who we're paired with, otherwise our paired remotes will
+    each have a different idea of who we are and routing will
+    fight.
+
+    Returns the bare address ("10.99.0.5"), no /32. Caller adds mask.
+
+    Args:
+        conn: sqlite connection
+        prefer: address to use if no prior link exists (importer
+            typically prefers .2, creator typically prefers .1).
+            Ignored if a prior link's local_overlay_addr already
+            pins our identity.
+    """
+    existing = _existing_local_overlay(conn)
+    if existing:
+        # Stable identity wins. Reuse our prior local address.
+        return existing
+
+    # No prior link — this is the first multisite link. Pick a value.
+    # Avoid any address we've already proposed as a remote to prior
+    # registrations (defense-in-depth, though those should be empty
+    # if no prior link exists).
+    used = _used_remote_overlays(conn)
     if prefer and prefer not in used:
         return prefer
     for last_octet in range(1, 255):
         candidate = f"10.99.0.{last_octet}"
+        if candidate not in used:
+            return candidate
+    raise MultisiteError("overlay address pool exhausted (10.99.0.1-254 in use)")
+
+
+def allocate_remote_overlay_addr(conn, our_local: str,
+                                 prefer: Optional[str] = None) -> str:
+    """Pick an overlay address for the OTHER wgflow we're pairing with.
+
+    Must be different from our own local_overlay_addr and from any
+    address we've already proposed for or received from another
+    paired remote. Caller passes our_local explicitly because at
+    creator-time we have it in hand from the registration parse.
+
+    Returns the bare address. Caller adds /32.
+    """
+    used = _used_remote_overlays(conn, exclude_local=our_local)
+    if prefer and prefer != our_local and prefer not in used:
+        return prefer
+    for last_octet in range(1, 255):
+        candidate = f"10.99.0.{last_octet}"
+        if candidate == our_local:
+            continue
         if candidate not in used:
             return candidate
     raise MultisiteError("overlay address pool exhausted (10.99.0.1-254 in use)")

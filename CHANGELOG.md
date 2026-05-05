@@ -5,6 +5,67 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.2.2] — 2026-05-05
+
+Multi-wgflow safety: the overlay-address allocator and pairing
+endpoints now defend against the address-collision modes that
+appear when a wgflow has more than one paired remote.
+
+### Changed
+
+- **Stable local identity**. The first multisite link a wgflow
+  creates picks an overlay address (e.g. `10.99.0.2` for the
+  first import). Every subsequent link reuses the same address
+  for `local_overlay_addr` rather than auto-allocating a new one
+  each time. Required because our overlay address is our identity
+  on the subnet — it has to be stable across all our paired
+  remotes, otherwise routing would conflict.
+
+- **Allocator split** into `allocate_overlay_addr` (our local,
+  stable-identity rule) and `allocate_remote_overlay_addr` (the
+  other side's, next-free excluding our local + all our existing
+  remote addresses). Creator endpoint no longer duplicates the
+  inline allocation logic.
+
+### Added
+
+- **Collision detection at step 2 (creator)**. If the parsed
+  registration claims an overlay address already used as a
+  `remote_overlay_addr` for a different link on this wgflow,
+  the endpoint refuses with HTTP 409 and a message naming the
+  conflicting link. Operator on the OTHER side must re-run
+  + import with a different address.
+
+- **Collision detection at step 3 (importer / import-complete)**.
+  If the bundle's `creator_overlay_addr` collides with an existing
+  remote on this side, the endpoint refuses with HTTP 409 and
+  names the conflict. Catches the case where two wgflows
+  independently picked the same default `.1` for their first
+  pairing as creator and later try to mesh.
+
+- Defensive check that the bundle's creator overlay isn't equal
+  to our own local — same kind of mistake, surfaced sooner.
+
+### Caveats
+
+- Allocation collisions are still detected at *pairing time*, not
+  prevented earlier. There is no central registry of overlay
+  addresses across wgflows, so if you accept the registration on
+  the wrong side or the operators paste registrations between
+  wgflows that already have conflicting state, you find out at
+  the next pairing step.
+
+- The fix makes 3+ wgflow meshes practical but does NOT make
+  routing transitive. wgB and wgC must be paired directly to
+  reach each other — a packet from wgB with destination
+  `10.99.0.3` (wgC) will not transit through wgA, because wgA's
+  iptables FORWARD chain has rules for `<remote_overlay> →
+  <local_advertised>`, not `<remote_overlay> → <other_remote_overlay>`.
+  This is a feature (overlay traffic stays bilateral) more than a
+  bug, but worth noting.
+
+---
+
 ## [4.2.1] — 2026-05-05
 
 UI polish on the multisite panel + diag tools. No protocol changes,
