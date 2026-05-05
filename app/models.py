@@ -191,16 +191,27 @@ class MultisiteRegistrationRequest(BaseModel):
 
     Operator on wgB clicks '+ import' → 'start'. Picks a label for
     the link, optionally overrides the endpoint (defaults to
-    WG_ENDPOINT), optionally lists CIDRs wgB will advertise to wgA.
+    WG_ENDPOINT), optionally lists CIDRs wgB will advertise to wgA,
+    optionally overrides the overlay address.
 
     Server generates a fresh keypair locally, allocates an overlay
-    address (.2 by default), persists a pending-bundle row with the
+    address (.2 by default, or whatever the operator passed in
+    `overlay_addr`), persists a pending-bundle row with the
     privkey stashed, returns a registration text block. Operator
     copies into wgA's '+ create from registration' form.
+
+    `overlay_addr` exists for the multi-wgflow case: when wgC has
+    no prior links, the default-allocator picks .2 — but if wgC
+    is going to pair with wgA which already uses .2 for wgB, the
+    creator-side accept will refuse with a 409 collision. The
+    operator on wgC can override here (e.g. pick .3) before
+    generating the registration. The address must be in
+    10.99.0.0/24 and not equal to .0 or .255.
     """
     name: str = Field(..., min_length=1, max_length=64)
     endpoint: str = Field(default="", max_length=200)
     advertised_networks: List[str] = Field(default_factory=list)
+    overlay_addr: str = Field(default="", max_length=20)
 
 
 class MultisiteCreateLinkRequest(BaseModel):

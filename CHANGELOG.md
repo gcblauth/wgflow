@@ -5,6 +5,44 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.2.5] — 2026-05-05
+
+### Added
+
+- **Optional overlay address override** in the multisite `+ import`
+  modal. When wgC is added to an existing wgA↔wgB pair, the
+  importer-side default `.2` collides with wgB on wgA's side and
+  the creator-accept refuses with HTTP 409. The new `overlay
+  address (advanced)` field lets the operator pick `.3` (or any
+  other free address in `10.99.0.0/24`) before generating the
+  registration. Backend honors it via the new `overlay_addr`
+  field on `MultisiteRegistrationRequest`.
+
+  Validation on the backend:
+    * Must parse as an IPv4 address inside `10.99.0.0/24`.
+    * Cannot be `.0` or `.255` (network/broadcast).
+    * If this wgflow already has a stable identity from a prior
+      link, the override must match that identity. Otherwise a
+      409 explains the conflict and tells the operator to either
+      pass the existing address (or omit the field) or delete
+      prior links first.
+    * Cannot collide with any address already used as a remote
+      on this wgflow.
+
+### Workflow for adding a third wgflow
+
+1. On wgC, click `+ import`. Type a name. Type `10.99.0.3` (or
+   any free address) in the new "overlay address (advanced)"
+   field. Generate registration.
+2. On wgA, click `+ create from registration`. Paste. wgA accepts
+   because `.3` does not collide with wgB's `.2`.
+3. On wgC, complete the pairing with the bundle wgA returned.
+4. Repeat for wgB↔wgC if you want full mesh (remember routing
+   isn't transitive — wgB and wgC don't reach each other through
+   wgA without their own pairing).
+
+---
+
 ## [4.2.4] — 2026-05-05
 
 ### Fixed

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import os
 import re
@@ -3814,6 +3815,32 @@ def multisite_registration(body: MultisiteRegistrationRequest):
             400, "endpoint must be host:port (e.g. vpn.example.com:51820)"
         )
 
+    # Optional overlay address override. Used when the auto-default
+    # would collide with an address already in use on the OTHER
+    # wgflow (e.g. wgC's first pairing defaults to .2, but wgA
+    # already uses .2 for a different link → wgA refuses with 409).
+    # Operator picks .3 (or whatever) here to dodge the collision.
+    override_overlay = (body.overlay_addr or "").strip()
+    if override_overlay:
+        try:
+            ip_obj = ipaddress.IPv4Address(override_overlay)
+        except (ValueError, ipaddress.AddressValueError):
+            raise HTTPException(
+                400,
+                f"overlay_addr {override_overlay!r} is not a valid IPv4 address",
+            )
+        if ip_obj not in multisite_mod.OVERLAY_SUBNET:
+            raise HTTPException(
+                400,
+                f"overlay_addr must be inside {multisite_mod.OVERLAY_SUBNET} "
+                f"(got {override_overlay})",
+            )
+        last_octet = int(override_overlay.rsplit(".", 1)[-1])
+        if last_octet in (0, 255):
+            raise HTTPException(
+                400, f"overlay_addr {override_overlay} is reserved (network/broadcast)"
+            )
+
     privkey, pubkey = (None, _live_wg0_pubkey())
 
     with get_db().write() as conn:
@@ -3822,12 +3849,44 @@ def multisite_registration(body: MultisiteRegistrationRequest):
         ).fetchone():
             raise HTTPException(409, f"link '{name}' already exists")
 
-        # Allocate our overlay (.2 by default for importer side).
-        # remote_overlay is unknown until the bundle arrives — leave
-        # placeholder.
-        local_overlay = multisite_mod.allocate_overlay_addr(
-            conn, prefer=multisite_mod.DEFAULT_IMPORTER_OVERLAY_ADDR,
-        )
+        # Resolve the local overlay. Three cases:
+        #   1. Operator passed override_overlay AND we already have a
+        #      stable local identity from a prior link. The override
+        #      must match — otherwise we'd be claiming two identities.
+        #   2. Operator passed override_overlay AND no prior link
+        #      exists. Adopt the override as our stable identity.
+        #   3. No override. Use the standard allocator (which reuses
+        #      stable identity if any prior link exists, else picks
+        #      DEFAULT_IMPORTER_OVERLAY_ADDR if free, else next free).
+        existing_local = multisite_mod._existing_local_overlay(conn)
+        if override_overlay:
+            if existing_local and existing_local != override_overlay:
+                raise HTTPException(
+                    409,
+                    f"this wgflow's overlay identity is already pinned to "
+                    f"{existing_local} from a prior link. all links on this "
+                    f"wgflow must share the same local_overlay_addr — pass "
+                    f"overlay_addr={existing_local} (or omit the field) "
+                    f"or delete all prior multisite links first.",
+                )
+            # Also defend: the override must not collide with any
+            # remote we've already paired with.
+            collisions = conn.execute(
+                "SELECT name FROM federation_links WHERE remote_overlay_addr LIKE ?",
+                (f"{override_overlay}/%",),
+            ).fetchone()
+            if collisions:
+                raise HTTPException(
+                    409,
+                    f"overlay_addr {override_overlay} is already used as the "
+                    f"REMOTE address of link '{collisions['name']}' on this "
+                    f"wgflow. pick a different address.",
+                )
+            local_overlay = override_overlay
+        else:
+            local_overlay = multisite_mod.allocate_overlay_addr(
+                conn, prefer=multisite_mod.DEFAULT_IMPORTER_OVERLAY_ADDR,
+            )
 
         conn.execute(
             """INSERT INTO federation_links (

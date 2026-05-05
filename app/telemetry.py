@@ -46,7 +46,7 @@ from .db import DB
 
 # wgflow version included in every payload so the collector can break stats
 # down by release. Update on each tagged release.
-WGFLOW_VERSION = "4.2.4"
+WGFLOW_VERSION = "4.2.5"
 
 # Where telemetry goes. Hardcoded — operators who want to redirect or block
 # this run a local DNS override, or set WGFLOW_TELEMETRY_ENABLED=0.
