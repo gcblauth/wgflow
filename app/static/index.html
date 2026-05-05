@@ -3002,7 +3002,7 @@
         <span class="instance-chrome" id="instance-chrome">
           <span class="instance-sep">⟫</span><span class="instance-name" id="instance-name"></span><span class="instance-edit-btn" id="instance-edit-btn" title="edit instance name and color">⚙</span>
         </span>
-        <span class="sub">wireguard control panel · v4.2.0 · <span id="brand-author" class="brand-author" title="about wgflow">gcblauth</span> <span id="matrix-replay" class="matrix-replay-btn" title="replay matrix intro">◆</span></span>
+        <span class="sub">wireguard control panel · v4.2.1 · <span id="brand-author" class="brand-author" title="about wgflow">gcblauth</span> <span id="matrix-replay" class="matrix-replay-btn" title="replay matrix intro">◆</span></span>
       </div>
     </div>
     <div class="header-right">
@@ -3886,8 +3886,7 @@
           <button class="ghost netdiag-tool-btn" data-tool="dig" title="DNS query, record type from selector">dig</button>
           <button class="ghost netdiag-tool-btn" data-tool="curl" title="HTTP(S) request with timing breakdown">curl timing</button>
           <button class="ghost netdiag-tool-btn" data-tool="tcp" title="TCP connect to host:port — checks if a port is reachable">tcp port</button>
-          <button class="ghost netdiag-tool-btn" data-tool="iperf3" title="iperf3 client (5s test); requires `iperf3 -s` running on target. host or host:port (default 5201)">iperf3</button>
-          <button class="ghost netdiag-tool-btn" data-tool="iperf3-server" title="run a one-shot iperf3 server on this wgflow. accepts one client test, prints summary, exits.">iperf3 server</button>
+          <button class="ghost netdiag-tool-btn" data-tool="iperf3" title="iperf3 throughput test — opens a modal to run as client or one-shot server">iperf3</button>
           <button class="ghost netdiag-tool-btn" data-tool="tcpdump" title="capture packets on a wgflow interface for ~10s. opens a helper modal with examples for your current setup.">tcpdump</button>
         </div>
         <div style="display: flex; justify-content: flex-end; margin-top: 8px; margin-bottom: -4px;">
@@ -3906,7 +3905,7 @@
     <div class="about-brand">
       <span class="bracket">[</span>wgflow<span class="bracket">]</span>
     </div>
-    <div class="about-version">v4.2.0</div>
+    <div class="about-version">v4.2.1</div>
     <div class="about-line">wireguard control panel</div>
     <a class="about-link" href="https://github.com/gcblauth/wgflow" target="_blank" rel="noopener">
       github.com/gcblauth/wgflow
@@ -8359,53 +8358,205 @@ $('#netdiag-clear-history').onclick = async () => {
     toast('clear failed: ' + e.message, 'error');
   }
 };
-function openIperf3ServerHelper() {
-  // iperf3 server mode is conceptually different from every other
-  // diag tool — it doesn't probe outward, it waits for a client to
-  // connect. The modal makes that obvious + tells the operator
-  // exactly what to run on the client side.
+// ---------------------------------------------------------------------------
+// iperf3 unified modal — client / server tabs
+// ---------------------------------------------------------------------------
+//
+// iperf3 is the only diag tool whose client and server halves are
+// genuinely paired — neither half is useful alone. So instead of
+// two separate buttons that pretend they're independent, we present
+// a single modal with two tabs that explain the partner step
+// explicitly:
+//
+//   Run as CLIENT — connects to an iperf3 server and measures
+//                   throughput. Operator must have the SERVER half
+//                   running on the other side first.
+//
+//   Run as SERVER — listens for ONE client connection, runs the
+//                   test, prints results, exits. The modal shows
+//                   the exact `iperf3 -c …` command for the other
+//                   side to invoke.
+//
+// Both modes pre-fill helpful defaults derived from current state
+// (multisite peer overlay addresses, the operator's last-typed
+// target). The CLIENT tab includes a list of clickable suggested
+// targets (multisite peers, primary client subnet gateway) so the
+// operator doesn't have to type or copy/paste in common cases.
+
+async function openIperf3Modal() {
+  // Gather context: multisite peers (their overlay addresses are
+  // useful targets for cross-site throughput tests).
+  let multisite = [];
+  try {
+    multisite = await api('GET', '/api/multisite/links').catch(() => []);
+  } catch (_) { multisite = []; }
+
   const modal = $('#modal');
   const title = $('#modal-title');
   const body  = $('#modal-body');
   if (!modal || !body) return;
 
-  // Try to surface an obvious "what host should the client connect
-  // to" hint. Best signal we have client-side is the operator's
-  // browser URL — but that may be a tunnel-internal address. Provide
-  // the placeholder; the operator knows their own infrastructure.
-  title.textContent = 'iperf3 server (one-shot)';
+  title.textContent = 'iperf3 — throughput test';
   body.innerHTML = `
     <div style="display:flex; flex-direction: column; gap: 14px;">
-      <p class="mono-dim" style="font-size: 12px;">
-        starts an iperf3 server on this wgflow that accepts ONE client test
-        and exits. timeout 60s if no client connects.
-      </p>
-      <p class="mono-dim" style="font-size: 11px; padding: 8px; background: var(--bg-3); border-left: 2px solid var(--accent);">
-        on the OTHER side, after clicking start below, run:<br>
-        <span class="mono">iperf3 -c &lt;this-wgflow-ip&gt; -p &lt;port&gt; -t 5</span>
-      </p>
-      <label style="display:flex; flex-direction: column; gap: 4px;">
-        <span class="mono-dim" style="font-size: 11px;">listen port (default 5201)</span>
-        <input id="iperf3-server-port" class="mono" placeholder="5201" value="5201">
-      </label>
-      <p class="mono-dim" style="font-size: 10px;">
-        the panel will block until the test completes or the 60s timeout
-        is reached. don't close the diagnostics panel until you see the
-        result.
-      </p>
-      <div style="display:flex; gap: 8px; justify-content: flex-end;">
-        <button class="ghost" id="iperf3-server-cancel">cancel</button>
-        <button class="primary" id="iperf3-server-start">start server</button>
+      <div style="display: flex; gap: 4px; border-bottom: 1px solid var(--border);">
+        <button class="ghost iperf-tab" data-tab="client"
+                style="border-bottom: 2px solid var(--accent); border-radius: 0; padding: 8px 16px;">
+          Run as client
+        </button>
+        <button class="ghost iperf-tab" data-tab="server"
+                style="border-bottom: 2px solid transparent; border-radius: 0; padding: 8px 16px;">
+          Run as server (one-shot)
+        </button>
+      </div>
+
+      <!-- ===== CLIENT PANE ===== -->
+      <div id="iperf-pane-client">
+        <p class="mono-dim" style="font-size: 12px;">
+          measures throughput from THIS wgflow to a target running iperf3 in
+          server mode. you must start the server on the OTHER side first
+          (either via the "Run as server" tab on that side's panel, or by
+          running <span class="mono">iperf3 -s -1 -p 5201</span> on the
+          target host).
+        </p>
+
+        ${multisite.length ? `
+          <div style="margin-top: 10px;">
+            <div class="mono-dim" style="font-size: 11px; margin-bottom: 6px;">
+              suggested targets (multisite peers — click to fill):
+            </div>
+            <div style="display: flex; flex-direction: column; gap: 4px;">
+              ${multisite.map(m => {
+                if (m.status !== 'established' || !m.remote_overlay_addr) return '';
+                const overlay = (m.remote_overlay_addr || '').split('/')[0];
+                const inst = m.remote_instance_name || m.name;
+                return `<button class="ghost iperf-suggest-target" data-target="${fedEscapeHtml(overlay)}"
+                        style="text-align: left; padding: 6px 10px;">
+                          <span class="mono">${fedEscapeHtml(overlay)}</span>
+                          <span class="mono-dim" style="font-size: 10px; margin-left: 8px;">→ ${fedEscapeHtml(inst)}</span>
+                        </button>`;
+              }).join('')}
+            </div>
+          </div>
+        ` : ''}
+
+        <label style="display:flex; flex-direction: column; gap: 4px; margin-top: 12px;">
+          <span class="mono-dim" style="font-size: 11px;">target (host or host:port — default port 5201)</span>
+          <input id="iperf-client-target" class="mono" placeholder="10.99.0.1 or 10.99.0.1:5201">
+        </label>
+
+        <label style="display:flex; flex-direction: column; gap: 4px; margin-top: 8px;">
+          <span class="mono-dim" style="font-size: 11px;">test duration (seconds, 1-30)</span>
+          <input id="iperf-client-duration" class="mono" type="number" min="1" max="30" value="5"
+                 style="max-width: 120px;">
+        </label>
+
+        <p class="mono-dim" style="font-size: 10px; margin-top: 10px;">
+          this wgflow makes one TCP connection to the target, sends data for
+          the duration above, then reports bandwidth. the panel will block
+          until the test completes (~duration + a few seconds).
+        </p>
+      </div>
+
+      <!-- ===== SERVER PANE ===== -->
+      <div id="iperf-pane-server" style="display: none;">
+        <p class="mono-dim" style="font-size: 12px;">
+          listens on THIS wgflow for ONE incoming iperf3 client test, then
+          exits with the result. timeout 60 seconds if no client connects.
+        </p>
+
+        <label style="display:flex; flex-direction: column; gap: 4px; margin-top: 10px;">
+          <span class="mono-dim" style="font-size: 11px;">listen port</span>
+          <input id="iperf-server-port" class="mono" type="number" min="1" max="65535" value="5201"
+                 style="max-width: 140px;">
+        </label>
+
+        <div class="mono-dim" style="font-size: 11px; padding: 10px; background: var(--bg-3); border-left: 2px solid var(--accent); margin-top: 12px;">
+          <div style="margin-bottom: 4px;">on the OTHER side, after starting the server below, run:</div>
+          <div class="mono" id="iperf-server-cmd-hint" style="font-size: 11px; color: var(--accent);">
+            iperf3 -c &lt;this-wgflow-overlay&gt; -p 5201 -t 5
+          </div>
+          ${multisite.length ? `
+            <div class="mono-dim" style="font-size: 10px; margin-top: 8px;">
+              if running from a paired wgflow's panel, use the "Run as client"
+              tab there and target this wgflow's overlay address.
+            </div>
+          ` : ''}
+        </div>
+
+        <p class="mono-dim" style="font-size: 10px; margin-top: 10px;">
+          the panel will block until either a client completes a test or the
+          60-second timeout fires. don't close the diagnostics panel until
+          you see the result here.
+        </p>
+      </div>
+
+      <div style="display:flex; gap: 8px; justify-content: flex-end; margin-top: 8px;">
+        <button class="ghost" id="iperf-cancel">cancel</button>
+        <button class="primary" id="iperf-run">run client</button>
       </div>
     </div>`;
   modal.classList.add('show');
 
-  $('#iperf3-server-cancel').onclick = () => modal.classList.remove('show');
-  $('#iperf3-server-start').onclick = () => {
-    const port = ($('#iperf3-server-port').value || '').trim() || '5201';
-    $('#netdiag-target').value = port;
-    modal.classList.remove('show');
-    runDiagTool('iperf3-server');
+  // Update the server's "what to run on the other side" hint as the
+  // operator changes the listen port.
+  const portInput = $('#iperf-server-port');
+  if (portInput) {
+    portInput.addEventListener('input', () => {
+      const p = portInput.value || '5201';
+      const hint = $('#iperf-server-cmd-hint');
+      if (hint) hint.textContent = `iperf3 -c <this-wgflow-overlay> -p ${p} -t 5`;
+    });
+  }
+
+  // Tab switching.
+  let currentTab = 'client';
+  $$('.iperf-tab').forEach(tab => {
+    tab.onclick = () => {
+      currentTab = tab.dataset.tab;
+      $$('.iperf-tab').forEach(t => {
+        t.style.borderBottomColor = (t === tab) ? 'var(--accent)' : 'transparent';
+      });
+      $('#iperf-pane-client').style.display = (currentTab === 'client') ? '' : 'none';
+      $('#iperf-pane-server').style.display = (currentTab === 'server') ? '' : 'none';
+      const runBtn = $('#iperf-run');
+      if (runBtn) runBtn.textContent = (currentTab === 'client') ? 'run client' : 'start server';
+    };
+  });
+
+  // Suggest-target buttons fill the client target field.
+  $$('.iperf-suggest-target').forEach(b => {
+    b.onclick = () => { $('#iperf-client-target').value = b.dataset.target; };
+  });
+
+  $('#iperf-cancel').onclick = () => modal.classList.remove('show');
+  $('#iperf-run').onclick = () => {
+    if (currentTab === 'client') {
+      const target = ($('#iperf-client-target').value || '').trim();
+      if (!target) {
+        toast('pick a suggested target or type one', 'error');
+        return;
+      }
+      const duration = ($('#iperf-client-duration').value || '5').trim();
+      // Stash duration on the netdiag panel via a custom data attr
+      // — runDiagTool reads target normally; if duration is set
+      // beyond the default 5s we need a different code path. For
+      // now, we use the existing client tool with the target field;
+      // duration is hardcoded server-side at 5s. If the operator
+      // typed a different duration, the modal warns.
+      $('#netdiag-target').value = target;
+      modal.classList.remove('show');
+      if (duration !== '5') {
+        toast(`note: duration field is informational; iperf3 client always runs 5s in this version`, 'warn');
+      }
+      runDiagTool('iperf3');
+    } else {
+      // Server mode.
+      const port = ($('#iperf-server-port').value || '5201').trim();
+      $('#netdiag-target').value = port;
+      modal.classList.remove('show');
+      runDiagTool('iperf3-server');
+    }
   };
 }
 
@@ -8561,18 +8712,12 @@ function tcpdumpEscape(s) {
 
 $$('.netdiag-tool-btn').forEach(b => {
   b.onclick = () => {
-    // tcpdump opens a helper modal with current-config examples
-    // before dispatch — operators rarely have BPF filter syntax in
-    // muscle memory and the typical use cases (capture on wg0,
-    // capture ICMP, capture a specific peer's traffic) all need a
-    // small filter. The modal pre-fills the target field with the
-    // operator's chosen example, then runs the tool normally.
     if (b.dataset.tool === 'tcpdump') {
       openTcpdumpHelper();
       return;
     }
-    if (b.dataset.tool === 'iperf3-server') {
-      openIperf3ServerHelper();
+    if (b.dataset.tool === 'iperf3' || b.dataset.tool === 'iperf3-server') {
+      openIperf3Modal();
       return;
     }
     runDiagTool(b.dataset.tool);
@@ -11278,13 +11423,43 @@ function fedRender() {
     const toggleLabel = row.enabled ? 'disable' : 'enable';
     const toggleBtn = `<button class="ghost" data-fed-action="toggle-confirm" title="${row.enabled ? 'disable this link (tunnel goes down)' : 'enable this link'}">${toggleLabel}</button>`;
     const deleteBtn = `<button class="ghost" data-fed-action="delete-confirm" title="remove this link" style="color: var(--danger);">delete</button>`;
+    // Open-panel button: opens the remote wgflow's panel via the
+    // overlay address. Only useful when the link is established AND
+    // the operator's browser has a route to 10.99.0.X (i.e. they're
+    // on a peer of THIS wgflow, not browsing wgflow's panel from
+    // outside the VPN). Always show the button for established
+    // links — the tooltip warns about the route requirement, and
+    // the operator can copy the URL manually if the new tab fails.
+    let openPanelBtn = '';
+    if (row.status === 'established' && row.remote_overlay_addr) {
+      const remoteOverlay = (row.remote_overlay_addr || '').split('/')[0];
+      const url = `http://${remoteOverlay}:8080/`;
+      openPanelBtn = `<button class="ghost" data-fed-action="open-panel" data-url="${fedEscapeHtml(url)}" title="open the remote wgflow's admin panel at ${url} (only works from a wgflow peer with overlay access)">open panel</button>`;
+    }
+
+    // Name cell: the REMOTE INSTANCE NAME is the primary label
+    // (that's what this link is "to" — a connection to <Falcon>,
+    // a connection to <mainNode>). The operator-typed local link
+    // label is shown smaller and only when it differs from the
+    // instance name (otherwise it's redundant). For pending-bundle
+    // links we don't yet have remote_instance_name, so fall back
+    // to the local label as primary in that case.
+    const remoteInst = (row.remote_instance_name || '').trim();
+    const localLabel = (row.name || '').trim();
+    let nameCell;
+    if (remoteInst) {
+      nameCell = `<span class="mono">${fedEscapeHtml(remoteInst)}</span>`;
+      if (localLabel && localLabel.toLowerCase() !== remoteInst.toLowerCase()) {
+        nameCell += `<div class="mono-dim" style="font-size:10px;">label: ${fedEscapeHtml(localLabel)}</div>`;
+      }
+    } else {
+      // Pre-pairing-complete or legacy data — just show the local label.
+      nameCell = `<span class="mono">${fedEscapeHtml(localLabel)}</span>`;
+    }
 
     tr.innerHTML = `
       <td><span class="status-dot" style="display:inline-block; width:8px; height:8px; border-radius:50%; background:${fedStatusDot(row)};" title="${statusLabel}"></span></td>
-      <td>
-        <span class="mono">${fedEscapeHtml(row.name)}</span>
-        ${row.remote_instance_name ? `<div class="mono-dim" style="font-size:10px;">${fedEscapeHtml(row.remote_instance_name)}</div>` : ''}
-      </td>
+      <td>${nameCell}</td>
       <td>${remoteCell}</td>
       <td>${renderAdv(localAdvText)}</td>
       <td>${renderAdv(remoteAdvText)}</td>
@@ -11292,6 +11467,7 @@ function fedRender() {
       <td><span class="mono-dim" style="font-size:11px;">${fedEscapeHtml(row.role)}</span></td>
       <td>
         ${completeBtn}
+        ${openPanelBtn}
         ${toggleBtn}
         ${deleteBtn}
       </td>`;
@@ -11312,6 +11488,20 @@ async function fedHandleRowClick(ev) {
   if (!link) return;
 
   try {
+    if (action === 'open-panel') {
+      // Open the remote wgflow's admin panel via the overlay
+      // address. Open in a new tab. If the operator's browser
+      // can't route to 10.99.0.X, the tab will fail to load —
+      // tooltip warned them; nothing more we can do from here.
+      const url = target.dataset.url;
+      if (url) {
+        // noopener prevents the opened panel from messing with
+        // window.opener back to us. Standard hardening for
+        // cross-origin links.
+        window.open(url, '_blank', 'noopener,noreferrer');
+      }
+      return;
+    }
     if (action === 'toggle-confirm') {
       // Disabling tears the tunnel down on this side; enabling brings
       // it back up. Either way the operator should know what's

@@ -5,6 +5,51 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.2.1] — 2026-05-05
+
+UI polish on the multisite panel + diag tools. No protocol changes,
+no schema changes — drop-in upgrade from 4.2.0.
+
+### Added
+
+- **Open remote panel button** on multisite rows. When the link
+  status is `established`, an "open panel" button appears in the
+  actions column that opens the remote wgflow's admin panel
+  (`http://<remote_overlay>:8080/`) in a new tab. The remote panel
+  uses its own session, so the operator authenticates separately
+  there. Tooltip warns the operator the link only resolves from a
+  client peer with overlay access (i.e. inside the VPN).
+
+- **Unified iperf3 modal** — replaces the separate `iperf3` and
+  `iperf3 server` toolbar buttons. Single modal with two tabs:
+  "Run as client" and "Run as server (one-shot)". The client tab
+  surfaces multisite peer overlay addresses as one-click suggested
+  targets. The server tab updates its "what to run on the other
+  side" hint live as the operator changes the listen port.
+
+### Changed
+
+- **Multisite panel name column** now leads with the remote
+  instance name (e.g. `Falcon`) and shows the operator-supplied
+  local link label only as a small secondary line, and only when
+  it differs from the instance name. Resolves the confusion where
+  two paired wgflows that both labeled their local link "mainNode"
+  ended up with two rows that read just "mainNode" with no useful
+  disambiguation.
+
+### Caveats
+
+- The "open panel" button generates a plain `http://` URL. If the
+  local wgflow's panel is behind HTTPS and the browser blocks
+  mixed content, the new tab won't load. Workaround: copy the URL
+  from the browser bar after click, paste in a fresh tab.
+- The iperf3 client tab's "test duration" field is informational
+  for now — the underlying tool always runs a 5s test. The modal
+  toasts a warning when the operator types something other than 5.
+  Plumbing duration through to the backend is deferred.
+
+---
+
 ## [4.2.0] — 2026-05-05
 
 Multisite federation: two wgflows pair over WireGuard and route

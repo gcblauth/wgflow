@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import sqlite3
 import subprocess
 import tempfile
@@ -167,6 +168,40 @@ def _wg_conf_safe_name(name: str, fallback: str) -> str:
     """
     safe = _WG_CONF_NAME_UNSAFE.sub("_", name or "")
     return safe if safe else fallback
+
+
+def _local_instance_name() -> str:
+    """Read this wgflow's local instance name from network_settings.
+
+    Used by the multisite registration/bundle builders so the OTHER
+    side learns what we call ourselves. Falls back to the container
+    hostname when nothing is set in the panel — better than empty
+    string, makes paired peers identifiable out of the box.
+
+    Sanitised: max 64 chars, no control characters, no quotes (the
+    string lands in a `# ...` comment line in registration/bundle
+    text and gets parsed back out — control chars would break the
+    regex and quote chars would confuse logs).
+    """
+    name = ""
+    try:
+        conn = get_db().conn
+        row = conn.execute(
+            "SELECT value FROM network_settings WHERE key = 'instance_name'"
+        ).fetchone()
+        if row and row["value"]:
+            name = row["value"]
+    except Exception:
+        # DB unavailable / table missing — return hostname fallback.
+        pass
+    if not name:
+        try:
+            name = socket.gethostname()
+        except Exception:
+            name = ""
+    name = (name or "").strip()
+    name = re.sub(r"[\r\n\t'\"]", " ", name)
+    return name[:64]
 
 
 def _live_wg0_pubkey() -> str:
@@ -3747,6 +3782,7 @@ def multisite_registration(body: MultisiteRegistrationRequest):
         importer_endpoint=endpoint,
         importer_overlay_addr=local_overlay,
         importer_advertised=advertised,
+        importer_instance_name=_local_instance_name(),
     )
 
     return {
@@ -3833,6 +3869,15 @@ def multisite_create_from_registration(body: MultisiteCreateLinkRequest):
             if cidr and cidr not in importer_aips:
                 importer_aips.append(cidr)
 
+        # The peer-row's name should reflect the OTHER wgflow's
+        # installation name (e.g. 'multisite:Falcon') — not the local
+        # link name, which can be operator-supplied and may not match
+        # what the remote calls itself. Fall back to link name only
+        # when the registration was from an older wgflow that didn't
+        # carry an instance name.
+        remote_inst = parsed.importer_instance_name or name
+        peer_display_name = f"multisite:{remote_inst}"
+
         # INSERT wgB as a wg0 peer NOW. peer_type='multisite' so it
         # doesn't appear in the live-peers panel. The peers.address
         # column holds the overlay /32 — _load_all_peers_for_sync
@@ -3843,7 +3888,7 @@ def multisite_create_from_registration(body: MultisiteCreateLinkRequest):
                 address, enabled, has_private_key, peer_type
             ) VALUES (?, ?, '', ?, ?, 1, 0, 'multisite')""",
             (
-                f"multisite:{name}",
+                peer_display_name,
                 parsed.importer_pubkey,
                 psk,
                 f"{importer_overlay}/32",
@@ -3858,18 +3903,21 @@ def multisite_create_from_registration(body: MultisiteCreateLinkRequest):
                 local_overlay_addr, remote_overlay_addr,
                 local_advertised, remote_advertised,
                 remote_endpoint,
+                remote_instance_name,
                 status, enabled
             ) VALUES (?, 'creator', ?,
                       NULL, ?,
                       ?, ?,
                       ?, ?,
                       ?,
+                      ?,
                       'established', 1)""",
             (name, peer_id, psk,
              f"{local_overlay}/32", f"{importer_overlay}/32",
              ",".join(advertised),
              ",".join(parsed.importer_advertised),
-             parsed.importer_endpoint),
+             parsed.importer_endpoint,
+             remote_inst),
         )
         link_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
@@ -3885,6 +3933,7 @@ def multisite_create_from_registration(body: MultisiteCreateLinkRequest):
         importer_overlay_addr=importer_overlay,
         psk=psk,
         creator_advertised=advertised,
+        creator_instance_name=_local_instance_name(),
     )
 
     return {
@@ -3962,13 +4011,18 @@ def multisite_import_complete(link_id: int, body: MultisiteImportCompleteRequest
         # private_key on this row would only be relevant if someone
         # asked us to render a downloadable conf for this peer (which
         # we never do — multisite peers don't have downloadable confs).
+        # Same instance-name fallback logic as the creator side: the
+        # peer row reflects what the OTHER wgflow calls itself.
+        remote_inst = parsed.creator_instance_name or row["name"]
+        peer_display_name = f"multisite:{remote_inst}"
+
         cur = conn.execute(
             """INSERT INTO peers (
                 name, public_key, private_key, preshared_key,
                 address, enabled, has_private_key, peer_type
             ) VALUES (?, ?, '', ?, ?, 1, 0, 'multisite')""",
             (
-                f"multisite:{row['name']}",
+                peer_display_name,
                 parsed.creator_pubkey,
                 parsed.psk,
                 f"{parsed.creator_overlay_addr}/32",
@@ -3984,6 +4038,7 @@ def multisite_import_complete(link_id: int, body: MultisiteImportCompleteRequest
                 remote_overlay_addr=?,
                 remote_advertised=?,
                 remote_endpoint=?,
+                remote_instance_name=?,
                 status='established',
                 last_error=NULL
                WHERE id=?""",
@@ -3991,6 +4046,7 @@ def multisite_import_complete(link_id: int, body: MultisiteImportCompleteRequest
              f"{parsed.creator_overlay_addr}/32",
              ",".join(parsed.creator_advertised),
              parsed.creator_endpoint,
+             remote_inst,
              link_id),
         )
 
@@ -4027,11 +4083,12 @@ def multisite_update_link(link_id: int, body: MultisiteUpdateRequest):
                 raise HTTPException(409, f"link '{new_name}' already exists")
             sets.append("name=?")
             params.append(new_name)
-            if row["peer_id"]:
-                conn.execute(
-                    "UPDATE peers SET name=? WHERE id=?",
-                    (f"multisite:{new_name}", row["peer_id"]),
-                )
+            # NOTE: we DO NOT update peers.name here. The peer-row
+            # display name reflects what the REMOTE wgflow calls
+            # itself (its instance name), not the local link label.
+            # Renaming the link locally is a relabel of "what do I
+            # call this connection in my panel" — it does not change
+            # the identity of the peer at the other end.
         if body.enabled is not None:
             sets.append("enabled=?")
             params.append(1 if body.enabled else 0)

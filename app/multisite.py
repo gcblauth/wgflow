@@ -147,6 +147,7 @@ class ParsedRegistration:
     importer_endpoint: str            # "host:port"
     importer_overlay_addr: str        # bare IP, no mask
     importer_advertised: List[str]    # CIDRs
+    importer_instance_name: str       # the OTHER wgflow's local instance name
 
 
 _REG_NAME_RE     = re.compile(r"^\s*#\s*wgflow-multisite-registration-name:\s*(\S.*?)\s*$", re.MULTILINE)
@@ -154,6 +155,7 @@ _REG_PUBKEY_RE   = re.compile(r"^\s*#\s*wgflow-multisite-registration-pubkey:\s*
 _REG_ENDPOINT_RE = re.compile(r"^\s*#\s*wgflow-multisite-registration-endpoint:\s*(\S+)\s*$", re.MULTILINE)
 _REG_OVERLAY_RE  = re.compile(r"^\s*#\s*wgflow-multisite-registration-overlay:\s*(\S+)\s*$", re.MULTILINE)
 _REG_ADV_RE      = re.compile(r"^\s*#\s*wgflow-multisite-registration-advertised:\s*(.*?)\s*$", re.MULTILINE)
+_REG_INSTANCE_RE = re.compile(r"^\s*#\s*wgflow-multisite-registration-instance:\s*(\S.*?)\s*$", re.MULTILINE)
 
 
 def build_registration(
@@ -163,6 +165,7 @@ def build_registration(
     importer_endpoint: str,
     importer_overlay_addr: str,
     importer_advertised: List[str],
+    importer_instance_name: str = "",
 ) -> str:
     """Render the registration text block on the importer side.
 
@@ -170,7 +173,10 @@ def build_registration(
     creator side's "+ create from registration" form.
 
     The link name is a *suggestion* — the creator side can override
-    it (operator picks a label that makes sense to them).
+    it (operator picks a label that makes sense to them). The
+    instance name is the importer's MULTISITE_INSTANCE_NAME (or
+    fallback to hostname) — used by the creator side as the human-
+    readable label for the new peer row in their local panel.
     """
     # Defensive filter on advertised — refuse 0.0.0.0/0 (lockout
     # prevention same as bundle path). Malformed CIDRs are dropped.
@@ -186,6 +192,12 @@ def build_registration(
         if cidr not in safe_adv:
             safe_adv.append(cidr)
 
+    # Sanitize the instance name: same rules as link names — strip
+    # control chars and limit to 64 chars. Caller passes whatever the
+    # local config specifies; we don't assume it's safe.
+    inst = (importer_instance_name or "").strip()[:64]
+    inst = re.sub(r"[\r\n\t]", " ", inst)
+
     lines = [
         "# wgflow multisite REGISTRATION — DO NOT EDIT",
         "# paste this into the OTHER wgflow's '+ create from registration' form.",
@@ -194,6 +206,7 @@ def build_registration(
         f"# wgflow-multisite-registration-endpoint: {importer_endpoint}",
         f"# wgflow-multisite-registration-overlay: {importer_overlay_addr}",
         f"# wgflow-multisite-registration-advertised: {','.join(safe_adv)}",
+        f"# wgflow-multisite-registration-instance: {inst}",
         "",
     ]
     return "\n".join(lines)
@@ -244,12 +257,19 @@ def parse_registration(text: str) -> ParsedRegistration:
     if ":" not in endpoint:
         raise MultisiteError(f"registration endpoint must be host:port, got {endpoint!r}")
 
+    # Instance name is optional — registrations from older wgflows
+    # won't have it, default to empty string (caller falls back to
+    # the suggested_link_name in that case).
+    m_inst = _REG_INSTANCE_RE.search(text)
+    instance = m_inst.group(1).strip()[:64] if m_inst else ""
+
     return ParsedRegistration(
         suggested_link_name=suggested,
         importer_pubkey=m_pk.group(1),
         importer_endpoint=endpoint,
         importer_overlay_addr=overlay,
         importer_advertised=advertised,
+        importer_instance_name=instance,
     )
 
 
@@ -274,6 +294,7 @@ class ParsedBundle:
     importer_overlay_addr: str       # echoed back so importer can verify
     psk: str
     creator_advertised: List[str]
+    creator_instance_name: str       # the OTHER wgflow's local instance name
 
 
 _BND_NAME_RE        = re.compile(r"^\s*#\s*wgflow-multisite-bundle-name:\s*(\S.*?)\s*$", re.MULTILINE)
@@ -283,6 +304,7 @@ _BND_PSK_RE         = re.compile(r"^\s*#\s*wgflow-multisite-bundle-psk:\s*(\S+)\
 _BND_CREATOR_OVL_RE = re.compile(r"^\s*#\s*wgflow-multisite-bundle-creator-overlay:\s*(\S+)\s*$", re.MULTILINE)
 _BND_IMPORT_OVL_RE  = re.compile(r"^\s*#\s*wgflow-multisite-bundle-importer-overlay:\s*(\S+)\s*$", re.MULTILINE)
 _BND_ADV_RE         = re.compile(r"^\s*#\s*wgflow-multisite-bundle-creator-advertised:\s*(.*?)\s*$", re.MULTILINE)
+_BND_INSTANCE_RE    = re.compile(r"^\s*#\s*wgflow-multisite-bundle-creator-instance:\s*(\S.*?)\s*$", re.MULTILINE)
 
 
 def build_bundle(
@@ -294,6 +316,7 @@ def build_bundle(
     importer_overlay_addr: str,
     psk: str,
     creator_advertised: List[str],
+    creator_instance_name: str = "",
 ) -> str:
     """Render the bundle text block on the creator side. Operator
     copies this and pastes into the importer's '+ import' → 'complete'
@@ -311,6 +334,10 @@ def build_bundle(
         if cidr not in safe_adv:
             safe_adv.append(cidr)
 
+    # Sanitize instance name same as registration.
+    inst = (creator_instance_name or "").strip()[:64]
+    inst = re.sub(r"[\r\n\t]", " ", inst)
+
     lines = [
         "# wgflow multisite BUNDLE — DO NOT EDIT",
         "# paste this back into the OTHER wgflow's '+ import' → 'complete' form.",
@@ -321,6 +348,7 @@ def build_bundle(
         f"# wgflow-multisite-bundle-creator-overlay: {creator_overlay_addr}",
         f"# wgflow-multisite-bundle-importer-overlay: {importer_overlay_addr}",
         f"# wgflow-multisite-bundle-creator-advertised: {','.join(safe_adv)}",
+        f"# wgflow-multisite-bundle-creator-instance: {inst}",
         "",
     ]
     return "\n".join(lines)
@@ -376,6 +404,10 @@ def parse_bundle(text: str) -> ParsedBundle:
     if ":" not in endpoint:
         raise MultisiteError(f"bundle endpoint must be host:port, got {endpoint!r}")
 
+    # Optional — older bundles won't carry it. Fallback empty.
+    m_inst = _BND_INSTANCE_RE.search(text)
+    instance = m_inst.group(1).strip()[:64] if m_inst else ""
+
     return ParsedBundle(
         link_name=link_name,
         creator_pubkey=m_pk.group(1),
@@ -384,6 +416,7 @@ def parse_bundle(text: str) -> ParsedBundle:
         importer_overlay_addr=importer_overlay,
         psk=m_psk.group(1),
         creator_advertised=advertised,
+        creator_instance_name=instance,
     )
 
 
