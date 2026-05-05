@@ -50,6 +50,48 @@ def _exists(args: List[str]) -> bool:
     return proc.returncode == 0
 
 
+def _purge_jump(chain_args: List[str]) -> None:
+    """Idempotently remove a FORWARD jump rule, however it got there.
+
+    The naive `while _exists: _run("-D")` pattern crashes when iptables
+    semantics around half-broken state diverge from common sense — for
+    example when the target chain referenced by a jump rule was
+    flushed/dropped externally, `-C` may still report the rule as
+    present but `-D` errors with "No chain/target/match by that name".
+    Different iptables versions (legacy vs nft) disagree about which
+    of those two operations is the source of truth.
+
+    This helper does what the caller actually wants: "after I return,
+    that jump rule is not in the table." It tolerates both kinds of
+    iptables error and bails out the moment iptables says no.
+
+    Caller passes the rule body without the operation flag — e.g.
+    ["WGFLOW_FORWARD", "-s", "10.0.0.1", "-j", "WGFLOW_PEER_5"].
+    """
+    # Bound the loop. In practice we expect 0 or 1 iterations; >5 is a
+    # sign something's pathologically wrong and we should give up
+    # rather than spin.
+    for _ in range(10):
+        if not _exists(chain_args):
+            return
+        proc = subprocess.run(
+            ["iptables", "-D", *chain_args],
+            capture_output=True, text=True, check=False,
+        )
+        if proc.returncode != 0:
+            # iptables refused to delete the rule. Most common reason:
+            # the target chain no longer exists, but the jump rule's
+            # entry in -C still resolves. We can't make this state
+            # consistent from here. Log and move on — the caller's
+            # next step (recreate the chain + re-insert the jump) will
+            # resolve the inconsistency.
+            print(f"[iptables] _purge_jump: iptables refused to delete "
+                  f"{' '.join(chain_args)}: {proc.stderr.strip()}; "
+                  f"continuing — recreate will reconcile",
+                  flush=True)
+            return
+
+
 def _chain_name(peer_id: int) -> str:
     return f"WGFLOW_PEER_{peer_id}"
 
@@ -166,8 +208,26 @@ def ensure_base_chain() -> None:
         # by computing the current line count and inserting at that
         # position. iptables doesn't expose line count directly, so we
         # use -L --line-numbers and find the DROP.
-        if _exists(log_rule):
-            _run(["-D"] + log_rule)
+        #
+        # v4.2-rebuild: tolerate iptables refusal on -D. The naive
+        # `_run("-D")` pattern crashes when iptables -C reports the rule
+        # as present but -D refuses (legacy vs nft semantics, or LOG
+        # target module load issue). Same fix as the env-var-OFF path
+        # below at the LOG cleanup site. We cap the loop at 10 iterations
+        # to defend against a pathological state machine that always
+        # claims the rule exists but always refuses to delete it.
+        for _ in range(10):
+            if not _exists(log_rule):
+                break
+            proc = subprocess.run(
+                ["iptables", "-D"] + log_rule,
+                capture_output=True, text=True, check=False,
+            )
+            if proc.returncode != 0:
+                print(f"[iptables] LOG rule pre-insert cleanup refused: "
+                      f"{proc.stderr.strip()}; continuing — re-insert "
+                      f"will reconcile", flush=True)
+                break
         # Find the DROP line number.
         out = subprocess.run(
             ["iptables", "-L", "WGFLOW_FORWARD", "-n", "--line-numbers"],
@@ -187,8 +247,179 @@ def ensure_base_chain() -> None:
             _run(["-A"] + log_rule)
     else:
         # If the env var is OFF but a previous run left the LOG rule, remove it.
-        while _exists(log_rule):
-            _run(["-D"] + log_rule)
+        # Same idempotent-tolerant pattern as _purge_jump — bound the loop
+        # and don't crash on any iptables refusal, since this cleanup is
+        # best-effort.
+        for _ in range(10):
+            if not _exists(log_rule):
+                break
+            proc = subprocess.run(
+                ["iptables", "-D"] + log_rule,
+                capture_output=True, text=True, check=False,
+            )
+            if proc.returncode != 0:
+                print(f"[iptables] LOG rule cleanup refused: "
+                      f"{proc.stderr.strip()}", flush=True)
+                break
+
+    # v4.2-pre: ensure baseline FORWARD rules for the multisite overlay
+    # (10.99.0.0/24 on wg1). These are idempotent — safe to call on
+    # every replay even though they only need to exist once.
+    _ensure_multisite_baseline_rules()
+
+
+def ensure_multisite_baseline_rules(conn=None) -> None:
+    """Public wrapper for _ensure_multisite_baseline_rules.
+
+    Called from _replay_state_to_kernel with a live DB conn so per-link
+    advertised-network ACCEPT rules can be installed alongside the
+    overlay baseline. Also called internally from ensure_base_chain
+    at boot (before DB is open) with no conn — installs only the
+    baseline overlay↔overlay + overlay→8080 rules at that point.
+    """
+    _ensure_multisite_baseline_rules(conn=conn)
+
+
+def _ensure_multisite_baseline_rules(conn=None) -> None:
+    """Install (or no-op if already present) the FORWARD rules that
+    govern multisite overlay traffic.
+
+    Default policy = deny. We add specific allow rules for:
+      1. Overlay ↔ overlay (10.99.0.0/24 ↔ 10.99.0.0/24): the panel-
+         federation handshake + future cross-panel API traffic flows
+         here. Bidirectional: matters for the responder side too.
+      2. Overlay → host 8080/tcp: the panel's HTTP listener. Reached
+         BY the overlay peers TO our panel. The conntrack-established
+         rule already in WGFLOW_FORWARD handles return traffic, so
+         we only need the forward direction allowed.
+      3. v4.2-rebuild: per-link advertised network ACCEPTs. For each
+         enabled multisite link, ACCEPT FORWARD from the remote's
+         overlay /32 to each CIDR in local_advertised. Read from the
+         optional `conn` parameter so tests / standalone calls can
+         skip per-link rules cleanly.
+
+    Anything else from 10.99.0.0/24 falls through to the WGFLOW_FORWARD
+    tail DROP. This is the "default deny" the operator asked for.
+
+    NOTE on inserting before DROP: WGFLOW_FORWARD ends in -A WGFLOW_FORWARD
+    -j DROP. We use -I (insert) which adds at position 1 by default,
+    placing our rules before the DROP. Multiple invocations of -I would
+    pile up duplicates; we guard with -C (check) before -I.
+    """
+    if not SETTINGS.multisite_enabled:
+        return
+
+    overlay_cidr = "10.99.0.0/24"
+    rules = [
+        # 1. overlay ↔ overlay (panel federation, cross-panel API).
+        ["WGFLOW_FORWARD", "-s", overlay_cidr, "-d", overlay_cidr,
+         "-j", "ACCEPT"],
+        # 2. overlay → host:8080 (any local panel listener).
+        # Note: "-d <host_ip>" is hard to predict at iptables setup time
+        # (the host IP varies). We match on the destination port
+        # instead — any TCP traffic to port 8080 from the overlay is
+        # ACCEPT. This is the correct shape because the panel always
+        # listens on 8080 inside the container; the SNAT/routing
+        # delivers overlay packets bound for the panel to that port.
+        # Note: panel traffic locally-destined goes through INPUT,
+        # not FORWARD — this rule is defense-in-depth in case INPUT
+        # default changes from ACCEPT.
+        ["WGFLOW_FORWARD", "-s", overlay_cidr,
+         "-p", "tcp", "--dport", "8080", "-j", "ACCEPT"],
+    ]
+
+    # 3. v4.2-rebuild: per-link advertised network rules. For each
+    # established multisite link, allow FORWARD from the remote's
+    # overlay /32 to each CIDR in our local_advertised list. This is
+    # the data-plane reach: the remote wgflow's clients can route
+    # through us to networks we explicitly advertised. Without these
+    # rules the WGFLOW_FORWARD tail DROP would kill those packets
+    # even though AllowedIPs let them through cryptokey routing.
+    #
+    # Per-link rules are read from federation_links via the conn
+    # passed in (caller supplies it from the replay context). They
+    # don't auto-update on link mutation, so we re-install on every
+    # replay. This is idempotent — the _exists check below
+    # short-circuits if the rule is already in place. On disable/
+    # delete we don't bother removing the rules; they become orphaned
+    # ACCEPTs that don't match anything (the source overlay IP isn't
+    # bound to any active peer) so they're effectively dead.
+    if conn is not None:
+        try:
+            link_rows = conn.execute(
+                "SELECT remote_overlay_addr, local_advertised "
+                "FROM federation_links WHERE enabled=1"
+            ).fetchall()
+            for lr in link_rows:
+                src = (lr["remote_overlay_addr"] or "").split("/", 1)[0]
+                if not src:
+                    continue
+                advertised = (lr["local_advertised"] or "").strip()
+                if not advertised:
+                    continue
+                for cidr in advertised.split(","):
+                    cidr = cidr.strip()
+                    if not cidr or cidr in ("0.0.0.0/0", "::/0"):
+                        continue
+                    rules.append([
+                        "WGFLOW_FORWARD", "-s", f"{src}/32",
+                        "-d", cidr, "-j", "ACCEPT",
+                    ])
+        except Exception as e:
+            print(f"[iptables] per-link advertised-network rule build failed: "
+                  f"{e}", flush=True)
+
+    for r in rules:
+        if not _exists(r):
+            try:
+                _run(["-I"] + r)
+            except IPTablesError as e:
+                # Don't crash the whole replay if a rule install fails —
+                # log and continue. Loss of multisite forwarding is
+                # bad but not as bad as a failed boot.
+                print(f"[iptables] failed to install multisite rule "
+                      f"{' '.join(r)}: {e}", flush=True)
+
+    # v4.2-rebuild data-plane SNAT: when an overlay-source packet exits
+    # via something OTHER than wg0 (i.e. it's heading onto a local LAN
+    # via eth0 to reach an advertised-network destination), masquerade
+    # it. Otherwise the LAN host sees source 10.99.0.X — for which it
+    # has no return route — and the reply goes nowhere. This is the
+    # exact same pattern as the client-subnet MASQUERADE in
+    # entrypoint.sh, just for the multisite overlay subnet.
+    #
+    # The `-t nat -A POSTROUTING` rule isn't in the WGFLOW_FORWARD
+    # chain (different table), so it can't go through the rules-list
+    # loop above. Handle it directly with subprocess.
+    #
+    # Idempotent: -C check before -A. Operator can disable this by
+    # setting WG_MULTISITE_NO_SNAT=1 (future flag — for now SNAT-by-
+    # default is hardcoded since that's the "it just works" path; the
+    # alternative — setting up reverse routes on every LAN host —
+    # isn't reasonable for a default config).
+    # Build as: iptables -t nat -A POSTROUTING <match-args> -j MASQUERADE
+    # match_args is the slice that goes between the chain spec and the
+    # target. We split the full rule into the iptables-binary-and-table
+    # prefix (3 elements: "iptables", "-t", "nat") and the rest, then
+    # insert "-A POSTROUTING" or "-C POSTROUTING" between them.
+    nat_prefix = ["iptables", "-t", "nat"]
+    nat_match = [
+        "-s", overlay_cidr,
+        "!", "-o", SETTINGS.interface,
+        "-j", "MASQUERADE",
+    ]
+    check_proc = subprocess.run(
+        nat_prefix + ["-C", "POSTROUTING"] + nat_match,
+        capture_output=True, text=True, check=False,
+    )
+    if check_proc.returncode != 0:
+        add_proc = subprocess.run(
+            nat_prefix + ["-A", "POSTROUTING"] + nat_match,
+            capture_output=True, text=True, check=False,
+        )
+        if add_proc.returncode != 0:
+            print(f"[iptables] failed to install multisite SNAT rule: "
+                  f"{add_proc.stderr.strip()}", flush=True)
 
 
 def _input_deny_args(src_ip: str, e: ACLEntry) -> List[str]:
@@ -339,9 +570,9 @@ def create_peer_chain(peer_id: int, address: str) -> None:
     # Jump from WGFLOW_FORWARD into this peer's chain. Insert BEFORE the
     # trailing DROP. Using -I at position 2 works as long as position 1 is
     # the established/related rule installed by entrypoint.sh. We make this
-    # robust by removing any pre-existing jump first.
-    while _exists(["WGFLOW_FORWARD", "-s", src, "-j", chain]):
-        _run(["-D", "WGFLOW_FORWARD", "-s", src, "-j", chain])
+    # robust by removing any pre-existing jump first — see _purge_jump for
+    # why a naive while-loop here was crash-prone.
+    _purge_jump(["WGFLOW_FORWARD", "-s", src, "-j", chain])
 
     # Insert at position 2 (after the conntrack ESTABLISHED rule).
     _run(["-I", "WGFLOW_FORWARD", "2", "-s", src, "-j", chain])
@@ -352,9 +583,8 @@ def destroy_peer_chain(peer_id: int, address: str) -> None:
     chain = _chain_name(peer_id)
     src = _strip_mask(address)
 
-    # Remove FORWARD jump.
-    while _exists(["WGFLOW_FORWARD", "-s", src, "-j", chain]):
-        _run(["-D", "WGFLOW_FORWARD", "-s", src, "-j", chain])
+    # Remove FORWARD jump (idempotent, tolerant of half-broken state).
+    _purge_jump(["WGFLOW_FORWARD", "-s", src, "-j", chain])
 
     # Remove any INPUT deny rules for this peer.
     _flush_input_deny_rules(src, entries=None)
@@ -419,8 +649,7 @@ def create_federation_chain(link_id: int, remote_fed_addr: str) -> None:
     # intentionally place fed jumps at the same position as client peers —
     # ordering between fed jumps and client jumps doesn't matter because
     # they have disjoint source-IP matches.
-    while _exists(["WGFLOW_FORWARD", "-s", src, "-j", chain]):
-        _run(["-D", "WGFLOW_FORWARD", "-s", src, "-j", chain])
+    _purge_jump(["WGFLOW_FORWARD", "-s", src, "-j", chain])
     _run(["-I", "WGFLOW_FORWARD", "2", "-s", src, "-j", chain])
 
 
@@ -429,8 +658,7 @@ def destroy_federation_chain(link_id: int, remote_fed_addr: str) -> None:
     chain = _fed_chain_name(link_id)
     src = _strip_mask(remote_fed_addr)
 
-    while _exists(["WGFLOW_FORWARD", "-s", src, "-j", chain]):
-        _run(["-D", "WGFLOW_FORWARD", "-s", src, "-j", chain])
+    _purge_jump(["WGFLOW_FORWARD", "-s", src, "-j", chain])
 
     subprocess.run(["iptables", "-F", chain], capture_output=True)
     subprocess.run(["iptables", "-X", chain], capture_output=True)

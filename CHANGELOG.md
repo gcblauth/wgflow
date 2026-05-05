@@ -5,6 +5,543 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.2.0] — 2026-05-05
+
+Multisite federation: two wgflows pair over WireGuard and route
+through each other's advertised networks. Pairing is a two-step
+copy-paste flow with no callback, no bootstrap server, no public
+panel exposure. Adds the `tcpdump` and `iperf3 server` diagnostic
+tools. Drops the `WG_FED_PORT` environment variable from v4.2.0-pre.
+
+### Multisite federation
+
+Symmetric peering on wg0. Each wgflow gets a secondary
+`10.99.0.X/32` overlay address bound dynamically as wg links come and
+go. Pairing is two copy-pastes:
+
+1. **wgB** (importer): clicks `+ import`, names the link, clicks
+   `generate registration`. Copies the registration text.
+2. **wgA** (creator): clicks `+ create from registration`, pastes
+   the registration, fills in own endpoint + advertised networks,
+   clicks `generate bundle`. wgA installs wgB as a wg0 peer
+   immediately. Copies the bundle text back.
+3. **wgB** clicks `complete pairing` on the row that's now showing
+   `pending-bundle`, pastes the bundle. wgB installs wgA as a peer
+   using the privkey it stashed in step 1. Tunnel handshakes within
+   ~5 seconds.
+
+Both sides learn each other's pubkey BEFORE the tunnel needs to
+exist — no chicken-and-egg.
+
+The auth model is "operator pasted these strings by hand" — there
+are no tokens, no bootstrap callbacks. If a pairing string leaks,
+the worst case is the leaker can use it once before the operator
+notices.
+
+### Multisite data plane
+
+For overlay traffic between paired wgflows AND for advertised-network
+reach (e.g. wgB's clients reaching wgA's `192.168.99.0/24`):
+
+- **Routes**: `<remote_overlay>/32` and each advertised CIDR are
+  installed via `ip route add ... dev wg0 src <local_overlay>`.
+  Required because `wg syncconf` does NOT install routes (only
+  `wg-quick up` does), and we add multisite peers via syncconf
+  after wg0 is already up. Without these routes packets default-
+  route out eth0 and never traverse the tunnel.
+- **Iptables FORWARD**: per-link ACCEPT rules `<remote_overlay>/32 →
+  <each local_advertised CIDR>`, plus baseline overlay↔overlay and
+  overlay→tcp/8080 (the panel listener).
+- **Iptables NAT**: `MASQUERADE 10.99.0.0/24 -o !wg0` so LAN-side
+  hosts on advertised networks see the wgflow's address as source
+  (not the remote overlay) and can route replies. Same pattern as
+  the existing client-subnet MASQUERADE in `entrypoint.sh`.
+
+All managed by `multisite.reconcile_overlay_address`,
+`multisite.reconcile_routes`, and
+`iptables_manager.ensure_multisite_baseline_rules` — called from
+`_replay_state_to_kernel` on every state change. Idempotent.
+
+### Live-peers panel
+
+Multisite peers now appear in the live-peers panel alongside client
+peers, distinguished by a `multisite` badge and a tinted row
+background (`color-mix(in srgb, var(--accent) 6%, transparent)`).
+Restricted action set:
+
+- ACL editor disabled (multisite reach is the federation_links
+  advertised-networks, not per-peer ACL rules)
+- Delete button replaced with `→ multisite` jump button (deleting a
+  multisite peer requires the multisite panel's confirm flow)
+- Conf download / QR / installer buttons hidden (multisite peers
+  don't have downloadable configs)
+
+`DELETE /api/peers/{id}` and `PUT /api/peers/{id}/acl` now return
+HTTP 409 with a redirect message when called against a multisite
+peer.
+
+### Multisite panel
+
+- Replaced the old "FED ADDR" column with two columns: `we expose`
+  (local advertised CIDRs) and `they expose` (remote advertised
+  CIDRs). One CIDR per line, monospaced.
+- Inline checkbox + `×` replaced with explicit `disable` / `delete`
+  buttons.
+- Disable shows a confirm explaining "tunnel goes down on this
+  side; remote keeps trying until they disable too."
+- Delete uses type-the-name confirmation (must type the link's
+  exact name to proceed).
+- Status colors: `established` → accent (with handshake-fresh
+  fallback to amber after 180s of no observed handshake),
+  `pending-bundle` → amber, `failed` → red, `disabled` → gray.
+
+### Diagnostic tools
+
+- **tcpdump**: new tool with a helper modal that surfaces
+  current-config-aware example filters (your real peer addresses,
+  multisite overlay addresses, advertised CIDRs). Runs for ~10s
+  via `timeout -s INT` so tcpdump exits cleanly with captured
+  packets — no SIGKILL data loss. Captures up to 200 packets, BPF
+  filter validated against an allowlist of safe characters.
+- **iperf3 server (one-shot)**: new tool that runs `iperf3 -s -1`
+  on the wgflow, accepts ONE client test, prints the result, exits.
+  60-second wrapper timeout if no client connects. Helper modal
+  shows the operator the exact `iperf3 -c …` command for the other
+  side.
+- **Copy results button**: copies the tool output pane to the
+  clipboard, with a select-and-prompt fallback when clipboard
+  access is blocked.
+
+### Removed
+
+- **`/api/multisite/handshake`** — replaced by the registration-
+  then-bundle flow. No equivalent endpoint; the protocol no longer
+  has callbacks.
+- **`WG_FED_PORT` env var** — no longer used. Multisite peers ride
+  on wg0's existing UDP listener; no separate port to publish.
+  Operators upgrading from v4.2.0-pre can drop the line from their
+  compose file (it's silently ignored if left).
+- **Upstream-connections subsection inside the multisite panel** —
+  removed (the upstream feature is conceptually separate). The
+  upstream feature backend is intact; existing upstream rows still
+  function.
+
+### Schema migration
+
+`federation_links` is dropped and recreated on first v4.2.0 boot.
+Migration triggers on any of these column markers in the legacy
+table definition:
+
+- `remote_wg_endpoint` (v4.0 schema)
+- `local_privkey` (v4.2.0-pre schema)
+- `pairing_token` (in-development v4.2.0-rebuild callback variant
+  — never tagged for release but operators who tested intermediate
+  builds may have it)
+
+`peers.peer_type` is added via `ALTER TABLE … ADD COLUMN` if not
+already present. Idempotent via `sqlite_master` introspection.
+
+Operators with active multisite links from v4.2.0-pre will lose
+those rows on upgrade and must re-pair. Client peers are
+unaffected.
+
+### Honest caveats
+
+- The `iperf3 server` tool transcript only renders after the server
+  exits (no streaming). Modal warns the operator not to close the
+  panel until the test completes.
+- Per-link iptables advertised-network ACCEPT rules are installed
+  on every replay but never explicitly removed. Stale rules from
+  deleted links are inert (their source overlay IP is no longer
+  bound) but accumulate. Cleanup pass deferred to a later release.
+- `app/federation.py` (the v4.0 module) remains in the tree as
+  dead code. Nothing imports it. Removal pending a separate sweep.
+- The `importer_privkey` column on `federation_links` is always
+  NULL after this release — the v4.2.0-rebuild registration variant
+  no longer generates per-link keypairs (both sides peer using
+  their wg0 server keypairs). Vestigial; will be dropped in v4.3.
+
+### Internal architecture (for git history)
+
+The path to this release went through three multisite designs:
+
+1. **v4.2.0-pre** (asymmetric server/client wg1) — published, then
+   scrapped. Required a new UDP port. Operator pushed back; we
+   wanted symmetric pairing without exposing extra surface.
+2. **v4.2.0-rebuild callback variant** — unpublished. Symmetric
+   peering on wg0 with a leg-2 callback over the (just-paired)
+   tunnel. Architectural deadlock: the callback could not traverse
+   a tunnel whose existence required the callback to have already
+   happened. Verified at runtime when wgA's `wg show wg0` reported
+   zero multisite peer entries after wgB's bundle import.
+3. **v4.2.0-rebuild registration variant** — this release. Two
+   copy-pastes, no callback, no bootstrap. Each side learns the
+   other's pubkey before the tunnel needs to exist.
+
+The cost was three weeks of development including a forced second
+schema migration. The benefit is a model with no remaining
+architectural circular dependencies that I can identify.
+
+---
+
+## [4.2.0-pre] — 2026-05-04
+
+**Major architectural change.** Replaces v4.0's symmetric federation
+with an asymmetric multisite design: one wgflow runs a wg1 UDP
+listener (server role); other wgflows dial in (client role). Hub-and-
+spoke topology — one server can host many clients. Once the WireGuard
+tunnel is up, both panels reach each other over the overlay
+(10.99.0.0/24) at port 8080 — no separate TCP listener exposed to
+the internet.
+
+This is the **routing layer**. The next release (v4.2.0) layers panel
+federation on top: tab strip across linked sites, cross-panel API
+proxy, selective config sync.
+
+### Added
+
+- **`app/multisite.py`.** New module replacing v4.0 federation logic:
+  conf bundle generation (server side), parsing with wgflow-multisite-*
+  metadata comments (client side), keypair/PSK/token generation,
+  overlay address allocation, kernel-side wg1 management (bring-up
+  in server or client mode, tear-down, replay-from-DB), handshake
+  reconciliation, pairing-token + panel-credential verification with
+  source-IP binding to the overlay subnet.
+
+- **API surface:**
+  - `GET /api/multisite/status` — role + counts + local overlay addr
+  - `GET /api/multisite/links` — list rows
+  - `POST /api/multisite/links/create-server-link` — server creates
+    a conf bundle for a client to import. Returns the bundle text +
+    pairing token expiry.
+  - `POST /api/multisite/links/import` — client imports a conf bundle
+  - `PUT /api/multisite/links/{id}` — toggle enabled / rename
+  - `DELETE /api/multisite/links/{id}` — tear down + remove
+  - `POST /api/multisite/handshake` — INBOUND from a client wgflow
+    over the tunnel. Source-IP-overlay-bound; verifies pairing token
+    on first call, issues long-lived panel credential.
+
+- **`WG_FED_PORT` env var** — UDP port for wg1's server-side
+  listener. Defaults to 56969 (operator's chosen default to avoid
+  conflict with conventional 51820/51821 wg0 ports). Configurable
+  via `WG_FED_PORT=N` in the env. Published in docker-compose.yml's
+  ports section as `${WG_FED_PORT:-56969}:${WG_FED_PORT:-56969}/udp`.
+
+- **`_ensure_multisite_baseline_rules` in iptables_manager.py.**
+  Default-deny FORWARD from the overlay (10.99.0.0/24) is enforced
+  by the existing WGFLOW_FORWARD tail DROP. Two specific allows
+  installed before the DROP:
+  - Overlay ↔ overlay (panel federation traffic)
+  - Overlay → tcp/8080 on the host (panel API access through the
+    tunnel)
+  Idempotent. Per-link explicit allows (e.g. "10.99.0.2 may reach
+  192.168.60.2:443") deferred to v4.3+ ACL UI.
+
+- **Pairing handshake protocol.** When the server creates a link, it
+  generates a one-time 256-bit hex pairing token (1-hour expiry)
+  embedded in the conf bundle as a `# wgflow-multisite-token: ...`
+  comment. The client side stores the token; on first panel-API
+  call to `/api/multisite/handshake` over the tunnel, it presents
+  the token. Server verifies + source-IP binding + issues a
+  long-lived panel credential. Subsequent calls use the credential.
+  Both are bound to the overlay address — a leaked credential is
+  useless from outside the tunnel.
+
+- **AllowedIPs safety filter on bundle generation.** Server-side
+  conf bundle construction strips `0.0.0.0/0` if it somehow ends
+  up in `advertised_networks`. Client-side bundle parsing rejects
+  any bundle with `0.0.0.0/0` in AllowedIPs (defense in depth
+  against hand-edited bundles). Same lockout-prevention philosophy
+  as v4.1.1 upstream-import.
+
+### Changed
+
+- **UI label:** "federation" → "multisite" in the panel header and
+  sub-section titles. Internal code identifiers (`federation_links`
+  table name, `data-panel-id="federation"`, Python function names)
+  unchanged to keep the diff surgical.
+
+- **Federation moved to wg1.** v4.0 made federation peers join wg0
+  (the gateway interface). v4.2 puts them on wg1 — a separate
+  kernel interface. Server-role and client-role traffic are now
+  isolated at the kernel level, eliminating the AllowedIPs collision
+  surface that v4.0 carried.
+
+- **Upstream interface allocation starts at wg2.** wg1 is reserved
+  for multisite federation. Existing upstream rows get their
+  interface_name renumbered on next replay if they were on wg1
+  (most won't be — wg1 was already federation territory in v4.0,
+  so upstream allocation effectively started at wg2 in practice).
+
+- **Federation panel JS rewritten.** The v4.0 `fedOpenPairModal`
+  and `fedOpenConnectModal` have new modal contents matching the
+  new flow: + create asks for name + endpoint + advertised
+  networks, generates a bundle, displays with copy-to-clipboard.
+  + import takes the pasted bundle. Both functions kept the same
+  names so the existing button click wiring still works.
+
+### Schema migration
+
+**Operator action required if upgrading from v4.0/4.1.x:** the
+`federation_links` table is dropped on first v4.2 boot and
+recreated with the new shape. Operator confirmed during design that
+v4.0 federation never worked correctly, so no real data was being
+preserved. Migration is wrapped in a SAVEPOINT for atomicity.
+
+The migration trigger is the presence of a `remote_wg_endpoint`
+column (v4.0-only) in the legacy schema. If you're on a fresh
+install, the v4.2 schema is created directly and the migration
+path is skipped.
+
+### Docker compose update required
+
+To enable multisite, add the new port to your `docker-compose.yml`:
+
+```yaml
+ports:
+  - "${WG_FED_PORT:-56969}:${WG_FED_PORT:-56969}/udp"
+```
+
+And the env var:
+
+```yaml
+environment:
+  WG_FED_PORT: ${WG_FED_PORT:-56969}
+```
+
+A wgflow that's only client-role (dialing out, never accepting
+inbound) doesn't strictly need the port published, but no harm in
+publishing it either way.
+
+### Not yet shipped (v4.2.0 backlog, in progress)
+
+- **Panel federation tab strip.** Cross-site panel views with tabs
+  at the top.
+- **Cross-panel API proxy.** Click into a remote site's tab, your
+  API calls go via the tunnel to the remote panel.
+- **Selective config sync.** DNS overrides as the first category;
+  asymmetric master/replica to avoid conflict resolution.
+
+### Not yet shipped (v4.3+ backlog)
+
+- **ACL UI for cross-site reachability.** Default-deny is in place
+  in iptables now; v4.3 adds the rule-editing UI on top. "Allow
+  tcp/443 to 192.168.60.2 from any 10.99.0.x" as a UI form.
+
+---
+
+## [4.1.1-alpha] — 2026-05-03
+
+Adds **upstream WireGuard client connections**. This wgflow can now
+be a *client* of one or more upstream WG endpoints (Mullvad,
+ProtonVPN, corporate VPN, another wgflow, etc.) — each upstream
+running on its own kernel interface (wg1, wg2, ...) and managed via
+the panel.
+
+### Fixed (post-initial-pack)
+
+- **Latent v3.x crash in `create_peer_chain` surfaced by replays.**
+  Reported during federation testing between two wgflow instances:
+  `iptables -D WGFLOW_FORWARD -s 10.1.69.6 -j WGFLOW_PEER_68 failed:
+  No chain/target/match by that name`. Root cause: the
+  `while _exists(): _run("-D")` pattern in iptables_manager assumes
+  iptables `-C` (check) and `-D` (delete) agree about whether a
+  jump-to-chain rule exists. They don't, in some legacy/nft
+  combinations: when the target chain has been flushed/dropped
+  externally, `-C` may still report the jump as present, but `-D`
+  refuses with "No chain/target/match by that name". Replays
+  involving the upstream and federation paths increase the
+  frequency of this state, so what was a latent v3.x bug now
+  reliably crashes during normal use. Replaced 4 chain-jump
+  removal sites with a new `_purge_jump()` helper that tolerates
+  iptables's refusal (logs and continues — the caller's
+  immediately-following recreate step reconciles whatever the
+  half-state was). Also hardened the LOG-rule cleanup at line 232
+  with the same pattern. Two unrelated `while _exists` loops
+  (line 331, ACL deny-rule cleanup) already had `check=False` so
+  weren't affected.
+
+### Added
+
+- **Upstream sub-section in the federation panel.** Layout A from
+  the design discussion: two stacked sub-tables inside the
+  federation panel, separated by subheaders. Top: existing
+  wgflow↔wgflow peerings (v4.0). Bottom: upstream client
+  connections (v4.1.1). Distinct sub-tables because the two are
+  architecturally different (different interfaces, different
+  routing, different actions); a "kind" column on a unified table
+  would have collapsed cleanly in mockups but produced disabled-
+  button mush in code.
+- **Two-stage import flow: paste → preview → confirm.** Operator
+  pastes a WireGuard client conf (or drops a `.conf` file into the
+  upload widget — primary input is paste-text per the design
+  discussion). The first POST hits `/api/upstream/preview` which
+  parses the conf, runs the AllowedIPs safety filter, and returns
+  what WOULD be created. The operator sees the filter diff (full-
+  tunnel replaced, overlapping CIDRs stripped) and can edit the
+  applied AllowedIPs before clicking "create."
+- **AllowedIPs lockout-prevention filter (Model 2).** Imported
+  configs declaring `0.0.0.0/0` (full tunnel) have it replaced with
+  RFC1918 (`10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16`) by default.
+  Any declared CIDR overlapping with: the wgflow client subnet
+  (`WG_SUBNET`), the federation overlay subnet, or the host's
+  primary panel-reachable network is also stripped. Both declared
+  and applied values are persisted; the UI surfaces the diff.
+  `0.0.0.0/0` is a hard refusal even when explicitly overridden —
+  routing the panel through the upstream is the most common first-
+  day mistake and the API rejects with a clear error rather than
+  letting the operator footgun.
+- **DNS upstream captured but not applied.** The conf's
+  `[Interface] DNS = ...` line is parsed and stored on the row.
+  Behavior decision deferred per the design discussion: capturing
+  it now lets us light up the "use this upstream's DNS" toggle in
+  a later release without re-importing.
+- **Per-upstream kernel interface.** Each upstream gets `wg1`,
+  `wg2`, ... allocated automatically when the row is inserted.
+  Operator picks the friendly `name`; the interface name is an
+  implementation detail. No `wg-quick` dependency — wgflow renders
+  its own conf and uses `ip` + `wg setconf` directly, matching
+  how server-side wg0 reload already works.
+- **Replay integration.** `_replay_state_to_kernel` now also
+  iterates enabled upstream rows and brings up their interfaces.
+  Disabled rows have their interface torn down. Errors on a single
+  upstream's bring-up are caught and stamped into `last_error` for
+  the UI to surface; they don't block the rest of replay.
+- **API surface.**
+  - `GET /api/upstream/connections` — list rows
+  - `POST /api/upstream/preview` — parse + filter, no DB write
+  - `POST /api/upstream/connections` — create after preview
+  - `PUT /api/upstream/connections/{id}` — rename / toggle / override AIPs
+  - `DELETE /api/upstream/connections/{id}` — tear down + remove
+- **DB schema:** new `upstream_connections` table with separate
+  `remote_allowed_ips_declared` and `remote_allowed_ips_applied`
+  columns so the diff is always visible to the operator.
+
+### Changed
+
+- **Federation panel restructured into two sub-sections.** The "+ pair"
+  and "+ connect" buttons moved from the panel header into the
+  peerings sub-section's subhead. New "+ import" button in the
+  upstream sub-section's subhead. Same panel, more concepts,
+  visually delimited.
+- **Mobile table-hide rule scoped tighter.** The federation panel's
+  `table.peers` hide-on-mobile rule was matching the new upstream
+  table too — but upstream has no card layout to swap to, same trap
+  as DNS-recent had in v4.0. Rule now scoped to `#fed-table`
+  specifically. Upstream table stays visible on mobile,
+  horizontally scrollable.
+
+### Notes
+
+- **Multi-peer configs unsupported.** A WG client conf with multiple
+  `[Peer]` sections is rejected with a clear error. Real client
+  configs almost always have exactly one peer (the upstream
+  server). If you have a multi-peer conf, split into multiple
+  imports.
+- **No NAT traversal helpers.** This wgflow has to be able to
+  reach the upstream's endpoint host:port. Behind symmetric NAT
+  on both sides → tunnel won't establish. Same constraint as
+  v4.0 federation; no DERP/STUN equivalent.
+- **DNS override behavior still TBD.** Captured per-upstream, not
+  yet applied to dnsmasq's `WG_DNS_UPSTREAMS`. Behavior decision
+  (which upstream's DNS wins when multiple are active, per-upstream
+  toggle, etc.) deferred to a later release.
+
+---
+
+## [4.1.0-alpha] — 2026-05-01
+
+First v4.1 release. Introduces **dynamic multi-source blocklist
+management** so operators can add, toggle, and refresh blocklist
+sources from the panel without rebuilding the container image.
+
+### Fixed (post-initial-pack)
+
+- **Federation panel was invisible after login.** `fedInit()` ran at
+  DOMContentLoaded, which fires *before* authentication is resolved.
+  The status endpoint returned 401, JS caught the error silently, and
+  the panel stayed hidden forever — the same code path that makes
+  federation legitimately invisible when `WG_MULTISITE=0` was firing
+  every time. Same problem in waiting for the new v4.1 blocklist
+  panel: its initial fetch also runs at DOMContentLoaded and would
+  401 pre-auth. Both `fedInit()` and `blocklistRefresh()` are now
+  also called from `bootApp` (already-authed path) and from the
+  successful-login handler — matching the established `loadInstanceConfig`
+  pattern. Both functions are idempotent so the redundant calls are
+  cheap. Added console.info/warn logging on the disabled and
+  auth-failed branches so a future "where's my panel?" report has
+  something to grep for in the browser console.
+
+### Added
+
+- **`dns · blocklists` panel.** New panel above DNS-recent (gated on
+  `WG_LOCAL_DNS=1` like the DNS-recent panel — without a local
+  resolver the blocklist has nothing to feed into). Lists every
+  source as a row with name, URL, last-fetched timestamp, entry
+  count, and overlap count (how many entries this source duplicates
+  from other enabled sources). Operator actions: enable/disable
+  toggle, add custom URL, delete, refresh-all.
+- **Multi-source merge.** Refresh fetches every enabled source,
+  parses, deduplicates across all of them, writes a single merged
+  file to `/etc/dnsmasq.d/blocklist.hosts` atomically (temp + os.replace),
+  and SIGHUPs dnsmasq. `addn-hosts` is reload-friendly so SIGHUP
+  picks up changes without dropping in-flight queries — distinct
+  from the `address=` directive saga in v3.8.3 which required
+  full process respawn.
+- **Per-source overlap reporting.** "−3,205 dup" appears next to a
+  source's entry count when 3,205 of its entries are also covered
+  by another enabled source. Tells the operator at a glance whether
+  enabling a second similar list is actually adding net coverage.
+- **Conditional GETs.** The fetch path sends `If-None-Match` based
+  on the previous successful fetch's ETag. Sources that haven't
+  changed return 304 and we skip the parse + merge for them. Saves
+  bandwidth on the common case of refreshing soon after a previous
+  refresh.
+- **Curated presets, seeded on first run** (only if the table is
+  empty — operator deletions are respected on subsequent restarts):
+  StevenBlack ads (default ON, preserves existing v4.0 behavior),
+  StevenBlack ads+porn, StevenBlack ads+gambling, URLhaus malware,
+  OISD big.
+- **Adblock Plus format detection.** Sources returning Adblock-style
+  `||domain^` rules are rejected with a clean error message rather
+  than silently dropping every line — half-imported lists are worse
+  than refused ones because the operator thinks blocking is in
+  effect when it mostly isn't.
+- **Hostname filtering.** The parser drops localhost / loopback /
+  broadcast names, hostnames that fail FQDN regex (no underscores,
+  must have a TLD), and bare IPs. Defensive: better to drop a
+  marginal entry than write garbage into dnsmasq's `addn-hosts`
+  file (which then fails to parse and breaks blocking entirely).
+- **Source size cap.** 25MB per source. Realistic hosts files are
+  1-10MB; the cap defends against an operator-supplied URL
+  returning multi-GB content. Streamed read aborts cleanly.
+- **API surface.**
+  - `GET /api/blocklist/status` — counts + last-merged timestamp
+  - `GET /api/blocklist/sources` — list rows
+  - `POST /api/blocklist/sources` — add custom URL
+  - `PUT /api/blocklist/sources/{id}` — toggle enabled
+  - `DELETE /api/blocklist/sources/{id}` — remove
+  - `POST /api/blocklist/refresh` — fetch + merge + reload
+
+### Changed
+
+- **Version string** bumped to `4.1.0-alpha` in `telemetry.py` and
+  the two HTML strings (brand subtitle + about modal).
+
+### Not yet shipped (v4.1+ backlog, on the way)
+
+- **Upstream WireGuard client connections.** Import a `wg-client.conf`
+  and run wgflow as a client of an upstream WG endpoint (Mullvad,
+  ProtonVPN, corporate WG, another wgflow). Will land in the next
+  v4.1.x release with: paste-text + file-upload import, AllowedIPs
+  filtering (defaults `0.0.0.0/0` to RFC1918 only to prevent panel
+  lockout), DNS-upstream capture, separate sub-section in the
+  federation panel.
+- **Scheduled blocklist refresh.** Manual-only in v4.1; cron-style
+  scheduling on the v4.2+ backlog.
+
+---
+
 ## [4.0.0-alpha] — 2026-05-01
 
 First v4 release. Introduces **multi-site federation** — the ability to
@@ -13,6 +550,19 @@ instance's panel becomes reachable from the others over a private
 overlay network.
 
 ### Fixed (post-initial-pack)
+
+- **Federation: modal buttons did nothing.** Both the "+ pair" and
+  "+ connect" buttons in the federation panel header opened modals
+  using `modal.classList.add('open')`, but the existing global modal
+  infrastructure uses `.show`, not `.open`. Adding `.open` was a no-op
+  CSS class — the modal stayed `display: none` and the user saw
+  nothing. Five occurrences across `fedOpenPairModal` and
+  `fedOpenConnectModal` swapped to `.show`. Verified the federation
+  panel itself was rendering correctly (it would have stayed hidden
+  if `/api/federation/status` had been the problem); this was purely
+  a class-name mismatch I introduced when writing the federation
+  panel against a mental model of the modal API rather than the
+  actual one.
 
 - **"Add to home screen" affordance for mobile.** The live popover now
   shows an `+ add to home screen` button when the layout is mobile

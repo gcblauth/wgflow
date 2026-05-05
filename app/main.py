@@ -4,8 +4,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import sqlite3
+import subprocess
 import tempfile
 import time
 from contextlib import asynccontextmanager
@@ -28,7 +30,9 @@ from . import acl as acl_mod
 from . import auth
 from . import dns_log as dns_log_mod
 from . import dns_overrides
-from . import federation
+from . import multisite as multisite_mod
+from . import blocklist as blocklist_mod
+from . import upstream as upstream_mod
 from . import inspector
 from . import installer_script
 from . import iptables_manager as ipt
@@ -47,9 +51,18 @@ from .models import (
     ACLUpdate,
     BatchByCount,
     BatchByNames,
-    FederationConnectRequest,
-    FederationLinkOut,
-    FederationPairCreate,
+    MultisiteCreateLinkRequest,
+    MultisiteImportCompleteRequest,
+    MultisiteRegistrationRequest,
+    MultisiteUpdateRequest,
+    BlocklistSourceCreate,
+    BlocklistSourceUpdate,
+    BlocklistSourceOut,
+    UpstreamPreviewRequest,
+    UpstreamCreateRequest,
+    UpstreamConnectionOut,
+    UpstreamPreviewOut,
+    UpstreamUpdateRequest,
     ImportCommit,
     InstanceConfig,
     MigrationToggle,
@@ -117,6 +130,11 @@ def _row_to_peer_out(conn, row) -> PeerOut:
     # present, but be defensive here too. Default to True so an
     # accidentally-NULL row gets safe behavior (visible + active).
     enabled_val = bool(row["enabled"]) if "enabled" in row.keys() and row["enabled"] is not None else True
+    # peer_type may be missing on databases pre-v4.2-rebuild migration
+    # — defensive default to 'client' so untagged rows render as
+    # ordinary peers (which is the right interpretation: anything
+    # that existed before peer_type was introduced is a client).
+    peer_type_val = row["peer_type"] if "peer_type" in row.keys() and row["peer_type"] else "client"
     return PeerOut(
         id=row["id"],
         name=row["name"],
@@ -127,61 +145,169 @@ def _row_to_peer_out(conn, row) -> PeerOut:
         dns=dns_val,
         has_private_key=has_priv,
         enabled=enabled_val,
+        peer_type=peer_type_val,
     )
 
 
+_WG_CONF_NAME_UNSAFE = re.compile(r"[^A-Za-z0-9_\-]")
+
+
+def _wg_conf_safe_name(name: str, fallback: str) -> str:
+    """Sanitize a peer name so it can safely appear as a `# {name}`
+    comment in a rendered wg conf.
+
+    `wg syncconf` parses what looks like a section header (`[Foo]`)
+    even when it follows a `#` — and operator-supplied names can
+    contain brackets, spaces, etc. We replace any character outside
+    the wg-conf-safe alphabet with underscore. If the result is
+    empty, use `fallback` (e.g. `multisite-link-7` keyed by row id).
+
+    The DB row keeps the original pretty name (the panel UI shows
+    that). Only the rendered conf uses the sanitized form.
+    """
+    safe = _WG_CONF_NAME_UNSAFE.sub("_", name or "")
+    return safe if safe else fallback
+
+
+def _live_wg0_pubkey() -> str:
+    """Return wg0's actual server pubkey by querying the kernel.
+
+    Falls back to SETTINGS.server_public_key_path if the kernel query
+    fails (interface not up yet, wg binary missing — neither expected
+    in production but we want this to fail gracefully). Logs a loud
+    warning if the file disagrees with the kernel; the kernel value
+    always wins because that's what packets are signed with on the
+    wire.
+
+    This is the SINGLE SOURCE OF TRUTH for wgflow's wg0 server
+    pubkey. Used by both the multisite registration (step 1) and
+    bundle (step 2) endpoints. Symmetric: both ends of a multisite
+    link peer with each other using their respective wg0 server
+    keypairs — there is NO per-link keypair.
+    """
+    pubkey = None
+    try:
+        proc = subprocess.run(
+            ["wg", "show", SETTINGS.interface, "public-key"],
+            capture_output=True, text=True, check=True,
+        )
+        pubkey = proc.stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        print(f"[multisite] warn: kernel pubkey lookup failed ({e!r}), "
+              f"falling back to {SETTINGS.server_public_key_path}",
+              flush=True)
+
+    if not pubkey:
+        try:
+            pubkey = SETTINGS.server_public_key_path.read_text().strip()
+        except FileNotFoundError:
+            raise HTTPException(
+                500,
+                "server public key not found at "
+                f"{SETTINGS.server_public_key_path} — has the wg keypair "
+                "been generated?",
+            )
+
+    # Defensive: warn if the file disagrees with the kernel.
+    try:
+        file_pubkey = SETTINGS.server_public_key_path.read_text().strip()
+        if file_pubkey and file_pubkey != pubkey:
+            print(f"[multisite] WARNING: server_public.key "
+                  f"({file_pubkey[:16]}...) does NOT match live wg0 "
+                  f"pubkey ({pubkey[:16]}...). Using kernel value. "
+                  f"Consider regenerating the file: "
+                  f"wg show {SETTINGS.interface} public-key > "
+                  f"{SETTINGS.server_public_key_path}",
+                  flush=True)
+    except FileNotFoundError:
+        pass
+
+    return pubkey
+
+
 def _load_all_peers_for_sync() -> List[wg.PeerConfig]:
+    """Build the wg0 [Peer] list from sqlite for `wg syncconf`.
+
+    Two flavors of peer end up on wg0:
+
+      1. Client peers (peer_type='client'). Their AllowedIPs is just
+         their tunnel /32 — the cryptokey routing table that the
+         server uses to validate incoming source addresses.
+
+      2. Mgmt peers (peer_type='multisite', v4.2-rebuild). Their
+         AllowedIPs is their overlay /32 PLUS any networks the remote
+         wgflow advertised through this link (so traffic destined for
+         those networks gets routed through this peer's tunnel).
+         The advertised networks are stored on federation_links.
+         remote_advertised, joined here.
+
+    Both are returned as the same wg.PeerConfig shape — the
+    distinction matters only for AllowedIPs construction.
+    """
     conn = get_db().conn
-    rows = conn.execute(
-        "SELECT name, public_key, preshared_key, address FROM peers WHERE enabled = 1"
+
+    # Client peers: simple shape, AllowedIPs = just the /32.
+    client_rows = conn.execute(
+        "SELECT id, name, public_key, preshared_key, address "
+        "FROM peers WHERE enabled = 1 AND peer_type = 'client'"
     ).fetchall()
-    client_peers = [
+    out: List[wg.PeerConfig] = [
         wg.PeerConfig(
-            name=r["name"],
+            name=_wg_conf_safe_name(r["name"], f"peer-{r['id']}"),
             public_key=r["public_key"],
             preshared_key=r["preshared_key"],
             address=r["address"],
         )
-        for r in rows
+        for r in client_rows
     ]
-    # v4.0: federation peers join the same wg interface as a separate
-    # class. They have an Endpoint (we dial out) and a keepalive so the
-    # tunnel survives NAT on either side. AllowedIPs is the remote's
-    # /32 on the federation overlay subnet.
-    return client_peers + _load_federation_peers_for_sync()
+
+    # Mgmt peers: AllowedIPs = overlay /32 + remote_advertised CIDRs.
+    # Joined to federation_links to pick up the per-link advertised
+    # networks. The peer.address column already holds the overlay /32;
+    # we extend it with advertised networks for the AllowedIPs render.
+    mgmt_rows = conn.execute(
+        "SELECT p.id, p.name, p.public_key, p.preshared_key, p.address, "
+        "       fl.remote_advertised, fl.remote_endpoint "
+        "FROM peers p "
+        "LEFT JOIN federation_links fl ON fl.peer_id = p.id "
+        "WHERE p.enabled = 1 AND p.peer_type = 'multisite'"
+    ).fetchall()
+    for r in mgmt_rows:
+        aips = [r["address"]]   # overlay /32 first
+        adv = (r["remote_advertised"] or "").strip()
+        if adv:
+            for cidr in adv.split(","):
+                cidr = cidr.strip()
+                if cidr and cidr not in aips and cidr not in ("0.0.0.0/0", "::/0"):
+                    aips.append(cidr)
+        safe_name = _wg_conf_safe_name(r["name"], f"multisite-link-{r['id']}")
+        out.append(wg.PeerConfig(
+            name=safe_name,
+            public_key=r["public_key"],
+            preshared_key=r["preshared_key"],
+            address=", ".join(aips),
+            endpoint=r["remote_endpoint"],
+            # Keep the tunnel alive across NAT — multisite is meant to
+            # survive idle periods (panel federation polls only every
+            # 5s; without keepalive a NAT mapping could expire).
+            persistent_keepalive=25,
+        ))
+
+    return out
 
 
 def _load_federation_peers_for_sync() -> List[wg.PeerConfig]:
-    """Build PeerConfig entries for every enabled federation_links row.
+    """Returns [] in v4.2+. Kept as a function rather than removing
+    callers because there might still be one or two; safe-empty
+    behavior makes the migration boring.
 
-    Returns [] when multisite is disabled, the table is empty, or every
-    row is disabled. Each returned PeerConfig carries an Endpoint and
-    PersistentKeepalive=25 — federation peers are mutual-dialer (either
-    side initiates), so we always set both.
-
-    The PeerConfig's `name` column gets a "fed:" prefix so the rendered
-    wg0.conf comments make it obvious which entries are federation
-    peers when an operator inspects the file by hand.
+    v4.0 used this to inject federation peers into wg0's peer list,
+    sharing one kernel interface for client + federation traffic.
+    v4.2-pre moved federation to wg1; v4.2-rebuild moves it back to
+    wg0 but as peer_type='multisite' rows in the peers table, which
+    are now picked up by _load_all_peers_for_sync above.
     """
-    if not SETTINGS.multisite_enabled:
-        return []
-    conn = get_db().conn
-    rows = conn.execute(
-        "SELECT id, name, remote_pubkey, psk, remote_wg_endpoint, "
-        "remote_fed_addr "
-        "FROM federation_links WHERE enabled = 1"
-    ).fetchall()
-    out: List[wg.PeerConfig] = []
-    for r in rows:
-        out.append(wg.PeerConfig(
-            name=f"fed:{r['name']}",
-            public_key=r["remote_pubkey"],
-            preshared_key=r["psk"],
-            address=r["remote_fed_addr"],
-            endpoint=r["remote_wg_endpoint"],
-            persistent_keepalive=25,
-        ))
-    return out
+    return []
 
 
 def _load_acl_alias_lookup(conn=None) -> dict:
@@ -309,16 +435,36 @@ def _replay_state_to_kernel() -> None:
     else:
         ipt.disable_mss_clamp()
 
-    # v4.0: federation chains. One drop-only chain per enabled link so
-    # FORWARD from a federated wgflow's overlay address is hard-blocked
-    # at iptables. Disabled rows do not get a chain (replay tears down
-    # state for disabled rows; re-enable triggers a fresh setup).
-    if SETTINGS.multisite_enabled:
-        fed_rows = conn.execute(
-            "SELECT id, remote_fed_addr FROM federation_links WHERE enabled = 1"
-        ).fetchall()
-        for fr in fed_rows:
-            ipt.create_federation_chain(fr["id"], fr["remote_fed_addr"])
+    # v4.2-rebuild: multisite no longer has a separate wg1 kernel
+    # interface. Mgmt peers are regular wg0 peers tagged
+    # peer_type='multisite' — they're already accounted for above by
+    # the same syncconf/iptables path as client peers (see
+    # _load_peers_for_sync). The only kernel-side multisite work
+    # left is reconciling wg0's secondary overlay address — wg0
+    # gets a 10.99.0.X/32 added alongside its primary address when
+    # any multisite link is enabled, removed otherwise.
+    multisite_mod.reconcile_overlay_address(conn, interface=SETTINGS.interface)
+    # Routes for multisite: `wg syncconf` doesn't install routes for
+    # AllowedIPs (only `wg-quick up` does), and we add multisite peers
+    # via syncconf after the initial bring-up. Without explicit routes
+    # the kernel default-routes overlay packets out eth0 and they never
+    # reach the tunnel. Idempotent — see reconcile_routes for details.
+    multisite_mod.reconcile_routes(conn, interface=SETTINGS.interface)
+
+    # Re-run the multisite iptables baseline (overlay↔overlay,
+    # overlay→tcp/8080) with the live conn so per-link advertised-
+    # network ACCEPT rules are installed alongside. Idempotent —
+    # _exists check inside the helper short-circuits if already
+    # present.
+    ipt.ensure_multisite_baseline_rules(conn=conn)
+
+    # v4.1.1: upstream WG client connections. Each enabled row gets
+    # its own kernel interface (wg2, wg3, ... — wg1 is reserved for
+    # potential future use). Disabled rows have their interface torn
+    # down. Errors on a single upstream don't block the others —
+    # they're caught inside replay_to_kernel and stamped into the
+    # row's last_error column for the UI to show.
+    upstream_mod.replay_to_kernel(conn)
 
 
 def _peer_id_for_ip(peer_ip: str) -> Optional[int]:
@@ -700,8 +846,23 @@ def _sync_wg() -> None:
 
 @app.get("/api/peers", response_model=List[PeerOut])
 def list_peers():
+    """List ALL peers — both client peers and multisite mgmt peers.
+
+    v4.2-rebuild (initial): multisite peers were filtered out so
+    they only appeared in the multisite panel.
+    Updated: include them, but the frontend distinguishes via
+    peer_type and renders multisite peers with a badge + restricted
+    affordances (no ACL editor, no downloadable conf, delete refuses
+    and redirects to the multisite panel).
+
+    The reasoning for showing them here: operators want a single
+    place to see "what's actually connected to my wg0 right now"
+    without flipping between two panels for the same kernel state.
+    """
     conn = get_db().conn
-    rows = conn.execute("SELECT * FROM peers ORDER BY id").fetchall()
+    rows = conn.execute(
+        "SELECT * FROM peers ORDER BY peer_type, id"
+    ).fetchall()
     return [_row_to_peer_out(conn, r) for r in rows]
 
 
@@ -800,9 +961,24 @@ def create_peers_by_count(body: BatchByCount):
 @app.delete("/api/peers/{peer_id}", status_code=204)
 def delete_peer(peer_id: int):
     conn = get_db().conn
-    row = conn.execute("SELECT address FROM peers WHERE id = ?", (peer_id,)).fetchone()
+    row = conn.execute(
+        "SELECT address, peer_type FROM peers WHERE id = ?", (peer_id,)
+    ).fetchone()
     if not row:
         raise HTTPException(404, "peer not found")
+    # v4.2-rebuild: multisite peers can't be deleted via the live-peers
+    # endpoint. They're paired with a federation_links row, and
+    # deleting just one half leaves dangling state. The multisite
+    # panel's delete flow handles both correctly. Surface the
+    # restriction with a clear error so the operator knows where to
+    # look.
+    if "peer_type" in row.keys() and row["peer_type"] == "multisite":
+        raise HTTPException(
+            409,
+            "this is a multisite peer — delete via the Multisite panel "
+            "instead. deleting it from here would leave the paired "
+            "federation_links row in an inconsistent state.",
+        )
 
     with get_db().write() as c:
         c.execute("DELETE FROM peers WHERE id = ?", (peer_id,))
@@ -879,8 +1055,20 @@ def delete_all_peers(confirm: str = ""):
 @app.put("/api/peers/{peer_id}/acl", response_model=PeerOut)
 def update_peer_acl(peer_id: int, body: ACLUpdate):
     conn = get_db().conn
-    if not conn.execute("SELECT 1 FROM peers WHERE id = ?", (peer_id,)).fetchone():
+    row = conn.execute(
+        "SELECT peer_type FROM peers WHERE id = ?", (peer_id,)
+    ).fetchone()
+    if not row:
         raise HTTPException(404, "peer not found")
+    # Multisite peers don't have hand-managed ACLs — their reach is
+    # controlled by the federation_links advertised-networks fields,
+    # edited via the Multisite panel.
+    if "peer_type" in row.keys() and row["peer_type"] == "multisite":
+        raise HTTPException(
+            409,
+            "ACLs aren't editable on multisite peers — use the "
+            "advertised-networks fields on the multisite link instead.",
+        )
 
     try:
         entries = [acl_mod.parse_entry(e.raw) for e in body.acl]
@@ -3289,447 +3477,1044 @@ async def ws_status(websocket: WebSocket):
 
 
 # ---------------------------------------------------------------------------
-# v4.0: federation API
+# v4.2-rebuild: multisite API (registration-then-bundle, no callback)
 # ---------------------------------------------------------------------------
-# Endpoints:
-#   GET    /api/federation/status          → multisite enabled? local addr? counts.
-#   GET    /api/federation/links           → list links with status.
-#   POST   /api/federation/links/pair      → responder: generate pairing URL.
-#   GET    /api/federation/links/pending   → responder: peek at the open window.
-#   DELETE /api/federation/links/pending   → responder: cancel the open window.
-#   POST   /api/federation/links/connect   → initiator: paste URL, run handshake.
-#   POST   /api/federation/links/{id}/probe → either side: ping the remote panel
-#                                              over the tunnel + reconcile status.
-#   POST   /api/federation/links/{id}/enabled → toggle enable/disable (no delete).
-#   DELETE /api/federation/links/{id}      → tear down + remove row.
-#   POST   /api/federation/handshake       → INBOUND from a remote wgflow.
-#                                              Public-ish (gated by code window).
+# Symmetric peering on wg0. Two-step copy-paste pairing — no callback,
+# no chicken-and-egg.
 #
-# All operator-facing endpoints require panel auth via the existing
-# require_auth dependency. The handshake endpoint does NOT — it can't,
-# the caller is another wgflow with no panel session — but it's gated
-# by the per-pairing one-time code state machine in federation.py.
-
-def _multisite_required() -> None:
-    """Raise 404 (not 403) when WG_MULTISITE is off.
-
-    404 because we don't want the existence of these endpoints to be a
-    fingerprintable feature. With multisite off, the routes behave as
-    if they don't exist.
-    """
-    if not SETTINGS.multisite_enabled:
-        raise HTTPException(404, "not found")
-
-
-def _server_instance_meta() -> tuple:
-    """Read (instance_id, instance_name) for inclusion in handshake bundles."""
-    conn = get_db().conn
-    iid = conn.execute(
-        "SELECT value FROM network_settings WHERE key='instance_id'"
-    ).fetchone()
-    iname = conn.execute(
-        "SELECT value FROM network_settings WHERE key='instance_name'"
-    ).fetchone()
-    return (
-        (iid["value"] if iid else ""),
-        (iname["value"] if iname else ""),
-    )
-
-
-def _federation_link_to_out(row) -> FederationLinkOut:
-    """sqlite Row → FederationLinkOut. Tolerant of missing columns for
-    forward-compat with future schema additions."""
-    return FederationLinkOut(
-        id=row["id"],
-        name=row["name"],
-        role=row["role"],
-        status=row["status"],
-        enabled=bool(row["enabled"]),
-        local_fed_addr=row["local_fed_addr"],
-        remote_fed_addr=row["remote_fed_addr"],
-        remote_wg_endpoint=row["remote_wg_endpoint"],
-        remote_panel_endpoint=row["remote_panel_endpoint"],
-        remote_instance_id=row["remote_instance_id"],
-        remote_instance_name=row["remote_instance_name"],
-        last_handshake_ts=row["last_handshake_ts"],
-        last_error=row["last_error"],
-        created_at=row["created_at"],
-    )
+# Flow:
+#   1. importer (wgB):
+#        POST /api/multisite/registration
+#        → wgflow generates keypair locally, allocates overlay addr,
+#          stashes privkey on a pending-bundle row, returns
+#          registration text. Operator copies.
+#   2. creator (wgA):
+#        POST /api/multisite/links {registration: "..."}
+#        → parse registration, allocate own overlay, generate PSK,
+#          INSERT wgB AS A wg0 PEER IMMEDIATELY (peer_type=multisite),
+#          persist established row, return bundle text. Operator copies
+#          back. wgA is now ready to handshake with wgB the moment
+#          wgB has wgA's pubkey.
+#   3. importer (wgB):
+#        POST /api/multisite/links/{id}/import-complete {bundle: "..."}
+#        → parse bundle, INSERT wgA AS A wg0 PEER using stashed
+#          privkey, transition status to 'established'. Tunnel
+#          handshakes within ~5s; overlay reachable.
+#
+# No background reconciliation needed — every step's prerequisites are
+# satisfied before the step runs.
+#
+# Endpoints:
+#   GET    /api/multisite/status                  → counts + local overlay
+#   GET    /api/multisite/links                   → list rows
+#   POST   /api/multisite/registration            → step 1 (importer)
+#   POST   /api/multisite/links                   → step 2 (creator, takes registration)
+#   POST   /api/multisite/links/{id}/import-complete → step 3 (importer, takes bundle)
+#   PUT    /api/multisite/links/{id}              → toggle / rename
+#   DELETE /api/multisite/links/{id}              → remove
 
 
-@app.get("/api/federation/status")
-def federation_status():
-    """Lightweight info: feature flag state, local overlay address, counts.
+def _multisite_link_to_out(conn, row) -> dict:
+    """Shape a federation_links row + paired peer for the API."""
+    peer = None
+    if row["peer_id"]:
+        peer = conn.execute(
+            "SELECT name, public_key, address, enabled, last_handshake_at "
+            "FROM peers WHERE id=?", (row["peer_id"],),
+        ).fetchone()
 
-    Always returns 200 with `enabled: false` when multisite is off, so
-    the UI can hide the panel cleanly without 404 noise. (Distinct from
-    the operator-facing routes which 404 — the *status* call is
-    intentionally cheap and silent for UI bootstrapping.)
-    """
-    if not SETTINGS.multisite_enabled:
-        return {"enabled": False}
-    conn = get_db().conn
-    local_addr = conn.execute(
-        "SELECT value FROM network_settings WHERE key='federation_local_addr'"
-    ).fetchone()
-    by_status = dict(conn.execute(
-        "SELECT status, COUNT(*) FROM federation_links GROUP BY status"
-    ).fetchall())
-    pending_token = federation.TOKEN_STORE.peek()
     return {
-        "enabled": True,
-        "subnet": str(SETTINGS.federation_subnet),
-        "local_fed_addr": (local_addr["value"] if local_addr else "") or "",
-        "wg_endpoint": SETTINGS.federation_wg_endpoint,
-        "links_by_status": by_status,
-        "pending_token_active": pending_token is not None,
-        "pending_token_seconds_left": (
-            int(federation.PAIRING_TOKEN_TTL_SECONDS
-                - (time.time() - pending_token.created_at))
-            if pending_token else 0
-        ),
+        "id": row["id"],
+        "name": row["name"],
+        "role": row["role"],
+        "status": row["status"],
+        "local_overlay_addr": row["local_overlay_addr"],
+        "remote_overlay_addr": row["remote_overlay_addr"],
+        "local_advertised": row["local_advertised"] or "",
+        "remote_advertised": row["remote_advertised"] or "",
+        "remote_endpoint": row["remote_endpoint"] or "",
+        "remote_instance_id": row["remote_instance_id"],
+        "remote_instance_name": row["remote_instance_name"],
+        "last_handshake_ts": row["last_handshake_ts"],
+        "last_error": row["last_error"],
+        "enabled": bool(row["enabled"]),
+        "created_at": row["created_at"],
+        # Importer-side rows in pending-bundle have a privkey stashed;
+        # surface only the boolean to the panel (privkey itself never
+        # leaves the server). Helps the UI show "waiting for bundle"
+        # state distinctly from "established but no handshake yet."
+        "has_pending_privkey": bool(row["importer_privkey"]),
+        # Paired peer info (None until peer_id is set).
+        "peer_id": row["peer_id"],
+        "peer_name": peer["name"] if peer else None,
+        "peer_public_key": peer["public_key"] if peer else None,
+        "peer_address": peer["address"] if peer else None,
+        "peer_last_handshake": peer["last_handshake_at"] if peer else None,
     }
 
 
-@app.get("/api/federation/links", response_model=List[FederationLinkOut])
-def list_federation_links():
-    _multisite_required()
-    rows = get_db().conn.execute(
+@app.get("/api/multisite/status")
+def multisite_status():
+    """Lightweight summary for the panel header."""
+    if not SETTINGS.multisite_enabled:
+        return {"enabled": False, "reason": "WG_MULTISITE=0"}
+
+    try:
+        conn = get_db().conn
+        rows = conn.execute(
+            "SELECT role, status, enabled, local_overlay_addr "
+            "FROM federation_links"
+        ).fetchall()
+        creator_links = sum(1 for r in rows if r["role"] == "creator")
+        importer_links = sum(1 for r in rows if r["role"] == "importer")
+        established = sum(
+            1 for r in rows
+            if r["enabled"] and r["status"] == "established"
+        )
+        pending_bundle = sum(
+            1 for r in rows
+            if r["enabled"] and r["status"] == "pending-bundle"
+        )
+        # Local overlay address — first row's local_overlay_addr if
+        # any links exist. All rows on a given wgflow share the same
+        # local_overlay_addr (it's our identity on the overlay).
+        local_addr = None
+        if rows:
+            la = rows[0]["local_overlay_addr"]
+            if la:
+                local_addr = la.split("/", 1)[0]
+
+        return {
+            "enabled": True,
+            "creator_links": creator_links,
+            "importer_links": importer_links,
+            "established": established,
+            "pending_bundle": pending_bundle,
+            "total": len(rows),
+            "local_addr": local_addr,
+            "default_endpoint": SETTINGS.federation_wg_endpoint,
+        }
+    except Exception as e:
+        print(f"[multisite] status read failed: {type(e).__name__}: {e}",
+              flush=True)
+        return {
+            "enabled": False,
+            "reason": f"status read error: {type(e).__name__}",
+            "error_detail": str(e)[:300],
+        }
+
+
+@app.get("/api/multisite/links")
+def multisite_list_links():
+    conn = get_db().conn
+    rows = conn.execute(
         "SELECT * FROM federation_links ORDER BY id"
     ).fetchall()
-    return [_federation_link_to_out(r) for r in rows]
+    return [_multisite_link_to_out(conn, r) for r in rows]
 
 
-@app.post("/api/federation/links/pair")
-def federation_pair_token(body: FederationPairCreate):
-    """Mint a pairing token + URL for the operator to copy.
+def _validate_advertised(advertised: list, label: str) -> List[str]:
+    """Shared advertised-CIDR validator used by both registration and
+    create-link endpoints. Refuses 0.0.0.0/0 and ::/0 as a hard rule
+    (lockout prevention — full-tunnel through a multisite link would
+    rehome all the remote's traffic through us)."""
+    out: List[str] = []
+    for cidr in (advertised or []):
+        cidr = cidr.strip()
+        if not cidr:
+            continue
+        if cidr in ("0.0.0.0/0", "::/0"):
+            raise HTTPException(
+                400,
+                f"0.0.0.0/0 in {label} would full-tunnel the remote "
+                "wgflow through this one — refused. List specific "
+                "CIDRs only.",
+            )
+        try:
+            import ipaddress as _ip
+            _ip.ip_network(cidr, strict=False)
+        except ValueError:
+            raise HTTPException(400, f"{label} CIDR malformed: {cidr}")
+        if cidr not in out:
+            out.append(cidr)
+    return out
 
-    Replaces any existing pending token. Allocates this box's local
-    federation address if not yet allocated (so the URL is meaningful
-    immediately — once the partner pastes it, both sides have addresses
-    ready).
+
+def _allocate_two_overlay_addrs(conn, prefer_local: str):
+    """Pick two non-conflicting overlay addresses in 10.99.0.0/24.
+
+    Returns (local, remote) where local takes prefer_local if free,
+    and remote is the next free that is not local. Used by both the
+    registration endpoint (prefer_local=DEFAULT_IMPORTER_OVERLAY_ADDR)
+    and the create-from-registration endpoint (prefer_local=
+    DEFAULT_CREATOR_OVERLAY_ADDR), but the latter passes the parsed
+    importer overlay as the *remote* (already known) and we only
+    allocate local in that case.
     """
-    _multisite_required()
-    with get_db().write() as conn:
-        federation.ensure_local_addr(conn)
-    tok = federation.TOKEN_STORE.issue(body.name_hint)
-    pair_url = federation.build_pair_url(body.panel_endpoint, tok.code)
-    return {
-        "pair_url": pair_url,
-        "code": tok.code,
-        "expires_in_seconds": federation.PAIRING_TOKEN_TTL_SECONDS,
-        "name_hint": tok.name_hint,
-    }
+    local = multisite_mod.allocate_overlay_addr(conn, prefer=prefer_local)
+    used = {local}
+    existing = conn.execute(
+        "SELECT local_overlay_addr, remote_overlay_addr "
+        "FROM federation_links"
+    ).fetchall()
+    for r in existing:
+        for col in ("local_overlay_addr", "remote_overlay_addr"):
+            v = (r[col] or "").split("/", 1)[0].strip()
+            if v:
+                used.add(v)
+    for octet in range(1, 255):
+        cand = f"10.99.0.{octet}"
+        if cand not in used:
+            return local, cand
+    raise HTTPException(500, "overlay address pool exhausted")
 
 
-@app.get("/api/federation/links/pending")
-def federation_pending_token():
-    """Whether a pairing window is currently open. UI uses this to render
-    the countdown indicator after the modal closes."""
-    _multisite_required()
-    tok = federation.TOKEN_STORE.peek()
-    if tok is None:
-        return {"active": False}
-    return {
-        "active": True,
-        "name_hint": tok.name_hint,
-        "seconds_left": int(
-            federation.PAIRING_TOKEN_TTL_SECONDS
-            - (time.time() - tok.created_at)
-        ),
-    }
+@app.post("/api/multisite/registration", status_code=201)
+def multisite_registration(body: MultisiteRegistrationRequest):
+    """STEP 1 (importer): generate keypair, allocate overlay, return
+    registration text for the operator to paste into the OTHER
+    wgflow's '+ create from registration' form.
 
+    Persists a federation_links row with role='importer',
+    status='pending-bundle', importer_privkey set. The privkey stays
+    on this row until the bundle import completes (step 3), at which
+    point it moves to peers.private_key and is cleared from this row.
 
-@app.delete("/api/federation/links/pending", status_code=204)
-def federation_cancel_pending_token():
-    _multisite_required()
-    federation.TOKEN_STORE.cancel()
-    return Response(status_code=204)
-
-
-@app.post("/api/federation/links/connect", response_model=FederationLinkOut)
-async def federation_connect(body: FederationConnectRequest):
-    """Initiator side: paste pair URL, run handshake, persist link.
-
-    Synchronous: the operator clicks Connect and waits ~1-3 seconds for
-    the remote handshake + DB write + state replay. Errors surface
-    inline (the UI shows the message in a status banner). On success
-    the row is persisted and replay has installed the kernel peer; the
-    UI refreshes the link list and starts polling status.
+    Triggers replay so wg0 picks up the new overlay address. No peer
+    entry yet on this side — that arrives in step 3 with the bundle.
     """
-    _multisite_required()
+    if not SETTINGS.multisite_enabled:
+        raise HTTPException(403, "multisite is disabled (WG_MULTISITE=0)")
 
-    # Allocate local fed addr first (write transaction so concurrent
-    # connect calls can't pick the same /32 — there's no realistic
-    # contention here, but cheap to do right).
-    with get_db().write() as conn:
-        local_addr = federation.ensure_local_addr(conn)
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(400, "name is required")
 
-    iid, iname = _server_instance_meta()
+    advertised = _validate_advertised(body.advertised_networks,
+                                      "advertised_networks")
 
-    # Reject duplicate names BEFORE the handshake so we don't pair with
-    # the remote, then have to roll back the link because of a name
-    # collision. Cheap pre-flight; race-loses on concurrent identical
-    # calls but the operator pasting the same URL twice is implausible.
-    dup = get_db().conn.execute(
-        "SELECT 1 FROM federation_links WHERE name=?", (body.name,)
-    ).fetchone()
-    if dup:
-        raise HTTPException(409, f"link name '{body.name}' already exists")
-
-    try:
-        result = await federation.initiate_handshake(
-            pair_url=body.pair_url,
-            link_name=body.name,
-            local_fed_addr=local_addr,
-            local_instance_id=iid,
-            local_instance_name=iname,
+    endpoint = (body.endpoint or "").strip() or SETTINGS.federation_wg_endpoint
+    if ":" not in endpoint:
+        raise HTTPException(
+            400, "endpoint must be host:port (e.g. vpn.example.com:51820)"
         )
-    except ValueError as e:
-        raise HTTPException(400, f"bad pairing URL: {e}")
-    except Exception as e:
-        # Network / TLS / remote-side error. Surface message verbatim;
-        # the operator needs to see what the remote returned.
-        raise HTTPException(502, f"handshake failed: {e}")
 
-    # Persist the link row. Use INSERT … RETURNING * so we can build
-    # the response without a second SELECT.
+    privkey, pubkey = (None, _live_wg0_pubkey())
+
     with get_db().write() as conn:
-        cur = conn.execute(
+        if conn.execute(
+            "SELECT 1 FROM federation_links WHERE name=?", (name,)
+        ).fetchone():
+            raise HTTPException(409, f"link '{name}' already exists")
+
+        # Allocate our overlay (.2 by default for importer side).
+        # remote_overlay is unknown until the bundle arrives — leave
+        # placeholder.
+        local_overlay = multisite_mod.allocate_overlay_addr(
+            conn, prefer=multisite_mod.DEFAULT_IMPORTER_OVERLAY_ADDR,
+        )
+
+        conn.execute(
             """INSERT INTO federation_links (
-                name, role,
-                local_privkey, local_pubkey, remote_pubkey, psk,
-                remote_wg_endpoint,
-                local_fed_addr, remote_fed_addr,
-                remote_panel_endpoint,
-                remote_instance_id, remote_instance_name,
+                name, role, peer_id,
+                importer_privkey, psk,
+                local_overlay_addr, remote_overlay_addr,
+                local_advertised, remote_advertised,
+                remote_endpoint,
                 status, enabled
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 1)""",
-            (result.name, result.role,
-             result.local_privkey, result.local_pubkey,
-             result.remote_pubkey, result.psk,
-             result.remote_wg_endpoint,
-             result.local_fed_addr, result.remote_fed_addr,
-             result.remote_panel_endpoint,
-             result.remote_instance_id, result.remote_instance_name),
+            ) VALUES (?, 'importer', NULL,
+                      ?, '',
+                      ?, '',
+                      ?, '',
+                      '',
+                      'pending-bundle', 1)""",
+            (name, privkey,
+             f"{local_overlay}/32",
+             ",".join(advertised)),
         )
-        new_id = cur.lastrowid
+        link_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
-    # Push to kernel: wg peer + iptables drop chain.
+    # Replay so wg0 picks up our overlay /32 as a secondary address.
+    # No mgmt peer yet (that's step 3) — but we still need the
+    # overlay address bound so step 3's replay doesn't have to do
+    # double work, and so the operator can ping their own .2 as a
+    # smoke test.
     _replay_state_to_kernel()
 
-    # Return the freshly-inserted row. Status will still be 'pending'
-    # at this instant — the first WG handshake usually completes within
-    # a couple of seconds, and the metrics/probe loop will update.
-    row = get_db().conn.execute(
-        "SELECT * FROM federation_links WHERE id=?", (new_id,)
-    ).fetchone()
-    return _federation_link_to_out(row)
+    registration_text = multisite_mod.build_registration(
+        suggested_link_name=name,
+        importer_pubkey=pubkey,
+        importer_endpoint=endpoint,
+        importer_overlay_addr=local_overlay,
+        importer_advertised=advertised,
+    )
+
+    return {
+        "id": link_id,
+        "name": name,
+        "local_overlay_addr": local_overlay,
+        "registration": registration_text,
+    }
 
 
-@app.post("/api/federation/links/{link_id}/probe", response_model=FederationLinkOut)
-async def federation_probe_link(link_id: int):
-    """Reconcile WG handshake status + try a panel HTTP probe over the
-    tunnel. Updates the row, returns it.
+@app.post("/api/multisite/links", status_code=201)
+def multisite_create_from_registration(body: MultisiteCreateLinkRequest):
+    """STEP 2 (creator): parse a registration from the OTHER wgflow,
+    install wgB as a wg0 peer NOW, return the bundle for the operator
+    to paste back.
 
-    The probe is best-effort: if the remote panel isn't reachable on
-    its overlay address (e.g. operator binds the panel only to a public
-    NIC), status reflects WG handshake freshness only. The probe result
-    is stashed in last_error for the UI to display.
+    This is the step that breaks the chicken-and-egg in the v4.2-pre
+    callback design — we have wgB's pubkey from the registration, so
+    we can put wgB's peer entry in place immediately. The moment wgB
+    has our pubkey too (after pasting the bundle in step 3), the
+    tunnel handshakes.
+
+    name override: if body.name is set, it overrides the suggested
+    name from the registration. Operators frequently want to label
+    links by what THEY think of the remote, not what the remote
+    suggested.
     """
-    _multisite_required()
-    conn = get_db().conn
-    row = conn.execute(
-        "SELECT * FROM federation_links WHERE id=?", (link_id,)
-    ).fetchone()
-    if row is None:
-        raise HTTPException(404, "link not found")
+    if not SETTINGS.multisite_enabled:
+        raise HTTPException(403, "multisite is disabled (WG_MULTISITE=0)")
 
-    # First: refresh from wg show.
     try:
-        dump = wg.show_dump()
-    except Exception:
-        dump = []
-    with get_db().write() as wconn:
-        federation.reconcile_link_status(wconn, dump)
+        parsed = multisite_mod.parse_registration(body.registration)
+    except multisite_mod.MultisiteError as e:
+        raise HTTPException(400, str(e))
 
-    # Then: HTTP probe over the tunnel (only if the link is supposed to
-    # be enabled — no point probing a disabled row).
-    if row["enabled"]:
-        ok, msg = await federation.probe_remote_panel(row["remote_fed_addr"])
-        with get_db().write() as wconn:
-            wconn.execute(
-                "UPDATE federation_links SET last_error=? WHERE id=?",
-                (None if ok else f"probe: {msg}", link_id),
-            )
+    name = (body.name or "").strip() or parsed.suggested_link_name
+    advertised = _validate_advertised(body.advertised_networks,
+                                      "advertised_networks")
 
-    fresh = get_db().conn.execute(
-        "SELECT * FROM federation_links WHERE id=?", (link_id,)
-    ).fetchone()
-    return _federation_link_to_out(fresh)
+    endpoint = (body.endpoint or "").strip() or SETTINGS.federation_wg_endpoint
+    if ":" not in endpoint:
+        raise HTTPException(400, "endpoint must be host:port")
+
+    server_pubkey = _live_wg0_pubkey()
+
+    psk = multisite_mod.generate_psk()
+    importer_overlay = parsed.importer_overlay_addr
+
+    with get_db().write() as conn:
+        if conn.execute(
+            "SELECT 1 FROM federation_links WHERE name=?", (name,)
+        ).fetchone():
+            raise HTTPException(409, f"link '{name}' already exists")
+
+        # Allocate our overlay. Default .1 if free, else next free.
+        # Must not collide with the importer's overlay (which is
+        # already pinned by the registration).
+        used = {importer_overlay}
+        existing = conn.execute(
+            "SELECT local_overlay_addr, remote_overlay_addr "
+            "FROM federation_links"
+        ).fetchall()
+        for r in existing:
+            for col in ("local_overlay_addr", "remote_overlay_addr"):
+                v = (r[col] or "").split("/", 1)[0].strip()
+                if v:
+                    used.add(v)
+        local_overlay = None
+        if multisite_mod.DEFAULT_CREATOR_OVERLAY_ADDR not in used:
+            local_overlay = multisite_mod.DEFAULT_CREATOR_OVERLAY_ADDR
+        else:
+            for octet in range(1, 255):
+                cand = f"10.99.0.{octet}"
+                if cand not in used:
+                    local_overlay = cand
+                    break
+        if not local_overlay:
+            raise HTTPException(500, "overlay address pool exhausted")
+
+        # AllowedIPs for the wgB-as-peer entry on our side: wgB's
+        # overlay /32 + each network wgB advertised.
+        importer_aips = [f"{importer_overlay}/32"]
+        for cidr in parsed.importer_advertised:
+            if cidr and cidr not in importer_aips:
+                importer_aips.append(cidr)
+
+        # INSERT wgB as a wg0 peer NOW. peer_type='multisite' so it
+        # doesn't appear in the live-peers panel. The peers.address
+        # column holds the overlay /32 — _load_all_peers_for_sync
+        # joins federation_links to compute the extended AllowedIPs.
+        cur = conn.execute(
+            """INSERT INTO peers (
+                name, public_key, private_key, preshared_key,
+                address, enabled, has_private_key, peer_type
+            ) VALUES (?, ?, '', ?, ?, 1, 0, 'multisite')""",
+            (
+                f"multisite:{name}",
+                parsed.importer_pubkey,
+                psk,
+                f"{importer_overlay}/32",
+            ),
+        )
+        peer_id = cur.lastrowid
+
+        conn.execute(
+            """INSERT INTO federation_links (
+                name, role, peer_id,
+                importer_privkey, psk,
+                local_overlay_addr, remote_overlay_addr,
+                local_advertised, remote_advertised,
+                remote_endpoint,
+                status, enabled
+            ) VALUES (?, 'creator', ?,
+                      NULL, ?,
+                      ?, ?,
+                      ?, ?,
+                      ?,
+                      'established', 1)""",
+            (name, peer_id, psk,
+             f"{local_overlay}/32", f"{importer_overlay}/32",
+             ",".join(advertised),
+             ",".join(parsed.importer_advertised),
+             parsed.importer_endpoint),
+        )
+        link_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    # Replay so wg0 gets the secondary overlay address bound + the
+    # new mgmt peer in syncconf.
+    _replay_state_to_kernel()
+
+    bundle_text = multisite_mod.build_bundle(
+        link_name=name,
+        creator_pubkey=server_pubkey,
+        creator_endpoint=endpoint,
+        creator_overlay_addr=local_overlay,
+        importer_overlay_addr=importer_overlay,
+        psk=psk,
+        creator_advertised=advertised,
+    )
+
+    return {
+        "id": link_id,
+        "name": name,
+        "local_overlay_addr": local_overlay,
+        "remote_overlay_addr": importer_overlay,
+        "bundle": bundle_text,
+    }
 
 
-@app.post("/api/federation/links/{link_id}/enabled",
-          response_model=FederationLinkOut)
-def federation_toggle_link(link_id: int, body: PeerEnabledUpdate):
-    """Enable/disable a link without deleting it. Disabled links keep
-    their keys + addresses in the DB so the operator can re-enable
-    without re-pairing — but the kernel state is removed."""
-    _multisite_required()
+@app.post("/api/multisite/links/{link_id}/import-complete")
+def multisite_import_complete(link_id: int, body: MultisiteImportCompleteRequest):
+    """STEP 3 (importer): parse the bundle, install wgA as a wg0 peer
+    using the privkey we stashed in step 1, transition to established.
+
+    Look up the row by link_id (the panel knows which link the operator
+    is completing — it came back from step 1). Validate the row is
+    in pending-bundle state. Parse bundle. Sanity-check the bundle's
+    importer_overlay_addr matches our row's local_overlay_addr — if
+    they don't match, the operator pasted the wrong bundle (or some
+    other wgflow generated this bundle for a different importer).
+
+    On success: insert peer row for wgA, update federation_links to
+    move privkey out of the row, transition status=established, replay.
+    """
+    if not SETTINGS.multisite_enabled:
+        raise HTTPException(403, "multisite is disabled (WG_MULTISITE=0)")
+
+    try:
+        parsed = multisite_mod.parse_bundle(body.bundle)
+    except multisite_mod.MultisiteError as e:
+        raise HTTPException(400, str(e))
+
     with get_db().write() as conn:
         row = conn.execute(
             "SELECT * FROM federation_links WHERE id=?", (link_id,)
         ).fetchone()
         if row is None:
             raise HTTPException(404, "link not found")
-        new_status = "pending" if body.enabled else "disabled"
+        if row["role"] != "importer":
+            raise HTTPException(409,
+                "this link is on the creator side; bundle import is for "
+                "importer-side links")
+        if row["status"] != "pending-bundle":
+            current_status = row["status"]
+            raise HTTPException(409,
+                f"link is in status '{current_status}', expected "
+                f"'pending-bundle'. is the bundle already imported?")
+
+        # Sanity check: the bundle's importer_overlay_addr must match
+        # what we allocated in step 1. If not, the bundle came from a
+        # different pairing or someone hand-edited it.
+        our_overlay = (row["local_overlay_addr"] or "").split("/", 1)[0]
+        if parsed.importer_overlay_addr != our_overlay:
+            raise HTTPException(400,
+                f"bundle is for overlay {parsed.importer_overlay_addr}, "
+                f"this link expects {our_overlay}. wrong bundle pasted?")
+
+        # AllowedIPs for wgA-as-peer: wgA's overlay /32 + each
+        # network wgA advertised.
+        creator_aips = [f"{parsed.creator_overlay_addr}/32"]
+        for cidr in parsed.creator_advertised:
+            if cidr and cidr not in creator_aips:
+                creator_aips.append(cidr)
+
+        # Insert peer row using the privkey we stashed in step 1.
+        # has_private_key=1 because we DO hold the keypair this time
+        # (we generated it locally during registration).
+        # Insert the peer row for the creator side. private_key='' and
+        # has_private_key=0 because we don't hold a per-link privkey —
+        # both wgflows peer with each other using their respective wg0
+        # server keypairs (whatever entrypoint.sh generated). Only
+        # public_key + preshared_key matter for kernel handshake;
+        # private_key on this row would only be relevant if someone
+        # asked us to render a downloadable conf for this peer (which
+        # we never do — multisite peers don't have downloadable confs).
+        cur = conn.execute(
+            """INSERT INTO peers (
+                name, public_key, private_key, preshared_key,
+                address, enabled, has_private_key, peer_type
+            ) VALUES (?, ?, '', ?, ?, 1, 0, 'multisite')""",
+            (
+                f"multisite:{row['name']}",
+                parsed.creator_pubkey,
+                parsed.psk,
+                f"{parsed.creator_overlay_addr}/32",
+            ),
+        )
+        peer_id = cur.lastrowid
+
         conn.execute(
-            "UPDATE federation_links SET enabled=?, status=? WHERE id=?",
-            (1 if body.enabled else 0, new_status, link_id),
+            """UPDATE federation_links SET
+                peer_id=?,
+                importer_privkey=NULL,
+                psk=?,
+                remote_overlay_addr=?,
+                remote_advertised=?,
+                remote_endpoint=?,
+                status='established',
+                last_error=NULL
+               WHERE id=?""",
+            (peer_id, parsed.psk,
+             f"{parsed.creator_overlay_addr}/32",
+             ",".join(parsed.creator_advertised),
+             parsed.creator_endpoint,
+             link_id),
         )
 
-    # If we just disabled the link, tear down its iptables chain. If we
-    # just re-enabled, the chain gets created in replay.
-    if not body.enabled:
-        try:
-            ipt.destroy_federation_chain(link_id, row["remote_fed_addr"])
-        except Exception:
-            pass
     _replay_state_to_kernel()
 
     fresh = get_db().conn.execute(
         "SELECT * FROM federation_links WHERE id=?", (link_id,)
     ).fetchone()
-    return _federation_link_to_out(fresh)
+    return _multisite_link_to_out(get_db().conn, fresh)
 
 
-@app.delete("/api/federation/links/{link_id}", status_code=204)
-def federation_delete_link(link_id: int):
-    """Tear down a link and forget it.
+@app.put("/api/multisite/links/{link_id}")
+def multisite_update_link(link_id: int, body: MultisiteUpdateRequest):
+    """Toggle enabled and/or rename. Other fields are not editable —
+    keypair/endpoint/advertised changes are delete + re-pair."""
+    with get_db().write() as conn:
+        row = conn.execute(
+            "SELECT * FROM federation_links WHERE id=?", (link_id,)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404, "link not found")
 
-    The remote wgflow will eventually notice the lack of handshakes and
-    transition its mirror row to 'failed'. We don't currently send a
-    polite "I'm leaving" RPC — the v5 backlog item for that lands when
-    we add a federation control RPC layer. For now, deletion is local-only.
-    """
-    _multisite_required()
-    conn = get_db().conn
-    row = conn.execute(
-        "SELECT remote_fed_addr FROM federation_links WHERE id=?",
-        (link_id,),
+        sets = []
+        params = []
+        if body.name is not None:
+            new_name = body.name.strip()
+            if not new_name:
+                raise HTTPException(400, "name cannot be empty")
+            dup = conn.execute(
+                "SELECT 1 FROM federation_links WHERE name=? AND id != ?",
+                (new_name, link_id),
+            ).fetchone()
+            if dup:
+                raise HTTPException(409, f"link '{new_name}' already exists")
+            sets.append("name=?")
+            params.append(new_name)
+            if row["peer_id"]:
+                conn.execute(
+                    "UPDATE peers SET name=? WHERE id=?",
+                    (f"multisite:{new_name}", row["peer_id"]),
+                )
+        if body.enabled is not None:
+            sets.append("enabled=?")
+            params.append(1 if body.enabled else 0)
+            if row["peer_id"]:
+                conn.execute(
+                    "UPDATE peers SET enabled=? WHERE id=?",
+                    (1 if body.enabled else 0, row["peer_id"]),
+                )
+        if sets:
+            params.append(link_id)
+            conn.execute(
+                f"UPDATE federation_links SET {', '.join(sets)} WHERE id=?",
+                params,
+            )
+
+    _replay_state_to_kernel()
+
+    fresh = get_db().conn.execute(
+        "SELECT * FROM federation_links WHERE id=?", (link_id,)
     ).fetchone()
-    if row is None:
-        raise HTTPException(404, "link not found")
-    try:
-        ipt.destroy_federation_chain(link_id, row["remote_fed_addr"])
-    except Exception:
-        pass
-    with get_db().write() as wconn:
-        wconn.execute("DELETE FROM federation_links WHERE id=?", (link_id,))
+    return _multisite_link_to_out(get_db().conn, fresh)
+
+
+@app.delete("/api/multisite/links/{link_id}", status_code=204)
+def multisite_delete_link(link_id: int):
+    """Delete a link and its paired peer.
+
+    Local-only — the remote wgflow doesn't know we're forgetting them.
+    They'll keep dialing us / accepting our connect until the operator
+    deletes the link on their side too.
+    """
+    with get_db().write() as conn:
+        row = conn.execute(
+            "SELECT peer_id FROM federation_links WHERE id=?", (link_id,)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404, "link not found")
+        peer_id = row["peer_id"]
+        conn.execute("DELETE FROM federation_links WHERE id=?", (link_id,))
+        if peer_id:
+            conn.execute("DELETE FROM peers WHERE id=?", (peer_id,))
+
     _replay_state_to_kernel()
     return Response(status_code=204)
 
 
-@app.post("/api/federation/handshake")
-async def federation_handshake_inbound(payload: dict, request: Request):
-    """INBOUND from a remote wgflow's initiator side.
+# ---------------------------------------------------------------------------
+# v4.1: blocklist sources
+# ---------------------------------------------------------------------------
+# Endpoints:
+#   GET    /api/blocklist/status                → counts + last-merged ts
+#   GET    /api/blocklist/sources               → list rows
+#   POST   /api/blocklist/sources               → add custom URL
+#   PUT    /api/blocklist/sources/{id}          → toggle enabled
+#   DELETE /api/blocklist/sources/{id}          → remove
+#   POST   /api/blocklist/refresh               → fetch all enabled, merge,
+#                                                  write file, SIGHUP dnsmasq
+#
+# All endpoints are panel-auth gated like the rest of the panel API.
+# Refresh is operator-triggered only — no scheduling in v4.1; that's
+# the v4.2+ backlog. The refresh path is async because fetching
+# multiple sources sequentially can take 5-30 seconds and we don't
+# want to block the event loop.
 
-    Auth model:
-      - No panel session (the caller is another wgflow, not a browser).
-      - Gated by the in-memory pending pairing token. Outside an active
-        pairing window, every request returns 401 regardless of body.
-      - Per-source-IP rate limit prevents online brute force on the
-        one-time code.
+def _blocklist_row_to_out(row) -> BlocklistSourceOut:
+    return BlocklistSourceOut(
+        id=row["id"],
+        name=row["name"],
+        url=row["url"],
+        enabled=bool(row["enabled"]),
+        is_preset=bool(row["is_preset"]),
+        last_fetched_ts=row["last_fetched_ts"],
+        last_entry_count=row["last_entry_count"],
+        last_overlap_count=row["last_overlap_count"],
+        last_error=row["last_error"],
+        created_at=row["created_at"],
+    )
 
-    On success we generate our half of the bundle, persist a
-    federation_links row, and reply with the data the initiator needs
-    to install us as their wg peer. The caller-side row is not yet
-    'established' — both sides flip to established once their first
-    handshake is observed via wg show.
 
-    The endpoint signature uses a raw `dict` payload rather than a
-    Pydantic model because the initiator's bundle has internal
-    structure that's better validated by federation.parse_incoming_bundle
-    (which produces typed errors with safe messages).
+@app.get("/api/blocklist/status")
+def blocklist_status():
+    """Lightweight summary: last merge timestamp + total unique entries.
+
+    Used by the panel header to render "last merged X ago, N entries".
+    Does NOT report per-source detail; that's the /sources endpoint.
     """
-    _multisite_required()
+    conn = get_db().conn
+    last_ts = conn.execute(
+        "SELECT value FROM network_settings WHERE key='blocklist_last_merged_ts'"
+    ).fetchone()
+    last_count = conn.execute(
+        "SELECT value FROM network_settings WHERE key='blocklist_last_merged_count'"
+    ).fetchone()
+    enabled_count = conn.execute(
+        "SELECT COUNT(*) FROM blocklist_sources WHERE enabled=1"
+    ).fetchone()[0]
+    total_count = conn.execute(
+        "SELECT COUNT(*) FROM blocklist_sources"
+    ).fetchone()[0]
 
-    source_ip = (request.client.host if request.client else "?")
-    if not federation.TOKEN_STORE.check_rate_limit(source_ip):
-        raise HTTPException(429, "rate limit exceeded")
+    def _to_int_or_none(row):
+        if row is None:
+            return None
+        v = row["value"]
+        if not v:
+            return None
+        try:
+            return int(v)
+        except ValueError:
+            return None
 
-    code = payload.get("code", "")
-    tok = federation.TOKEN_STORE.consume(code)
-    if tok is None:
-        # Same response whether token is missing, expired, or wrong.
-        # The 401 + uniform message is the defensive choice.
-        raise HTTPException(401, "no active pairing window")
+    return {
+        "last_merged_ts": _to_int_or_none(last_ts),
+        "last_merged_count": _to_int_or_none(last_count),
+        "enabled_sources": enabled_count,
+        "total_sources": total_count,
+    }
 
-    try:
-        incoming = federation.parse_incoming_bundle(payload)
-    except ValueError as e:
-        raise HTTPException(400, f"bad bundle: {e}")
 
-    # Generate our per-link WG identity.
-    privkey = wg.genkey()
-    pubkey = wg.pubkey(privkey)
+@app.get("/api/blocklist/sources", response_model=List[BlocklistSourceOut])
+def blocklist_list_sources():
+    rows = get_db().conn.execute(
+        "SELECT * FROM blocklist_sources ORDER BY id"
+    ).fetchall()
+    return [_blocklist_row_to_out(r) for r in rows]
 
-    # Allocate local fed addr (idempotent) and a slot for ourselves
-    # NOT for the remote — they already chose theirs and told us in
-    # incoming.remote_fed_addr.
+
+@app.post("/api/blocklist/sources", response_model=BlocklistSourceOut,
+          status_code=201)
+def blocklist_add_source(body: BlocklistSourceCreate):
+    """Add an operator-supplied custom blocklist source.
+
+    Validates the URL has http(s) scheme but does NOT fetch it now —
+    that happens on the next refresh. This means the operator can add
+    several sources without each click triggering a network fetch.
+    """
+    url = body.url.strip()
+    if not (url.startswith("http://") or url.startswith("https://")):
+        raise HTTPException(400, "url must be http:// or https://")
+
     with get_db().write() as conn:
-        local_addr = federation.ensure_local_addr(conn)
-
-        # Pick a name. Prefer the initiator's hint if non-conflicting,
-        # otherwise append a numeric suffix. Operators can rename later.
-        base = incoming.link_name_hint or "remote"
-        candidate = base
-        n = 1
-        while conn.execute(
-            "SELECT 1 FROM federation_links WHERE name=?", (candidate,)
+        # Name uniqueness — surface a clean conflict response.
+        if conn.execute(
+            "SELECT 1 FROM blocklist_sources WHERE name=?", (body.name,)
         ).fetchone():
-            n += 1
-            candidate = f"{base}-{n}"
+            raise HTTPException(409, f"source '{body.name}' already exists")
+        cur = conn.execute(
+            "INSERT INTO blocklist_sources (name, url, enabled, is_preset) "
+            "VALUES (?, ?, 1, 0)",
+            (body.name, url),
+        )
+        new_id = cur.lastrowid
+        row = conn.execute(
+            "SELECT * FROM blocklist_sources WHERE id=?", (new_id,)
+        ).fetchone()
+    return _blocklist_row_to_out(row)
+
+
+@app.put("/api/blocklist/sources/{source_id}",
+         response_model=BlocklistSourceOut)
+def blocklist_toggle_source(source_id: int, body: BlocklistSourceUpdate):
+    with get_db().write() as conn:
+        row = conn.execute(
+            "SELECT * FROM blocklist_sources WHERE id=?", (source_id,)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404, "source not found")
+        conn.execute(
+            "UPDATE blocklist_sources SET enabled=? WHERE id=?",
+            (1 if body.enabled else 0, source_id),
+        )
+        fresh = conn.execute(
+            "SELECT * FROM blocklist_sources WHERE id=?", (source_id,)
+        ).fetchone()
+    return _blocklist_row_to_out(fresh)
+
+
+@app.delete("/api/blocklist/sources/{source_id}", status_code=204)
+def blocklist_delete_source(source_id: int):
+    """Remove a source. Allowed for both presets and custom rows —
+    presets are pre-populated, not protected."""
+    with get_db().write() as conn:
+        if conn.execute(
+            "SELECT 1 FROM blocklist_sources WHERE id=?", (source_id,)
+        ).fetchone() is None:
+            raise HTTPException(404, "source not found")
+        conn.execute("DELETE FROM blocklist_sources WHERE id=?", (source_id,))
+    return Response(status_code=204)
+
+
+@app.post("/api/blocklist/refresh")
+async def blocklist_refresh():
+    """Fetch all enabled sources, merge, write file, SIGHUP dnsmasq.
+
+    Synchronous from the operator's perspective — we wait for every
+    source to finish before responding. The response carries per-source
+    status so the UI can show "stevenblack-ads: 142,891 entries; oisd:
+    error HTTP 502; urlhaus: unchanged". Errors on individual sources
+    don't fail the whole refresh — we merge whatever fetched
+    successfully and the operator sees the partial result.
+    """
+    import httpx
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        # Run the merge inside a write transaction so per-source row
+        # updates and the network_settings stamp are atomic.
+        # blocklist.refresh_all writes the kernel-side file (the
+        # dnsmasq blocklist) outside any transaction — that's
+        # intentional, sqlite's transaction has nothing to do with
+        # filesystem writes.
+        with get_db().write() as conn:
+            summary = await blocklist_mod.refresh_all(conn, client)
+
+    return {
+        "total_sources_attempted": summary.total_sources_attempted,
+        "sources_fetched":         summary.sources_fetched,
+        "sources_unchanged":       summary.sources_unchanged,
+        "sources_error":           summary.sources_error,
+        "merged_unique_count":     summary.merged_unique_count,
+        "per_source":              summary.per_source,
+    }
+
+
+# ---------------------------------------------------------------------------
+# v4.1.1: upstream WireGuard client connections
+# ---------------------------------------------------------------------------
+# Endpoints:
+#   GET    /api/upstream/connections             → list rows
+#   POST   /api/upstream/preview                  → parse + filter, no DB write
+#   POST   /api/upstream/connections              → create (after preview confirm)
+#   PUT    /api/upstream/connections/{id}         → rename / toggle / override AIPs
+#   DELETE /api/upstream/connections/{id}         → tear down + remove
+#
+# The two-step preview→create flow is deliberate: the operator sees the
+# AllowedIPs filter result BEFORE any kernel state changes. Confirms
+# trust in the safety filter and lets the operator override the
+# applied set if they actually want full-tunnel.
+
+def _upstream_row_to_out(row) -> UpstreamConnectionOut:
+    return UpstreamConnectionOut(
+        id=row["id"],
+        name=row["name"],
+        interface_name=row["interface_name"],
+        enabled=bool(row["enabled"]),
+        local_address=row["local_address"],
+        upstream_dns=row["upstream_dns"],
+        mtu=row["mtu"],
+        remote_endpoint=row["remote_endpoint"],
+        remote_allowed_ips_declared=row["remote_allowed_ips_declared"],
+        remote_allowed_ips_applied=row["remote_allowed_ips_applied"],
+        persistent_keepalive=row["persistent_keepalive"],
+        last_handshake_ts=row["last_handshake_ts"],
+        last_error=row["last_error"],
+        created_at=row["created_at"],
+    )
+
+
+@app.get("/api/upstream/connections",
+         response_model=List[UpstreamConnectionOut])
+def upstream_list():
+    rows = get_db().conn.execute(
+        "SELECT * FROM upstream_connections ORDER BY id"
+    ).fetchall()
+    return [_upstream_row_to_out(r) for r in rows]
+
+
+@app.post("/api/upstream/preview", response_model=UpstreamPreviewOut)
+def upstream_preview(body: UpstreamPreviewRequest):
+    """Parse the operator-supplied conf and run the safety filter.
+
+    Returns what WOULD be created if the operator confirms. No DB
+    write, no kernel state change. The operator's frontend then
+    shows the filter diff (full-tunnel replaced, overlaps stripped)
+    before they hit "create."
+    """
+    try:
+        parsed = upstream_mod.parse_wg_conf(body.conf_text)
+    except upstream_mod.ConfParseError as e:
+        raise HTTPException(400, f"conf parse failed: {e}")
+
+    report = upstream_mod._filter_allowed_ips(parsed.allowed_ips)
+
+    return UpstreamPreviewOut(
+        local_address=parsed.address,
+        upstream_dns=parsed.dns,
+        mtu=parsed.mtu,
+        remote_endpoint=parsed.endpoint,
+        remote_allowed_ips_declared=parsed.allowed_ips,
+        remote_allowed_ips_applied=report.final_applied,
+        full_tunnel_replaced=report.full_tunnel_replaced,
+        stripped_overlaps=report.stripped_overlaps,
+        persistent_keepalive=parsed.persistent_keepalive,
+        has_psk=bool(parsed.preshared_key),
+    )
+
+
+@app.post("/api/upstream/connections",
+          response_model=UpstreamConnectionOut, status_code=201)
+def upstream_create(body: UpstreamCreateRequest):
+    """Create an upstream connection from an operator-confirmed preview.
+
+    Re-parses the conf server-side (we don't trust client-side parsing
+    even within a session). Applies the AllowedIPs filter unless the
+    operator explicitly overrode the applied set in the preview UI.
+    Inserts the row, then triggers a replay so the kernel interface
+    comes up immediately.
+
+    Failures during kernel bring-up are surfaced as the response's
+    `last_error` field and the row is still persisted with enabled=1
+    — operator can fix the underlying issue (DNS resolution of the
+    endpoint, key format, etc.) and trigger a re-replay via toggle.
+    """
+    try:
+        parsed = upstream_mod.parse_wg_conf(body.conf_text)
+    except upstream_mod.ConfParseError as e:
+        raise HTTPException(400, f"conf parse failed: {e}")
+
+    if body.allowed_ips_override is not None:
+        # Operator explicitly chose the applied set in the preview UI.
+        # Trust their choice — they saw the filter recommendation and
+        # decided to override. We do still validate that each is a
+        # parseable CIDR.
+        applied = []
+        for cidr in body.allowed_ips_override:
+            cidr = cidr.strip()
+            if not cidr:
+                continue
+            # Reject 0.0.0.0/0 even when explicitly overridden — this
+            # is a hard safety, not a soft one. Operator who really
+            # wants full-tunnel needs to use the routing policy
+            # feature when we add it (v4.2+ backlog), not just shove
+            # a default route in.
+            if cidr in ("0.0.0.0/0", "::/0"):
+                raise HTTPException(
+                    400,
+                    "0.0.0.0/0 is a hard refusal — would route the "
+                    "panel through the upstream and lock you out. "
+                    "Specify the actual CIDRs you want to route, "
+                    "or omit override to use the safe filtered default."
+                )
+            applied.append(cidr)
+        if not applied:
+            raise HTTPException(400, "allowed_ips_override is empty")
+    else:
+        report = upstream_mod._filter_allowed_ips(parsed.allowed_ips)
+        applied = report.final_applied
+
+    if not applied:
+        raise HTTPException(
+            400,
+            "after filtering, no AllowedIPs remained — every declared "
+            "CIDR overlapped with our protected networks. Override the "
+            "applied set if you've audited this."
+        )
+
+    declared_str = ",".join(parsed.allowed_ips)
+    applied_str  = ",".join(applied)
+    dns_str = ",".join(parsed.dns) if parsed.dns else None
+
+    with get_db().write() as conn:
+        # Name uniqueness pre-flight.
+        if conn.execute(
+            "SELECT 1 FROM upstream_connections WHERE name=?", (body.name,)
+        ).fetchone():
+            raise HTTPException(409, f"upstream '{body.name}' already exists")
+
+        iface = upstream_mod.allocate_interface_name(conn)
 
         cur = conn.execute(
-            """INSERT INTO federation_links (
-                name, role,
-                local_privkey, local_pubkey, remote_pubkey, psk,
-                remote_wg_endpoint,
-                local_fed_addr, remote_fed_addr,
-                remote_panel_endpoint,
-                remote_instance_id, remote_instance_name,
-                status, enabled
-            ) VALUES (?, 'responder', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 1)""",
-            (candidate,
-             privkey, pubkey,
-             incoming.remote_pubkey, incoming.psk,
-             incoming.remote_wg_endpoint,
-             local_addr, incoming.remote_fed_addr,
-             # remote_panel_endpoint: we don't actually know this for
-             # responder-side rows. The initiator dialed in to OUR panel,
-             # so the only thing we know is the source IP (which may be
-             # behind NAT / proxy). Stash a best-effort value: source IP
-             # without a port. The operator can edit this manually if
-             # the heuristic is wrong (TODO v4.1: PUT endpoint for
-             # remote_panel_endpoint editing).
-             source_ip,
-             incoming.remote_instance_id, incoming.remote_instance_name),
+            """INSERT INTO upstream_connections (
+                name, interface_name,
+                local_privkey, local_address, upstream_dns, mtu,
+                remote_pubkey, remote_psk, remote_endpoint,
+                remote_allowed_ips_declared, remote_allowed_ips_applied,
+                persistent_keepalive, enabled
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
+            (body.name, iface,
+             parsed.private_key, parsed.address, dns_str, parsed.mtu,
+             parsed.public_key, parsed.preshared_key, parsed.endpoint,
+             declared_str, applied_str, parsed.persistent_keepalive),
         )
-        link_id = cur.lastrowid
+        new_id = cur.lastrowid
 
-    # Push to kernel.
+    # Trigger replay so the kernel interface comes up. Errors on this
+    # particular upstream get caught inside replay_to_kernel and
+    # stamped into last_error, so the response correctly reflects them.
     _replay_state_to_kernel()
 
-    # Build response.
-    iid, iname = _server_instance_meta()
-    return federation.build_response_payload(
-        local_pubkey=pubkey,
-        psk=incoming.psk,
-        local_fed_addr=local_addr,
-        instance_id=iid,
-        instance_name=iname,
-    )
+    row = get_db().conn.execute(
+        "SELECT * FROM upstream_connections WHERE id=?", (new_id,)
+    ).fetchone()
+    return _upstream_row_to_out(row)
+
+
+@app.put("/api/upstream/connections/{conn_id}",
+         response_model=UpstreamConnectionOut)
+def upstream_update(conn_id: int, body: UpstreamUpdateRequest):
+    """Rename, toggle enabled, or override applied AllowedIPs.
+
+    Changing the upstream's keys / endpoint / declared AllowedIPs
+    requires re-importing — those come from the conf and we don't
+    re-parse here.
+    """
+    with get_db().write() as conn:
+        row = conn.execute(
+            "SELECT * FROM upstream_connections WHERE id=?", (conn_id,)
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404, "upstream not found")
+
+        sets = []
+        params = []
+
+        if body.name is not None:
+            # Uniqueness check ignoring this row's own current name.
+            dup = conn.execute(
+                "SELECT 1 FROM upstream_connections "
+                "WHERE name=? AND id != ?",
+                (body.name, conn_id),
+            ).fetchone()
+            if dup:
+                raise HTTPException(409, f"upstream '{body.name}' already exists")
+            sets.append("name=?")
+            params.append(body.name)
+
+        if body.enabled is not None:
+            sets.append("enabled=?")
+            params.append(1 if body.enabled else 0)
+
+        if body.allowed_ips_override is not None:
+            applied = []
+            for cidr in body.allowed_ips_override:
+                cidr = cidr.strip()
+                if not cidr:
+                    continue
+                if cidr in ("0.0.0.0/0", "::/0"):
+                    raise HTTPException(
+                        400, "0.0.0.0/0 is a hard refusal — see create endpoint"
+                    )
+                applied.append(cidr)
+            if not applied:
+                raise HTTPException(400, "allowed_ips_override is empty")
+            sets.append("remote_allowed_ips_applied=?")
+            params.append(",".join(applied))
+
+        if sets:
+            params.append(conn_id)
+            conn.execute(
+                f"UPDATE upstream_connections SET {', '.join(sets)} WHERE id=?",
+                params,
+            )
+
+    # Replay so the kernel reflects the change (including a route
+    # update if AllowedIPs changed, or an interface tear-down if
+    # disabled).
+    _replay_state_to_kernel()
+
+    fresh = get_db().conn.execute(
+        "SELECT * FROM upstream_connections WHERE id=?", (conn_id,)
+    ).fetchone()
+    return _upstream_row_to_out(fresh)
+
+
+@app.delete("/api/upstream/connections/{conn_id}", status_code=204)
+def upstream_delete(conn_id: int):
+    """Tear down + remove. Forgetting a row is local-only — the upstream
+    has no way to know we're gone (we're a client of theirs)."""
+    with get_db().write() as conn:
+        row = conn.execute(
+            "SELECT interface_name FROM upstream_connections WHERE id=?",
+            (conn_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404, "upstream not found")
+        # Tear down the kernel interface explicitly before deleting
+        # the row, so even if replay_to_kernel doesn't run for any
+        # reason the wgN interface goes away.
+        try:
+            upstream_mod.tear_down(row["interface_name"])
+        except Exception as e:
+            print(f"[upstream] tear_down on delete failed: {e}", flush=True)
+        conn.execute("DELETE FROM upstream_connections WHERE id=?", (conn_id,))
+    _replay_state_to_kernel()
+    return Response(status_code=204)
 
 
 # ---------------------------------------------------------------------------

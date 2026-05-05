@@ -68,6 +68,11 @@ class PeerOut(BaseModel):
     # excludes them and they can't connect. ACLs and config are
     # preserved across enable/disable so re-enabling restores fully.
     enabled: bool = True
+    # 'client' for normal user peers, 'multisite' for federation
+    # mgmt peers. The panel distinguishes via this — multisite peers
+    # render with a badge and restricted affordances (no ACL editor,
+    # no downloadable conf, delete redirects to the multisite panel).
+    peer_type: str = "client"
 
 
 class PeerEnabledUpdate(BaseModel):
@@ -177,53 +182,164 @@ class MigrationToggle(BaseModel):
 # v4.0: federation
 # ---------------------------------------------------------------------------
 
-class FederationPairCreate(BaseModel):
-    """Body of POST /api/federation/links/pair.
+# ---------------------------------------------------------------------------
+# v4.2-rebuild: multisite federation (registration-then-bundle)
+# ---------------------------------------------------------------------------
 
-    Operator on the responder side clicks "Generate pairing token". The
-    server generates a one-time code, holds it in memory for 10 minutes,
-    and returns it bundled into a wgflow-pair:// URL.
+class MultisiteRegistrationRequest(BaseModel):
+    """Body of POST /api/multisite/registration — STEP 1 (importer).
 
-    `panel_endpoint` is the host:port the *other* wgflow should connect
-    to — usually the operator's public DNS name + panel HTTPS port. We
-    can't auto-detect this reliably (the request might come through a
-    reverse proxy with X-Forwarded-Host headers we can't trust by
-    default), so the operator supplies it. We embed it into the URL
-    so the initiator's side knows where to POST the handshake.
+    Operator on wgB clicks '+ import' → 'start'. Picks a label for
+    the link, optionally overrides the endpoint (defaults to
+    WG_ENDPOINT), optionally lists CIDRs wgB will advertise to wgA.
 
-    `name_hint` is a soft suggestion for what to call the link on the
-    other end. The other operator can rename it freely; we don't enforce
-    matching names across both sides.
+    Server generates a fresh keypair locally, allocates an overlay
+    address (.2 by default), persists a pending-bundle row with the
+    privkey stashed, returns a registration text block. Operator
+    copies into wgA's '+ create from registration' form.
     """
-    panel_endpoint: str = Field(..., min_length=3, max_length=200)
-    name_hint: str = Field(default="", max_length=64)
-
-
-class FederationConnectRequest(BaseModel):
-    """Body of POST /api/federation/links/connect.
-
-    Operator on the initiator side pastes a wgflow-pair:// URL and
-    chooses a local label for the link. The handshake runs synchronously
-    inside this request — on success a federation_links row is
-    persisted and the WG peer is installed via _replay_state_to_kernel.
-    """
-    pair_url: str = Field(..., min_length=20, max_length=400)
     name: str = Field(..., min_length=1, max_length=64)
+    endpoint: str = Field(default="", max_length=200)
+    advertised_networks: List[str] = Field(default_factory=list)
 
 
-class FederationLinkOut(BaseModel):
-    """One federation link as surfaced to the UI."""
+class MultisiteCreateLinkRequest(BaseModel):
+    """Body of POST /api/multisite/links — STEP 2 (creator).
+
+    Operator on wgA clicks '+ create from registration', pastes the
+    registration string from wgB, optionally overrides the link name,
+    fills in own endpoint + advertised networks.
+
+    Server parses the registration, allocates own overlay (.1 by
+    default), generates PSK, INSERTS wgB AS A wg0 PEER IMMEDIATELY
+    (so the moment wgB has wgA's pubkey, the tunnel handshakes),
+    returns the bundle text block. Operator copies back into wgB.
+    """
+    registration: str = Field(..., min_length=50, max_length=10000)
+    name: Optional[str] = Field(default=None, max_length=64)
+    endpoint: str = Field(default="", max_length=200)
+    advertised_networks: List[str] = Field(default_factory=list)
+
+
+class MultisiteImportCompleteRequest(BaseModel):
+    """Body of POST /api/multisite/links/{id}/import-complete — STEP 3
+    (importer).
+
+    Operator on wgB pastes the bundle string from wgA. Server uses
+    the link_id from the URL to find the pending-bundle row created
+    in step 1 (with the stashed privkey), parses the bundle, inserts
+    wgA as a wg0 peer using the stashed privkey, transitions to
+    established. Tunnel handshakes within ~5s.
+    """
+    bundle: str = Field(..., min_length=50, max_length=10000)
+
+
+class MultisiteUpdateRequest(BaseModel):
+    """Body of PUT /api/multisite/links/{id}. Rename + enable toggle.
+    Other changes are delete + repair."""
+    name: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    enabled: Optional[bool] = None
+
+
+# ---------------------------------------------------------------------------
+# v4.1: blocklist sources
+# ---------------------------------------------------------------------------
+
+class BlocklistSourceCreate(BaseModel):
+    """Body of POST /api/blocklist/sources — operator adding a custom URL.
+
+    The name must be unique. URL must be http(s); we don't currently
+    validate beyond scheme — fetching it will surface real problems
+    with a clean error message and the operator can correct the URL.
+    """
+    name: str = Field(..., min_length=1, max_length=64)
+    url: str = Field(..., min_length=10, max_length=500)
+
+
+class BlocklistSourceUpdate(BaseModel):
+    """Body of PUT /api/blocklist/sources/{id} — toggle enabled."""
+    enabled: bool
+
+
+class BlocklistSourceOut(BaseModel):
+    """One source row as surfaced to the UI."""
     id: int
     name: str
-    role: str                      # 'initiator' | 'responder'
-    status: str                    # 'pending' | 'established' | 'failed' | 'disabled'
+    url: str
     enabled: bool
-    local_fed_addr: str            # "x.x.x.x/32"
-    remote_fed_addr: str           # "x.x.x.x/32"
-    remote_wg_endpoint: str        # "host:port"
-    remote_panel_endpoint: str     # "host:port"
-    remote_instance_id: Optional[str] = None
-    remote_instance_name: Optional[str] = None
+    is_preset: bool
+    last_fetched_ts: Optional[int] = None
+    last_entry_count: Optional[int] = None
+    last_overlap_count: Optional[int] = None
+    last_error: Optional[str] = None
+    created_at: str
+
+
+# ---------------------------------------------------------------------------
+# v4.1.1: upstream WG client connections
+# ---------------------------------------------------------------------------
+
+class UpstreamPreviewRequest(BaseModel):
+    """Body of POST /api/upstream/preview.
+
+    Operator pastes a wg-client.conf; we parse, run the AllowedIPs
+    safety filter, and return what WOULD be inserted if they confirm.
+    Two-step flow (preview → confirm) so the operator sees the
+    filtered AllowedIPs and DNS before any kernel state changes.
+    """
+    conf_text: str = Field(..., min_length=20, max_length=10000)
+
+
+class UpstreamCreateRequest(BaseModel):
+    """Body of POST /api/upstream/connections — confirm step.
+
+    Carries the operator-chosen name plus the (possibly edited) applied
+    AllowedIPs the operator agreed to. The conf_text is re-parsed
+    server-side so we never trust client-side parsing.
+    """
+    name: str = Field(..., min_length=1, max_length=64)
+    conf_text: str = Field(..., min_length=20, max_length=10000)
+    # Override the safety-filtered AllowedIPs if the operator explicitly
+    # edited them in the preview UI. None = use the filter's default.
+    allowed_ips_override: Optional[List[str]] = None
+
+
+class UpstreamConnectionOut(BaseModel):
+    """One upstream connection as surfaced to the UI."""
+    id: int
+    name: str
+    interface_name: str           # 'wg1', 'wg2', ...
+    enabled: bool
+    local_address: str
+    upstream_dns: Optional[str] = None
+    mtu: Optional[int] = None
+    remote_endpoint: str
+    remote_allowed_ips_declared: str   # comma-separated as written in conf
+    remote_allowed_ips_applied: str    # comma-separated, what we actually route
+    persistent_keepalive: Optional[int] = None
     last_handshake_ts: Optional[int] = None
     last_error: Optional[str] = None
     created_at: str
+
+
+class UpstreamPreviewOut(BaseModel):
+    """Result of POST /api/upstream/preview — what would be created."""
+    local_address: str
+    upstream_dns: List[str]
+    mtu: Optional[int] = None
+    remote_endpoint: str
+    remote_allowed_ips_declared: List[str]
+    remote_allowed_ips_applied: List[str]
+    full_tunnel_replaced: bool        # operator wanted 0.0.0.0/0
+    stripped_overlaps: List[str]      # CIDRs filter removed + reason
+    persistent_keepalive: Optional[int] = None
+    has_psk: bool
+
+
+class UpstreamUpdateRequest(BaseModel):
+    """Body of PUT /api/upstream/connections/{id}. Limited fields —
+    rename + enable toggle + applied AllowedIPs override. Changing
+    keys / endpoint / declared AllowedIPs would be a re-import."""
+    name: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    enabled: Optional[bool] = None
+    allowed_ips_override: Optional[List[str]] = None

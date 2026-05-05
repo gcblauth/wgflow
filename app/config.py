@@ -81,6 +81,10 @@ class Settings:
     # client-facing WG_ENDPOINT (same UDP port, same public host), but
     # operators with split-port setups can override.
     federation_wg_endpoint: str
+    # v4.2-pre: UDP port for the wg1 federation interface. Removed in
+    # v4.2-rebuild — the asymmetric wg1 server design was scrapped in
+    # favor of mgmt-peers on wg0, which means no separate listener and
+    # no new port to expose. The WG_FED_PORT env var is now ignored.
 
     @property
     def server_public_key_path(self) -> Path:
@@ -133,6 +137,11 @@ def load() -> Settings:
     # deployments want.
     fed_wg_endpoint = _env("WG_FEDERATION_ENDPOINT",
                            _env("WG_ENDPOINT", "vpn.example.com:51820"))
+
+    # v4.2-pre: WG_FED_PORT for wg1. Removed in v4.2-rebuild — kept
+    # the env var read silently to avoid noisy warnings on operators
+    # who haven't cleaned up their compose files yet, but the value
+    # is no longer used anywhere.
 
     # peer_dns default depends on whether local DNS is on:
     #   - local DNS on  → server's wg address (peers query wgflow's dnsmasq)

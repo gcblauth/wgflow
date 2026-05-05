@@ -45,6 +45,11 @@ PUBLIC_PATHS = {
     # only way to get a non-401 response out of it is to know a code
     # the operator just generated. See app/federation.py.
     "/api/federation/handshake",
+    # v4.2-pre had /api/multisite/pairing-callback as a public path
+    # (auth bypass for the leg-2 callback over the tunnel). The
+    # registration-then-bundle redesign in v4.2-rebuild removed the
+    # callback entirely — every multisite endpoint now goes through
+    # normal session auth. Operator pasted strings ARE the auth.
 }
 
 

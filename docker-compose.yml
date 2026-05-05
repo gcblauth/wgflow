@@ -13,6 +13,12 @@ services:
     ports:
       - "${WG_LISTEN_PORT}:${WG_LISTEN_PORT}/udp"
       - "${HOSTBIND_WG_PANEL}:8080/tcp"
+      # v4.2-pre: federation listener (wg1 server-side) on 56969.
+      # Removed in v4.2-rebuild — the asymmetric wg1 design was
+      # scrapped in favor of mgmt-peers on wg0, which uses the
+      # existing WG_LISTEN_PORT. Operators upgrading from v4.2-pre
+      # can drop the WG_FED_PORT line from their compose file (or
+      # leave it; nothing reads it anymore).
     volumes:
       - ./data:/data
       # Dynamically mounts based on the .env selection
@@ -36,13 +42,13 @@ services:
       # (recommended). Set this only if you are running your own collector
       # and have a shared key arrangement with it.
       WGFLOW_TELEMETRY_SECRET: ${WGFLOW_TELEMETRY_SECRET:-}
-      # v4.0: multi-site federation. When enabled (default), the panel
-      # exposes a Federation section where this wgflow can pair with
-      # other wgflow instances over WireGuard. Each pairing is gated by
-      # a one-time code; the inbound /api/federation/handshake endpoint
-      # is only responsive during an active 10-minute pairing window.
-      # Set to 0/false to hide the panel section and disable both
-      # inbound and outbound federation entirely.
+      # v4.2-rebuild: multi-site federation. When enabled (default),
+      # the panel shows a Multisite section where this wgflow can
+      # pair with other wgflows. Symmetric design — both sides peer
+      # with each other on wg0 with mgmt-peer entries (peer_type=
+      # 'multisite') and a secondary 10.99.0.X/32 overlay address on
+      # wg0. No new UDP port; reuses WG_LISTEN_PORT. Set to 0/false
+      # to hide the panel section and disable the feature entirely.
       WG_MULTISITE: ${WG_MULTISITE:-1}
       # Subnet used for the federation overlay. Each paired wgflow gets
       # one /32 from this range; the routes apply only to traffic

@@ -462,7 +462,11 @@
     position: fixed;
     inset: 0;
     background: var(--modal-overlay);
-    z-index: 50;
+    /* z-index above #netdiag-overlay (180) so modals opened from
+       inside the netdiag panel (e.g. the tcpdump helper) render on
+       top of it, not behind. Below the login overlay (200) which
+       is conceptually above everything else. */
+    z-index: 190;
     display: none;
     align-items: flex-start;
     justify-content: center;
@@ -2285,6 +2289,36 @@
     margin-left: 16px;
   }
 
+  /* v4.1.1: federation panel sub-sections. The federation panel
+     houses two distinct concepts — wgflow↔wgflow peerings (v4.0)
+     and upstream client connections (v4.1.1). They share a panel
+     because the operator's mental model is "WireGuard relationships
+     to other things," but they're architecturally distinct (different
+     interfaces, different routing, different actions). The sub-sections
+     are visually separated by a divider and a faint subhead, so the
+     distinction stays legible. */
+  .fed-subsection {
+    border-top: 1px solid var(--border);
+  }
+  .fed-subsection:first-child {
+    border-top: none;
+  }
+  .fed-subhead {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 14px;
+    background: var(--bg-3);
+    border-bottom: 1px solid var(--border);
+  }
+  .fed-subhead-title {
+    font-family: var(--f-mono);
+    font-size: 11px;
+    color: var(--fg-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
   /* Live indicator + popover (v3.6 in-place patch; v4.0.1: hover→click).
      The existing live indicator already exists in the header; clicking
      it opens a small pinned popover with WS counters and the WS endpoint
@@ -2690,7 +2724,7 @@
       height: 140px !important;
     }
 
-    /* Live peers + federation: hide the table, show cards.
+    /* Live peers + federation peerings table: hide the table, show cards.
        v4.0.1: previously this selector matched every `table.peers`
        on the page, which silently broke the DNS-recent panel (it
        reuses the .peers class but has no cards layout, so on mobile
@@ -2698,10 +2732,14 @@
        with no rows). Scope by data-panel-id so other panels that
        use the .peers table class — DNS-recent today, anything else
        in future — render their tables on mobile (horizontally
-       scrollable; readable at 11px). */
+       scrollable; readable at 11px).
+       v4.1.1: scope the federation rule down to #fed-table only
+       (not table.peers) — the upstream sub-section's table also
+       lives inside data-panel-id="federation" but has no card
+       layout to swap to, same trap as DNS-recent had. */
     body:not(.force-desktop) [data-panel-id="live-peers"] table.peers,
     body:not(.force-desktop) [data-panel-id="live-peers"] .pagination,
-    body:not(.force-desktop) [data-panel-id="federation"] table.peers {
+    body:not(.force-desktop) #fed-table {
       display: none !important;
     }
     /* Cards container — broadened from #peers-cards (id, only the
@@ -2748,7 +2786,7 @@
      override). Same scoping fix as the @media block above. */
   body.force-mobile [data-panel-id="live-peers"] table.peers,
   body.force-mobile [data-panel-id="live-peers"] .pagination,
-  body.force-mobile [data-panel-id="federation"] table.peers {
+  body.force-mobile #fed-table {
     display: none !important;
   }
   body.force-mobile .peers-cards {
@@ -2833,15 +2871,83 @@
   }
   .peers-cards .peer-card-actions {
     display: flex;
-    gap: 4px;
-    margin-top: 8px;
-    padding-top: 8px;
+    gap: 6px;
+    margin-top: 10px;
+    padding-top: 10px;
     border-top: 1px solid var(--border);
   }
+
+  /* v4.1.1: pill-chip action buttons, replacing the v3.8 ghost-bordered
+     row. Each action gets a faint colored wash that matches its
+     semantic role — accent for normal actions (inspect, actions),
+     warn for pause/enable, danger for delete. The wash uses
+     color-mix() so it tracks the user's chosen instance theme
+     automatically (--accent shifts across the 9 instance themes;
+     the chip background follows). The hollow-border + uppercase-
+     glyph styling read as 2018-era admin chrome; this is the
+     modernization pass. */
   .peers-cards .peer-card-actions button {
     flex: 1;
+    font-family: var(--f-mono);
     font-size: 11px;
-    padding: 6px 8px;
+    font-weight: 500;
+    padding: 7px 10px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    cursor: pointer;
+    /* Default: accent-tinted pill. Overridden per-action below. */
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--accent);
+    transition: background 0.12s ease, border-color 0.12s ease;
+  }
+  .peers-cards .peer-card-actions button:hover {
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  }
+  .peers-cards .peer-card-actions button:active {
+    background: color-mix(in srgb, var(--accent) 32%, transparent);
+  }
+
+  /* Pause/enable: warn-tinted (amber). Distinct from default accent
+     because pausing is reversible-but-disruptive — the soft amber
+     signals "this changes peer state" without screaming danger. */
+  .peers-cards .peer-card-actions button[data-toggle-enabled] {
+    background: color-mix(in srgb, var(--warn) 12%, transparent);
+    color: var(--warn);
+  }
+  .peers-cards .peer-card-actions button[data-toggle-enabled]:hover {
+    background: color-mix(in srgb, var(--warn) 22%, transparent);
+    border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+  }
+  .peers-cards .peer-card-actions button[data-toggle-enabled]:active {
+    background: color-mix(in srgb, var(--warn) 32%, transparent);
+  }
+
+  /* Delete: danger-tinted. Same pill pattern, red wash. The .danger
+     class on the button keeps backwards compat with anywhere else
+     that references it. */
+  .peers-cards .peer-card-actions button.danger,
+  .peers-cards .peer-card-actions button[data-del] {
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
+    color: var(--danger);
+  }
+  .peers-cards .peer-card-actions button.danger:hover,
+  .peers-cards .peer-card-actions button[data-del]:hover {
+    background: color-mix(in srgb, var(--danger) 22%, transparent);
+    border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+  }
+  .peers-cards .peer-card-actions button.danger:active,
+  .peers-cards .peer-card-actions button[data-del]:active {
+    background: color-mix(in srgb, var(--danger) 32%, transparent);
+  }
+
+  /* Disabled-row card: dim the chips proportionally so an
+     already-paused peer's "enable" button doesn't blast at full
+     warn-amber. The 0.6 opacity on the parent .peer-card already
+     applies; this is just to make sure the chips don't pop visually
+     past the muted name+meta text. */
+  .peers-cards .peer-card[style*="opacity"] .peer-card-actions button {
+    opacity: 0.85;
   }
 
   /* Long-press visual feedback (v3.8). When the user holds on a
@@ -2896,7 +3002,7 @@
         <span class="instance-chrome" id="instance-chrome">
           <span class="instance-sep">⟫</span><span class="instance-name" id="instance-name"></span><span class="instance-edit-btn" id="instance-edit-btn" title="edit instance name and color">⚙</span>
         </span>
-        <span class="sub">wireguard control panel · v4.0.0-alpha · <span id="brand-author" class="brand-author" title="about wgflow">gcblauth</span> <span id="matrix-replay" class="matrix-replay-btn" title="replay matrix intro">◆</span></span>
+        <span class="sub">wireguard control panel · v4.2.0 · <span id="brand-author" class="brand-author" title="about wgflow">gcblauth</span> <span id="matrix-replay" class="matrix-replay-btn" title="replay matrix intro">◆</span></span>
       </div>
     </div>
     <div class="header-right">
@@ -2995,6 +3101,46 @@
       <div class="chart-wrap" style="height: 180px;">
         <svg id="throughput-chart" preserveAspectRatio="none" viewBox="0 0 1000 180"></svg>
       </div>
+    </div>
+  </div>
+
+  <!-- v4.1: blocklist panel. Manages multi-source DNS blocking via
+       dnsmasq's addn-hosts mechanism. Hidden alongside the DNS-recent
+       panel when WG_LOCAL_DNS=0 (gated by applyLocalDnsVisibility) —
+       blocklists make no sense without a local resolver. -->
+  <div class="panel panel-reorderable" id="blocklist-panel" data-panel-id="blocklist" style="margin-bottom: 20px;">
+    <div class="head">
+      <h2>dns · blocklists</h2>
+      <div style="display:flex; gap: 12px; align-items: center;">
+        <span class="mono-dim" style="font-size: 11px;" id="blocklist-status">—</span>
+        <button class="ghost" id="blocklist-add" title="add custom source">+</button>
+        <button class="primary" id="blocklist-refresh-all" title="fetch all enabled sources, merge, reload dnsmasq">↻ refresh</button>
+      </div>
+    </div>
+    <div class="body" style="padding: 0;">
+      <table class="peers" id="blocklist-table">
+        <colgroup>
+          <col style="width: 28px;">  <!-- enable toggle -->
+          <col>                         <!-- name -->
+          <col>                         <!-- url + last result -->
+          <col style="width: 100px;">  <!-- entry count -->
+          <col style="width: 100px;">  <!-- last fetch -->
+          <col style="width: 60px;">   <!-- delete -->
+        </colgroup>
+        <thead>
+          <tr>
+            <th></th>
+            <th>name</th>
+            <th>source</th>
+            <th class="num">entries</th>
+            <th class="num">last fetch</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="blocklist-tbody">
+          <tr><td colspan="6" class="empty">no blocklist sources configured</td></tr>
+        </tbody>
+      </table>
     </div>
   </div>
 
@@ -3524,46 +3670,64 @@
   <div class="panel panel-reorderable" id="federation-panel" data-panel-id="federation"
        style="margin-bottom: 20px; display: none;">
     <div class="head">
-      <h2>federation</h2>
+      <h2>multisite</h2>
       <div style="display:flex; gap: 12px; align-items: center;">
         <span class="mono-dim" style="font-size: 11px;" id="fed-local-meta">—</span>
-        <button class="primary" id="fed-pair-btn" title="generate a pairing token for another wgflow to connect">+ pair</button>
-        <button class="primary" id="fed-connect-btn" title="paste a pairing URL from another wgflow">+ connect</button>
       </div>
     </div>
     <div class="body" style="padding: 0;">
-      <div id="fed-pending-banner" style="display:none; padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--bg-3); font-size: 12px;">
-        <span class="mono-dim">pairing window open — </span>
-        <span id="fed-pending-meta">—</span>
-        <button class="ghost" id="fed-pending-cancel" style="margin-left: 8px;">cancel</button>
+      <!-- Sub-section 1: peerings with other wgflows (v4.0). Symmetric
+           wgflow↔wgflow links over wg0's federation overlay subnet. -->
+      <div class="fed-subsection">
+        <div class="fed-subhead">
+          <span class="fed-subhead-title">multisite links (wgflow ↔ wgflow)</span>
+          <div style="display:flex; gap: 8px;">
+            <button class="primary" id="fed-pair-btn" title="paste a registration from another wgflow and generate a bundle in return">+ create from registration</button>
+            <button class="primary" id="fed-connect-btn" title="generate a registration to send to another wgflow (step 1 of pairing)">+ import</button>
+          </div>
+        </div>
+        <div id="fed-pending-banner" style="display:none; padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--bg-3); font-size: 12px;">
+          <span class="mono-dim">pairing window open — </span>
+          <span id="fed-pending-meta">—</span>
+          <button class="ghost" id="fed-pending-cancel" style="margin-left: 8px;">cancel</button>
+        </div>
+        <table class="peers" id="fed-table">
+          <colgroup>
+            <col style="width: 18px;">
+            <col>                          <!-- name -->
+            <col>                          <!-- remote (overlay + pubkey) -->
+            <col>                          <!-- our advertised (editable later via inline ACL edit) -->
+            <col>                          <!-- their advertised -->
+            <col style="width: 110px;">    <!-- last handshake -->
+            <col style="width: 70px;">     <!-- role -->
+            <col style="width: 110px;">    <!-- actions -->
+          </colgroup>
+          <thead>
+            <tr>
+              <th></th>
+              <th>name</th>
+              <th>remote</th>
+              <th>we expose</th>
+              <th>they expose</th>
+              <th class="num">last handshake</th>
+              <th>role</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="fed-tbody">
+            <tr><td colspan="8" class="empty">no federation links</td></tr>
+          </tbody>
+        </table>
+        <!-- Mobile cards. Same data as the table; render() populates both. -->
+        <div class="peers-cards" id="fed-cards" style="display: none;"></div>
       </div>
-      <table class="peers" id="fed-table">
-        <colgroup>
-          <col style="width: 18px;">
-          <col>
-          <col>
-          <col>
-          <col style="width: 130px;">
-          <col style="width: 90px;">
-          <col style="width: 110px;">
-        </colgroup>
-        <thead>
-          <tr>
-            <th></th>
-            <th>name</th>
-            <th>remote</th>
-            <th>fed addr</th>
-            <th class="num">last handshake</th>
-            <th>role</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody id="fed-tbody">
-          <tr><td colspan="7" class="empty">no federation links</td></tr>
-        </tbody>
-      </table>
-      <!-- Mobile cards. Same data as the table; render() populates both. -->
-      <div class="peers-cards" id="fed-cards" style="display: none;"></div>
+
+      <!-- v4.1.1 upstream connections subsection moved out of the
+           multisite panel: the two are independent features
+           (multisite federates two wgflows; upstream uses this
+           wgflow as a client to an external WG endpoint). The
+           upstream feature still has its own panel section
+           rendered separately. -->
     </div>
   </div>
 
@@ -3723,6 +3887,11 @@
           <button class="ghost netdiag-tool-btn" data-tool="curl" title="HTTP(S) request with timing breakdown">curl timing</button>
           <button class="ghost netdiag-tool-btn" data-tool="tcp" title="TCP connect to host:port — checks if a port is reachable">tcp port</button>
           <button class="ghost netdiag-tool-btn" data-tool="iperf3" title="iperf3 client (5s test); requires `iperf3 -s` running on target. host or host:port (default 5201)">iperf3</button>
+          <button class="ghost netdiag-tool-btn" data-tool="iperf3-server" title="run a one-shot iperf3 server on this wgflow. accepts one client test, prints summary, exits.">iperf3 server</button>
+          <button class="ghost netdiag-tool-btn" data-tool="tcpdump" title="capture packets on a wgflow interface for ~10s. opens a helper modal with examples for your current setup.">tcpdump</button>
+        </div>
+        <div style="display: flex; justify-content: flex-end; margin-top: 8px; margin-bottom: -4px;">
+          <button class="ghost" id="netdiag-copy-output" title="copy the output above to clipboard" style="font-size: 10px; padding: 3px 10px;">copy</button>
         </div>
         <pre id="netdiag-tool-output" class="netdiag-tool-output">click a tool above to begin.</pre>
       </section>
@@ -3737,7 +3906,7 @@
     <div class="about-brand">
       <span class="bracket">[</span>wgflow<span class="bracket">]</span>
     </div>
-    <div class="about-version">v4.0.0-alpha</div>
+    <div class="about-version">v4.2.0</div>
     <div class="about-line">wireguard control panel</div>
     <a class="about-link" href="https://github.com/gcblauth/wgflow" target="_blank" rel="noopener">
       github.com/gcblauth/wgflow
@@ -4050,27 +4219,40 @@ function render() {
         dotTitle = 'idle · last seen ' + fmtAgo(l.latest_handshake);
       }
 
+      // v4.2-rebuild: multisite (federation mgmt) peers render with a
+      // badge + restricted affordances. They live primarily in the
+      // Multisite panel; we surface them here too so the operator
+      // sees ALL kernel peers in one place, but the per-peer actions
+      // (delete, ACL edit, conf download) don't apply — those are
+      // managed via the Multisite panel.
+      const isMultisite = p.peer_type === 'multisite';
+
       const tr = document.createElement('tr');
       // Apply 'row-disabled' class so CSS can dim everything in one rule
       // rather than scattering opacity overrides across each cell.
       if (isDisabled) tr.classList.add('row-disabled');
+      // Multisite peers get the same accent-tint treatment as in the
+      // Multisite panel — visual consistency across both lists.
+      if (isMultisite) {
+        tr.style.background = 'color-mix(in srgb, var(--accent) 6%, transparent)';
+      }
       tr.innerHTML = `
         <td><span class="status-dot ${dotClass}" title="${escape(dotTitle)}"></span></td>
         <td>
-          <div style="font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escape(p.name)}">${escape(p.name)}${isDisabled ? ' <span class="peer-disabled-badge" title="disabled — paused by operator">disabled</span>' : ''}</div>
+          <div style="font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${escape(p.name)}">${escape(p.name)}${isDisabled ? ' <span class="peer-disabled-badge" title="disabled — paused by operator">disabled</span>' : ''}${isMultisite ? ' <span class="peer-disabled-badge" title="multisite federation peer — manage via Multisite panel" style="background: color-mix(in srgb, var(--accent) 25%, transparent); color: var(--accent); border-color: var(--accent);">multisite</span>' : ''}</div>
           <div style="font-size: 11px; margin-top: 2px; white-space: nowrap;">
             ${(() => {
+              if (isMultisite) {
+                // Multisite peers don't have hand-managed ACLs;
+                // their reach is the federation_links advertised
+                // networks, edited via the Multisite panel.
+                return `<span class="mono-dim" style="font-size: 11px;">advertised ACL · multisite panel</span>`;
+              }
               const denies = p.acl.filter(e => e.startsWith('!')).length;
               const allows = p.acl.length - denies;
               const tip = (denies > 0
                 ? `${allows} allow · ${denies} deny`
                 : `${allows} rule${allows === 1 ? '' : 's'}`) + ' · click to edit';
-              // Whole counts cluster is a button so a click anywhere on
-              // either number opens the ACL editor — matches the
-              // "actions → acl" path. Button (not span) for native
-              // keyboard activation + screen-reader semantics; the
-              // .acl-counts CSS resets the button chrome so it visually
-              // matches the prior text-only display.
               if (denies > 0) {
                 return `<button class="acl-counts" data-acl-edit="${p.id}" title="${tip}"><span style="color: var(--accent); font-family: var(--f-body);">${allows}</span><span style="color: var(--fg-muted); margin: 0 2px;">/</span><span style="color: var(--danger); font-family: var(--f-body);">${denies}</span></button>`;
               }
@@ -4088,10 +4270,14 @@ function render() {
         <td data-spark="${p.id}"></td>
         <td>
           <div class="actions">
-            <button class="ghost icon" data-inspect="${p.id}" title="inspect connection">⌕</button>
-            <button class="ghost icon" data-toggle-enabled="${p.id}" data-currently-enabled="${!isDisabled}" title="${isDisabled ? 'enable peer' : 'disable peer (preserves config + ACLs)'}">${isDisabled ? '▶' : '⏸'}</button>
-            <button class="ghost" data-actions="${p.id}" title="conf · qr · ps1 · acl">actions</button>
-            <button class="ghost danger icon" data-del="${p.id}" title="delete">✕</button>
+            ${isMultisite
+              ? `<button class="ghost icon" data-inspect="${p.id}" title="inspect connection">⌕</button>
+                 <button class="ghost" data-fed-jump="1" title="manage in Multisite panel">→ multisite</button>`
+              : `<button class="ghost icon" data-inspect="${p.id}" title="inspect connection">⌕</button>
+                 <button class="ghost icon" data-toggle-enabled="${p.id}" data-currently-enabled="${!isDisabled}" title="${isDisabled ? 'enable peer' : 'disable peer (preserves config + ACLs)'}">${isDisabled ? '▶' : '⏸'}</button>
+                 <button class="ghost" data-actions="${p.id}" title="conf · qr · ps1 · acl">actions</button>
+                 <button class="ghost danger icon" data-del="${p.id}" title="delete">✕</button>`
+            }
           </div>
         </td>`;
       tbody.appendChild(tr);
@@ -4214,13 +4400,30 @@ function _renderPeerCards(sorted, live) {
     const aclText = denies > 0
       ? `${allows} allow · ${denies} deny`
       : `${allows} rule${allows === 1 ? '' : 's'}`;
+    const isMultisite = p.peer_type === 'multisite';
 
     const card = document.createElement('div');
     card.className = 'peer-card';
     if (isDisabled) card.style.opacity = '0.6';
+    if (isMultisite) {
+      card.style.background = 'color-mix(in srgb, var(--accent) 6%, transparent)';
+    }
+    const aclCell = isMultisite
+      ? `<span class="mono-dim" style="font-size: 10px;">advertised · multisite panel</span>`
+      : `<button class="ghost" data-acl-edit="${p.id}" style="font-size: 10px; padding: 2px 8px; border-color: var(--border);">${escape(aclText)}</button>`;
+    const actionsHtml = isMultisite
+      ? `<button class="ghost" data-inspect="${p.id}">inspect</button>
+         <button class="ghost" data-fed-jump="1">→ multisite</button>`
+      : `<button class="ghost" data-inspect="${p.id}">inspect</button>
+         <button class="ghost" data-toggle-enabled="${p.id}" data-currently-enabled="${!isDisabled}">${isDisabled ? 'enable' : 'pause'}</button>
+         <button class="ghost" data-actions="${p.id}">actions</button>
+         <button class="ghost danger" data-del="${p.id}">delete</button>`;
+    const nameBadge = isMultisite
+      ? ' <span class="peer-disabled-badge" style="background: color-mix(in srgb, var(--accent) 25%, transparent); color: var(--accent); border-color: var(--accent); font-size: 9px;">multisite</span>'
+      : '';
     card.innerHTML = `
       <div class="peer-card-row">
-        <div class="peer-card-name">${escape(p.name)}</div>
+        <div class="peer-card-name">${escape(p.name)}${nameBadge}</div>
         <div class="peer-card-status ${statusClass}">${escape(statusText)}</div>
       </div>
       <div class="peer-card-row peer-card-meta">
@@ -4229,13 +4432,10 @@ function _renderPeerCards(sorted, live) {
       </div>
       <div class="peer-card-row peer-card-meta">
         <span>${escape(rateText)}</span>
-        <span><button class="ghost" data-acl-edit="${p.id}" style="font-size: 10px; padding: 2px 8px; border-color: var(--border);">${escape(aclText)}</button></span>
+        <span>${aclCell}</span>
       </div>
       <div class="peer-card-actions">
-        <button class="ghost" data-inspect="${p.id}">⌕ inspect</button>
-        <button class="ghost" data-toggle-enabled="${p.id}" data-currently-enabled="${!isDisabled}">${isDisabled ? '▶ enable' : '⏸ pause'}</button>
-        <button class="ghost" data-actions="${p.id}">actions</button>
-        <button class="ghost danger" data-del="${p.id}">✕</button>
+        ${actionsHtml}
       </div>
     `;
     frag.appendChild(card);
@@ -4271,6 +4471,11 @@ function _renderPeerCards(sorted, live) {
       }
       if (t.dataset.inspect) {
         openInspect(parseInt(t.dataset.inspect, 10));
+        return;
+      }
+      if (t.dataset.fedJump) {
+        const panel = $('#federation-panel');
+        if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
         return;
       }
       if (t.dataset.toggleEnabled) {
@@ -4433,10 +4638,15 @@ async function loadServer() {
    spend time looking at empty data. */
 function applyLocalDnsVisibility(enabled) {
   const dnsPanel    = $('#dns-recent-panel');
+  const blocklistPanel = $('#blocklist-panel');
   const overrideTab = document.querySelector('[data-tab="dns-overrides"]');
   const overridePane = document.querySelector('[data-pane="dns-overrides"]');
 
   if (dnsPanel)    dnsPanel.style.display    = enabled ? '' : 'none';
+  // v4.1: blocklist panel is also gated. Without a local resolver,
+  // there's nothing for the blocklist to feed into — dnsmasq isn't
+  // running, so writing /etc/dnsmasq.d/blocklist.hosts has no effect.
+  if (blocklistPanel) blocklistPanel.style.display = enabled ? '' : 'none';
   if (overrideTab)  overrideTab.style.display  = enabled ? '' : 'none';
   // Don't mess with overridePane's display directly — the tab switcher
   // toggles it. But if it's currently visible AND we're disabling, force
@@ -5181,6 +5391,16 @@ $('#peers-tbody').addEventListener('click', async (ev) => {
   if (t.dataset.qr)  { showQR(t.dataset.qr, peersDB.find(p => p.id == t.dataset.qr)?.name || ''); return; }
   if (t.dataset.ps1) { downloadInstallerZip(t.dataset.ps1); return; }
   if (t.dataset.inspect) { openInspect(parseInt(t.dataset.inspect, 10)); return; }
+
+  // Multisite peer's "→ multisite" button: scroll to the multisite
+  // panel. Same kernel state, different management surface.
+  if (t.dataset.fedJump) {
+    const panel = $('#federation-panel');
+    if (panel) {
+      panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    return;
+  }
 
   // Click on the rule-counts cluster opens the ACL editor for that
   // peer — same end state as `actions → acl` but one click instead of
@@ -6725,6 +6945,11 @@ $('#login-submit').onclick = async () => {
       // tab/session while this page was sitting on the login overlay.
       // Cheap GET; idempotent.
       loadInstanceConfig();
+      // v4.1: federation + blocklist also need post-login init —
+      // their initial calls at page load would have 401'd while the
+      // login overlay was up. Both are idempotent.
+      if (typeof fedInit === 'function') fedInit();
+      if (typeof blocklistRefresh === 'function') blocklistRefresh();
     }
   }
 };
@@ -7988,6 +8213,20 @@ async function runDiagTool(tool) {
         $('#netdiag-tool-output').textContent =
           `${target}\n\n  ✗ CLOSED — ${detail}`;
       }
+    } else if (tool === 'iperf3-server') {
+      // iperf3 -s -1 prints a multi-line transcript: "Server listening...",
+      // a connection-from line, the test results, then exits. We just
+      // pass through the output. If output is empty, the server timed
+      // out before any client connected.
+      if (r.output && r.output.trim()) {
+        $('#netdiag-tool-output').textContent = r.output;
+      } else {
+        $('#netdiag-tool-output').textContent =
+          `[exit ${r.exit_code}] (no output)\n\n` +
+          `the iperf3 server timed out before a client connected.\n` +
+          `start the server again, then on the client side run:\n` +
+          `  iperf3 -c <this-wgflow-host> -p <port>`;
+      }
     } else if (tool === 'iperf3') {
       // iperf3 with -J emits a JSON document. Pretty-print if parseable
       // so it's actually readable; raw output otherwise (errors come
@@ -8120,9 +8359,255 @@ $('#netdiag-clear-history').onclick = async () => {
     toast('clear failed: ' + e.message, 'error');
   }
 };
+function openIperf3ServerHelper() {
+  // iperf3 server mode is conceptually different from every other
+  // diag tool — it doesn't probe outward, it waits for a client to
+  // connect. The modal makes that obvious + tells the operator
+  // exactly what to run on the client side.
+  const modal = $('#modal');
+  const title = $('#modal-title');
+  const body  = $('#modal-body');
+  if (!modal || !body) return;
+
+  // Try to surface an obvious "what host should the client connect
+  // to" hint. Best signal we have client-side is the operator's
+  // browser URL — but that may be a tunnel-internal address. Provide
+  // the placeholder; the operator knows their own infrastructure.
+  title.textContent = 'iperf3 server (one-shot)';
+  body.innerHTML = `
+    <div style="display:flex; flex-direction: column; gap: 14px;">
+      <p class="mono-dim" style="font-size: 12px;">
+        starts an iperf3 server on this wgflow that accepts ONE client test
+        and exits. timeout 60s if no client connects.
+      </p>
+      <p class="mono-dim" style="font-size: 11px; padding: 8px; background: var(--bg-3); border-left: 2px solid var(--accent);">
+        on the OTHER side, after clicking start below, run:<br>
+        <span class="mono">iperf3 -c &lt;this-wgflow-ip&gt; -p &lt;port&gt; -t 5</span>
+      </p>
+      <label style="display:flex; flex-direction: column; gap: 4px;">
+        <span class="mono-dim" style="font-size: 11px;">listen port (default 5201)</span>
+        <input id="iperf3-server-port" class="mono" placeholder="5201" value="5201">
+      </label>
+      <p class="mono-dim" style="font-size: 10px;">
+        the panel will block until the test completes or the 60s timeout
+        is reached. don't close the diagnostics panel until you see the
+        result.
+      </p>
+      <div style="display:flex; gap: 8px; justify-content: flex-end;">
+        <button class="ghost" id="iperf3-server-cancel">cancel</button>
+        <button class="primary" id="iperf3-server-start">start server</button>
+      </div>
+    </div>`;
+  modal.classList.add('show');
+
+  $('#iperf3-server-cancel').onclick = () => modal.classList.remove('show');
+  $('#iperf3-server-start').onclick = () => {
+    const port = ($('#iperf3-server-port').value || '').trim() || '5201';
+    $('#netdiag-target').value = port;
+    modal.classList.remove('show');
+    runDiagTool('iperf3-server');
+  };
+}
+
+// ---------------------------------------------------------------------------
+// tcpdump helper modal
+// ---------------------------------------------------------------------------
+// BPF filter syntax is power-tool territory — operators reach for tcpdump
+// rarely enough that they don't have the syntax memorised. We open a
+// modal that surfaces current-config-aware examples (the wgflow's own
+// interface names, multisite peer overlay addresses, advertised CIDRs)
+// so clicking an example fills the target field correctly without the
+// operator having to look anything up.
+
+async function openTcpdumpHelper() {
+  // Pull live config to build relevant examples.
+  let peers = [];
+  let multisite = [];
+  try {
+    [peers, multisite] = await Promise.all([
+      api('GET', '/api/peers').catch(() => []),
+      api('GET', '/api/multisite/links').catch(() => []),
+    ]);
+  } catch (e) {
+    // Non-fatal — examples will just be generic.
+    peers = [];
+    multisite = [];
+  }
+  const peer1 = (peers[0] && peers[0].address)
+    ? peers[0].address.split('/')[0]
+    : '10.13.13.5';
+  const overlay1 = (multisite[0] && multisite[0].remote_overlay_addr)
+    ? multisite[0].remote_overlay_addr.split('/')[0]
+    : '10.99.0.2';
+  const advertised = [];
+  for (const m of multisite) {
+    const adv = (m.remote_advertised || '').split(',').map(s => s.trim()).filter(Boolean);
+    advertised.push(...adv);
+  }
+  const advExample = advertised[0] || '192.168.99.0/24';
+
+  // Examples list. Each row: a label (what you'll see), and the
+  // target string in the format tool_tcpdump expects: "iface" or
+  // "iface:bpf-expression".
+  const examples = [
+    {
+      label: 'all traffic on wg0 (no filter)',
+      target: 'wg0',
+      tip: 'shows everything traversing wg0 — busy interface, expect lots of output',
+    },
+    {
+      label: 'ICMP only on wg0',
+      target: 'wg0:icmp',
+      tip: 'pings + traceroute hops — useful when troubleshooting reachability',
+    },
+    {
+      label: `traffic to/from a specific peer (${peer1})`,
+      target: `wg0:host ${peer1}`,
+      tip: 'shows everything that peer is sending / receiving over the tunnel',
+    },
+  ];
+  if (multisite.length) {
+    examples.push({
+      label: `multisite overlay traffic (${overlay1})`,
+      target: `wg0:host ${overlay1}`,
+      tip: 'panel-to-panel + advertised-net traffic with the other wgflow',
+    });
+  }
+  if (advertised.length) {
+    examples.push({
+      label: `advertised network traffic (${advExample})`,
+      target: `wg0:net ${advExample}`,
+      tip: 'cross-site traffic destined for the remote LAN that was advertised',
+    });
+  }
+  examples.push(
+    {
+      label: 'DNS queries on wg0',
+      target: 'wg0:port 53',
+      tip: 'see what your peers are resolving via the wgflow DNS',
+    },
+    {
+      label: 'WireGuard handshakes (UDP) on eth0',
+      target: 'eth0:udp port 51820',
+      tip: 'replace 51820 with your WG_LISTEN_PORT if different',
+    },
+    {
+      label: 'all traffic on every interface',
+      target: 'any',
+      tip: 'broadest possible view — useful when you are unsure which interface',
+    },
+  );
+
+  const modal = $('#modal');
+  const title = $('#modal-title');
+  const body  = $('#modal-body');
+  if (!modal || !body) return;
+
+  title.textContent = 'tcpdump — pick or write a filter';
+  body.innerHTML = `
+    <div style="display:flex; flex-direction: column; gap: 14px;">
+      <p class="mono-dim" style="font-size: 12px;">
+        captures up to 200 packets or ~10 seconds, whichever comes first.
+        click an example to pre-fill the target field, or type a custom
+        <span class="mono">iface:bpf-expression</span> directly.
+      </p>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        ${examples.map((e, i) => `
+          <button class="ghost tcpdump-example-btn" data-target="${tcpdumpEscape(e.target)}"
+                  style="text-align: left; padding: 8px 12px; display: flex; flex-direction: column; gap: 2px;">
+            <div><span class="mono" style="font-size: 11px;">${tcpdumpEscape(e.target)}</span></div>
+            <div class="mono-dim" style="font-size: 10px;">${tcpdumpEscape(e.label)} — ${tcpdumpEscape(e.tip)}</div>
+          </button>
+        `).join('')}
+      </div>
+      <label style="display:flex; flex-direction: column; gap: 4px;">
+        <span class="mono-dim" style="font-size: 11px;">or write your own (format: <span class="mono">iface</span> or <span class="mono">iface:bpf</span>)</span>
+        <input id="tcpdump-custom" class="mono" placeholder="wg0:host 10.99.0.1 and icmp">
+      </label>
+      <div style="display:flex; gap: 8px; justify-content: flex-end;">
+        <button class="ghost" id="tcpdump-cancel">cancel</button>
+        <button class="primary" id="tcpdump-run">capture</button>
+      </div>
+    </div>`;
+  modal.classList.add('show');
+
+  // Wire example buttons → fill custom field.
+  $$('.tcpdump-example-btn').forEach(b => {
+    b.onclick = () => { $('#tcpdump-custom').value = b.dataset.target; };
+  });
+  $('#tcpdump-cancel').onclick = () => modal.classList.remove('show');
+  $('#tcpdump-run').onclick = () => {
+    const target = ($('#tcpdump-custom').value || '').trim();
+    if (!target) {
+      toast('pick an example or type a target', 'error');
+      return;
+    }
+    // Pre-fill the target field on the netdiag panel and dispatch.
+    $('#netdiag-target').value = target;
+    modal.classList.remove('show');
+    runDiagTool('tcpdump');
+  };
+}
+
+function tcpdumpEscape(s) {
+  if (s === null || s === undefined) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 $$('.netdiag-tool-btn').forEach(b => {
-  b.onclick = () => runDiagTool(b.dataset.tool);
+  b.onclick = () => {
+    // tcpdump opens a helper modal with current-config examples
+    // before dispatch — operators rarely have BPF filter syntax in
+    // muscle memory and the typical use cases (capture on wg0,
+    // capture ICMP, capture a specific peer's traffic) all need a
+    // small filter. The modal pre-fills the target field with the
+    // operator's chosen example, then runs the tool normally.
+    if (b.dataset.tool === 'tcpdump') {
+      openTcpdumpHelper();
+      return;
+    }
+    if (b.dataset.tool === 'iperf3-server') {
+      openIperf3ServerHelper();
+      return;
+    }
+    runDiagTool(b.dataset.tool);
+  };
 });
+
+// Copy output button — copies whatever is currently in the tool
+// output pane to the clipboard. Falls back to selecting the text
+// and prompting the operator to Cmd/Ctrl+C if clipboard access is
+// blocked (incognito tabs, certain corporate browsers).
+const _copyBtn = $('#netdiag-copy-output');
+if (_copyBtn) {
+  _copyBtn.onclick = async () => {
+    const out = $('#netdiag-tool-output');
+    if (!out) return;
+    const text = out.textContent || '';
+    if (!text.trim()) {
+      toast('nothing to copy', 'warn');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      toast('output copied');
+    } catch (e) {
+      // Fallback: select the text in the <pre> so user can press
+      // Cmd/Ctrl+C themselves.
+      const range = document.createRange();
+      range.selectNodeContents(out);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      toast('clipboard blocked — text selected, press Cmd/Ctrl+C', 'warn');
+    }
+  };
+}
 // Esc closes the panel.
 document.addEventListener('keydown', (ev) => {
   if (ev.key === 'Escape' && $('#netdiag-overlay').style.display !== 'none') {
@@ -8359,6 +8844,16 @@ async function bootApp() {
   // to defaults, and never re-run, leaving the operator looking at
   // default chrome even after their saved values exist in the DB.
   loadInstanceConfig();
+  // v4.1: federation + blocklist init also need to be post-auth. The
+  // status/list endpoints return 401 pre-auth and the silent-fail
+  // path in fedInit/blocklistRefresh would otherwise leave both
+  // panels looking like the feature is disabled. Calling here makes
+  // them re-init on every page load that lands authenticated, and
+  // the handler at the end of /api/auth/login also calls them so a
+  // fresh login from the overlay covers the other path. Both are
+  // idempotent and safe to call multiple times.
+  if (typeof fedInit === 'function') fedInit();
+  if (typeof blocklistRefresh === 'function') blocklistRefresh();
   await intro;
 }
 
@@ -10646,209 +11141,535 @@ async function _saveCurrentOrder() {
 }
 
 // ===========================================================================
-// v4.0: federation
+// v4.2-rebuild: multisite federation (registration-then-bundle)
 // ===========================================================================
-// Manages the federation panel: pair-token generation, connect-by-URL,
-// link list rendering, periodic refresh + status reconciliation. Hidden
-// entirely when /api/federation/status reports enabled=false.
+// Two-step copy-paste pairing — no callback, no chicken-and-egg.
 //
-// Lifecycle:
-//   1. boot: GET /api/federation/status. If enabled=true, show the panel
-//      and start the polling loop. If false, leave hidden and stop.
-//   2. poll loop: every 5s, refresh /api/federation/links + the pending-
-//      token banner. Cheap on the server (single SELECT each).
-//   3. user actions: pair (modal), connect (modal), probe (per-row),
-//      enable/disable toggle (per-row), delete (per-row).
+//   1. importer ("+ import" → "start"):
+//        POST /api/multisite/registration → wgflow generates keypair,
+//        allocates overlay, returns registration text. Operator copies.
+//   2. creator ("+ create from registration"):
+//        POST /api/multisite/links → wgflow parses registration,
+//        installs wgB as peer NOW, returns bundle text. Operator copies.
+//   3. importer ("+ import" → "complete"):
+//        POST /api/multisite/links/{id}/import-complete → wgflow installs
+//        wgA as peer using stashed privkey, transitions to established.
 //
-// Status color is derived in fedStatusDot() — keep it in one place so
-// every render uses the same mapping.
+// Status colors:
+//   established    → accent green
+//   pending-bundle → warn amber (importer waiting for bundle paste)
+//   failed         → danger red (rare — manual mark only)
+//   disabled       → muted gray
 
 const _fedState = {
   enabled: false,
   pollTimer: null,
   rows: [],
-  localMeta: null,    // {local_fed_addr, subnet, wg_endpoint}
+  status: null,
+  defaultEndpoint: '',
 };
 
 const FED_POLL_INTERVAL_MS = 5000;
 
-function fedStatusDot(status) {
-  // Returns the {color, label} pair for a given status string. Color
-  // names are CSS variables defined in this file's :root palette so
-  // theme switching works automatically. Mapping:
-  //   established  → --accent  (phosphor-green: tunnel handshake fresh)
-  //   pending      → --warn    (amber: link exists, no handshake yet)
-  //   failed       → --danger  (red: lost handshake or initial error)
-  //   disabled     → --fg-muted (gray: operator-paused)
-  const map = {
-    established: { color: 'var(--accent)',   label: 'established' },
-    pending:     { color: 'var(--warn)',     label: 'pending' },
-    failed:      { color: 'var(--danger)',   label: 'failed' },
-    disabled:    { color: 'var(--fg-muted)', label: 'disabled' },
-  };
-  return map[status] || { color: 'var(--fg-muted)', label: status || '?' };
+function fedStatusDot(row) {
+  if (!row.enabled) return 'var(--fg-muted)';
+  if (row.last_error) return 'var(--danger)';
+  if (row.status === 'established') {
+    if (row.peer_last_handshake) {
+      const ageS = Math.floor((Date.now() / 1000) - row.peer_last_handshake);
+      if (ageS < 180) return 'var(--accent)';
+    }
+    return 'var(--warn)';
+  }
+  if (row.status === 'failed') return 'var(--danger)';
+  return 'var(--warn)';   // pending-bundle
 }
 
-// Tiny HTML escaper — every other place in this file uses textContent
-// directly, but we're building rows via innerHTML for compactness. So
-// escape any field that could contain user-controlled text.
-function fedEscapeHtml(s) {
-  if (s == null) return '';
-  return String(s)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+function fedStatusLabel(row) {
+  if (!row.enabled) return 'disabled';
+  if (row.last_error) return 'error';
+  return row.status || 'unknown';
 }
 
-function fedRenderTable() {
-  const tbody = $('#fed-tbody');
-  const cardsHost = $('#fed-cards');
-  if (!tbody) return;
+async function fedRefresh() {
+  if (!_fedState.enabled) return;
+  try {
+    const [rows, status] = await Promise.all([
+      api('GET', '/api/multisite/links'),
+      api('GET', '/api/multisite/status'),
+    ]);
+    _fedState.rows = rows || [];
+    _fedState.status = status;
+    if (status && status.default_endpoint) {
+      _fedState.defaultEndpoint = status.default_endpoint;
+    }
+    fedRender();
+  } catch (e) {
+    console.warn('[multisite] refresh failed:', e);
+  }
+}
 
-  if (!_fedState.rows.length) {
-    tbody.innerHTML = '<tr><td colspan="7" class="empty">no federation links</td></tr>';
-    if (cardsHost) cardsHost.innerHTML = '<div class="empty">no federation links</div>';
-    return;
+function fedRender() {
+  const meta = $('#fed-local-meta');
+  if (meta && _fedState.status) {
+    const s = _fedState.status;
+    if (!s.enabled) {
+      meta.textContent = s.reason || 'multisite disabled';
+    } else {
+      const parts = [];
+      if (s.local_addr) parts.push(`this: ${s.local_addr}`);
+      const total = (s.creator_links || 0) + (s.importer_links || 0);
+      if (total) parts.push(`${total} link${total === 1 ? '' : 's'}`);
+      else parts.push('no links yet');
+      if (s.established) parts.push(`${s.established} established`);
+      if (s.pending_bundle) parts.push(`${s.pending_bundle} awaiting bundle`);
+      meta.textContent = parts.join(' · ');
+    }
   }
 
-  // Desktop table.
+  const importBtn = $('#fed-connect-btn');
+  if (importBtn) importBtn.disabled = false;
+  const createBtn = $('#fed-pair-btn');
+  if (createBtn) createBtn.disabled = false;
+
+  const tbody = $('#fed-tbody');
+  if (!tbody) return;
+  if (!_fedState.rows.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="empty">no multisite links</td></tr>';
+    return;
+  }
   tbody.innerHTML = '';
-  for (const link of _fedState.rows) {
-    const dot = fedStatusDot(link.status);
+  for (const row of _fedState.rows) {
     const tr = document.createElement('tr');
-    tr.dataset.linkId = link.id;
+    tr.dataset.linkId = row.id;
+    if (!row.enabled) tr.style.opacity = '0.55';
+    tr.style.background = 'color-mix(in srgb, var(--accent) 6%, transparent)';
+
+    let remoteCell;
+    if (row.status === 'pending-bundle') {
+      remoteCell = `<span class="mono-dim">awaiting bundle paste</span>` +
+        `<div class="mono-dim" style="font-size:10px; color: var(--warn);">click "complete pairing" to finish</div>`;
+    } else {
+      remoteCell = `<span class="mono">${fedEscapeHtml(row.remote_overlay_addr || '')}</span>`;
+      if (row.peer_public_key) {
+        const pk = row.peer_public_key.slice(0, 16) + '…';
+        remoteCell += `<div class="mono-dim" style="font-size:10px;">${fedEscapeHtml(pk)}</div>`;
+      }
+    }
+
+    // Advertised lists. Empty → render a dim placeholder. Wrap in a
+    // small CIDR-list cell (one CIDR per line at small font size).
+    const localAdvText = (row.local_advertised || '').trim();
+    const remoteAdvText = (row.remote_advertised || '').trim();
+    const renderAdv = (s) => {
+      if (!s) return '<span class="mono-dim" style="font-size:10px;">—</span>';
+      return s.split(',').map(c => c.trim()).filter(Boolean)
+        .map(c => `<div class="mono" style="font-size:11px;">${fedEscapeHtml(c)}</div>`)
+        .join('');
+    };
+
+    const statusLabel = fedStatusLabel(row);
+    const completeBtn = (row.status === 'pending-bundle')
+      ? `<button class="ghost" data-fed-action="complete" title="paste bundle to complete pairing">complete pairing</button>`
+      : '';
+    // Disable/enable + delete are now confirm-protected explicit
+    // buttons (no inline checkbox or ×). Operator clicks → modal asks
+    // "really disable / delete?" → confirms.
+    const toggleLabel = row.enabled ? 'disable' : 'enable';
+    const toggleBtn = `<button class="ghost" data-fed-action="toggle-confirm" title="${row.enabled ? 'disable this link (tunnel goes down)' : 'enable this link'}">${toggleLabel}</button>`;
+    const deleteBtn = `<button class="ghost" data-fed-action="delete-confirm" title="remove this link" style="color: var(--danger);">delete</button>`;
+
     tr.innerHTML = `
-      <td><span class="status-dot" style="display:inline-block; width:8px; height:8px; border-radius:50%; background:${dot.color}"
-                title="${dot.label}"></span></td>
-      <td><span class="mono">${fedEscapeHtml(link.name)}</span>
-          ${link.remote_instance_name
-            ? `<div class="mono-dim" style="font-size:10px;">${fedEscapeHtml(link.remote_instance_name)}</div>`
-            : ''}</td>
-      <td><span class="mono-dim">${fedEscapeHtml(link.remote_wg_endpoint)}</span></td>
-      <td><span class="mono">${fedEscapeHtml(link.remote_fed_addr.split('/')[0])}</span></td>
-      <td class="num">${link.last_handshake_ts ? fmtAgo(link.last_handshake_ts) : '—'}</td>
-      <td>${fedEscapeHtml(link.role)}</td>
+      <td><span class="status-dot" style="display:inline-block; width:8px; height:8px; border-radius:50%; background:${fedStatusDot(row)};" title="${statusLabel}"></span></td>
       <td>
-        <button class="ghost" data-fed-action="probe"   title="probe remote panel">⟳</button>
-        <button class="ghost" data-fed-action="toggle"  title="${link.enabled ? 'disable' : 'enable'}">${link.enabled ? '⏸' : '▶'}</button>
-        <button class="ghost" data-fed-action="delete"  title="forget this link">✕</button>
+        <span class="mono">${fedEscapeHtml(row.name)}</span>
+        ${row.remote_instance_name ? `<div class="mono-dim" style="font-size:10px;">${fedEscapeHtml(row.remote_instance_name)}</div>` : ''}
+      </td>
+      <td>${remoteCell}</td>
+      <td>${renderAdv(localAdvText)}</td>
+      <td>${renderAdv(remoteAdvText)}</td>
+      <td class="num">${row.peer_last_handshake ? fmtAgo(row.peer_last_handshake) : '—'}</td>
+      <td><span class="mono-dim" style="font-size:11px;">${fedEscapeHtml(row.role)}</span></td>
+      <td>
+        ${completeBtn}
+        ${toggleBtn}
+        ${deleteBtn}
       </td>`;
     tbody.appendChild(tr);
   }
-  // Wire per-row actions via delegation on tbody.
   tbody.onclick = fedHandleRowClick;
-
-  // Mobile cards.
-  if (cardsHost) {
-    cardsHost.innerHTML = '';
-    for (const link of _fedState.rows) {
-      const dot = fedStatusDot(link.status);
-      const card = document.createElement('div');
-      card.className = 'peer-card';
-      card.dataset.linkId = link.id;
-      card.innerHTML = `
-        <div class="peer-card-head">
-          <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:${dot.color}"></span>
-          <span class="mono peer-card-name">${fedEscapeHtml(link.name)}</span>
-          <span class="mono-dim">${dot.label}</span>
-        </div>
-        <div class="peer-card-meta">
-          <div><span class="mono-dim">remote</span>
-               <span class="mono">${fedEscapeHtml(link.remote_wg_endpoint)}</span></div>
-          <div><span class="mono-dim">fed addr</span>
-               <span class="mono">${fedEscapeHtml(link.remote_fed_addr.split('/')[0])}</span></div>
-          <div><span class="mono-dim">handshake</span>
-               <span>${link.last_handshake_ts ? fmtAgo(link.last_handshake_ts) : '—'}</span></div>
-          ${link.last_error ? `<div class="mono-dim" style="color:var(--danger)">${fedEscapeHtml(link.last_error)}</div>` : ''}
-        </div>
-        <div class="peer-card-actions">
-          <button class="ghost" data-fed-action="probe">probe</button>
-          <button class="ghost" data-fed-action="toggle">${link.enabled ? 'disable' : 'enable'}</button>
-          <button class="ghost" data-fed-action="delete">forget</button>
-        </div>`;
-      cardsHost.appendChild(card);
-    }
-    cardsHost.onclick = fedHandleRowClick;
-  }
+  tbody.onchange = fedHandleRowClick;
 }
 
 async function fedHandleRowClick(ev) {
-  const btn = ev.target.closest('[data-fed-action]');
-  if (!btn) return;
-  const row = btn.closest('[data-link-id]');
+  const target = ev.target.closest('[data-fed-action]');
+  if (!target) return;
+  const row = target.closest('[data-link-id]');
   if (!row) return;
-  const linkId = row.dataset.linkId;
-  const action = btn.dataset.fedAction;
-  const link = _fedState.rows.find(r => String(r.id) === String(linkId));
+  const id = row.dataset.linkId;
+  const action = target.dataset.fedAction;
+  const link = _fedState.rows.find(r => String(r.id) === String(id));
   if (!link) return;
 
   try {
-    if (action === 'probe') {
-      btn.disabled = true;
-      try {
-        await api('POST', `/api/federation/links/${linkId}/probe`);
-        toast('probe complete');
-      } finally {
-        btn.disabled = false;
+    if (action === 'toggle-confirm') {
+      // Disabling tears the tunnel down on this side; enabling brings
+      // it back up. Either way the operator should know what's
+      // happening before clicking through.
+      const willEnable = !link.enabled;
+      const verb = willEnable ? 'ENABLE' : 'DISABLE';
+      const consequence = willEnable
+        ? `bring the tunnel back up. peer entry will be re-installed on wg0.`
+        : `tear the tunnel down on THIS side immediately. the remote wgflow doesn't know — they'll keep trying to handshake until they disable on their side.`;
+      if (!confirm(`${verb} multisite link '${link.name}'?\n\n${consequence}\n\nproceed?`)) return;
+      await api('PUT', `/api/multisite/links/${id}`, { enabled: willEnable });
+      toast(`${link.name} ${willEnable ? 'enabled' : 'disabled'}`);
+      await fedRefresh();
+    } else if (action === 'delete-confirm') {
+      // Type-to-confirm pattern: the user must type the link name
+      // to delete it, not just click "yes." Multisite link deletes
+      // are unrecoverable — the keypair-and-PSK exchange would have
+      // to be redone end-to-end on both sides.
+      const typed = prompt(
+        `DELETE multisite link '${link.name}' on THIS wgflow.\n\n` +
+        `this removes the paired peer entry on this side only — the remote keeps theirs until they also delete.\n\n` +
+        `to confirm, type the link name exactly: ${link.name}`
+      );
+      if (typed === null) return;
+      if (typed !== link.name) {
+        toast('name did not match — delete cancelled', 'error');
+        return;
       }
+      await api('DELETE', `/api/multisite/links/${id}`);
+      toast(`deleted ${link.name}`);
       await fedRefresh();
-    } else if (action === 'toggle') {
-      await api('POST', `/api/federation/links/${linkId}/enabled`,
-                { enabled: !link.enabled });
-      toast(link.enabled ? 'link disabled' : 'link enabled');
-      await fedRefresh();
-    } else if (action === 'delete') {
-      if (!confirm(`forget link "${link.name}"? the remote will eventually time out.`)) return;
-      await api('DELETE', `/api/federation/links/${linkId}`);
-      toast('link forgotten');
-      await fedRefresh();
+    } else if (action === 'complete') {
+      fedOpenCompleteModal(link);
     }
   } catch (e) {
     toast('action failed: ' + (e.message || ''), 'error');
   }
 }
 
-async function fedRefresh() {
-  // Pull both endpoints in parallel. Tolerant of either failing — the
-  // panel keeps showing whatever was last successful.
+// ---------------------------------------------------------------------------
+// + import → STEP 1 "start" (importer side)
+// ---------------------------------------------------------------------------
+
+function fedOpenConnectModal() {
+  // Function name kept for compatibility with existing button wiring.
+  // This is the IMPORTER side step 1: generate registration.
+  const modal = $('#modal');
+  const title = $('#modal-title');
+  const body  = $('#modal-body');
+  if (!modal || !body) return;
+
+  const defaultEndpoint = _fedState.defaultEndpoint || '';
+
+  title.textContent = 'import multisite link — step 1 of 2';
+  body.innerHTML = `
+    <div style="display:flex; flex-direction: column; gap: 14px;">
+      <p class="mono-dim" style="font-size: 12px;">
+        step 1: this wgflow generates a registration request. you copy
+        it into the OTHER wgflow\'s <strong>+ create from registration</strong>
+        flow. they hand back a bundle which you paste here in step 2.
+      </p>
+      <label style="display:flex; flex-direction: column; gap: 4px;">
+        <span class="mono-dim" style="font-size: 11px;">name (your label for this link)</span>
+        <input id="fed-reg-name" class="mono" placeholder="wgA" maxlength="64">
+      </label>
+      <label style="display:flex; flex-direction: column; gap: 4px;">
+        <span class="mono-dim" style="font-size: 11px;">
+          your public WG endpoint (host:port) — what wgA will dial
+        </span>
+        <input id="fed-reg-endpoint" class="mono"
+               value="${fedEscapeHtml(defaultEndpoint)}"
+               placeholder="vpn.example.com:51820">
+      </label>
+      <label style="display:flex; flex-direction: column; gap: 4px;">
+        <span class="mono-dim" style="font-size: 11px;">
+          advertised networks (CIDRs reachable through this wgflow, comma-separated; default empty = overlay only)
+        </span>
+        <input id="fed-reg-adv" class="mono" placeholder="192.168.50.0/24">
+        <span class="mono-dim" style="font-size: 10px;">
+          0.0.0.0/0 hard-refused. list specific CIDRs only.
+        </span>
+      </label>
+      <div style="display:flex; gap: 8px; justify-content: flex-end;">
+        <button class="ghost" id="fed-reg-cancel">cancel</button>
+        <button class="primary" id="fed-reg-submit">generate registration</button>
+      </div>
+    </div>`;
+  modal.classList.add('show');
+
+  $('#fed-reg-cancel').onclick = () => modal.classList.remove('show');
+  $('#fed-reg-submit').onclick = async () => {
+    const name = ($('#fed-reg-name').value || '').trim();
+    const endpoint = ($('#fed-reg-endpoint').value || '').trim();
+    const advRaw = ($('#fed-reg-adv').value || '').trim();
+    if (!name) {
+      toast('name is required', 'error');
+      return;
+    }
+    const advertised = advRaw ? advRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
+    const btn = $('#fed-reg-submit');
+    btn.disabled = true;
+    btn.textContent = 'generating...';
+    try {
+      const result = await api('POST', '/api/multisite/registration', {
+        name, endpoint, advertised_networks: advertised,
+      });
+      fedShowRegistration(result);
+    } catch (e) {
+      toast('registration failed: ' + (e.message || ''), 'error');
+      btn.disabled = false;
+      btn.textContent = 'generate registration';
+    }
+  };
+}
+
+function fedShowRegistration(result) {
+  const modal = $('#modal');
+  const title = $('#modal-title');
+  const body  = $('#modal-body');
+
+  title.textContent = `registration for: ${result.name}`;
+  body.innerHTML = `
+    <div style="display:flex; flex-direction: column; gap: 12px;">
+      <p class="mono-dim" style="font-size: 12px; padding: 8px; background: var(--bg-3); border-left: 2px solid var(--accent);">
+        copy this registration. paste into the OTHER wgflow\'s
+        <strong>+ create from registration</strong> form. they\'ll
+        hand you back a bundle. come back here and click
+        <strong>complete pairing</strong> on this row to paste the
+        bundle and finish.
+      </p>
+      <p class="mono-dim" style="font-size: 11px;">
+        you (this wgflow): <span class="mono">${fedEscapeHtml(result.local_overlay_addr)}</span>
+      </p>
+      <textarea id="fed-reg-text" class="mono" readonly
+                style="min-height: 180px; font-size: 11px; background: var(--bg-3);">${fedEscapeHtml(result.registration)}</textarea>
+      <div style="display:flex; gap: 8px; justify-content: flex-end;">
+        <button class="ghost" id="fed-reg-close">done</button>
+        <button class="primary" id="fed-reg-copy">copy to clipboard</button>
+      </div>
+    </div>`;
+
+  $('#fed-reg-close').onclick = () => {
+    modal.classList.remove('show');
+    fedRefresh();
+  };
+  $('#fed-reg-copy').onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(result.registration);
+      toast('registration copied');
+    } catch (e) {
+      const ta = $('#fed-reg-text');
+      if (ta) { ta.focus(); ta.select(); }
+      toast('clipboard blocked — textarea selected, press Cmd/Ctrl+C', 'error');
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// + import → STEP 3 "complete" (importer side, paste bundle)
+// ---------------------------------------------------------------------------
+
+function fedOpenCompleteModal(link) {
+  const modal = $('#modal');
+  const title = $('#modal-title');
+  const body  = $('#modal-body');
+  if (!modal || !body) return;
+
+  title.textContent = `complete pairing: ${link.name} — step 2 of 2`;
+  body.innerHTML = `
+    <div style="display:flex; flex-direction: column; gap: 14px;">
+      <p class="mono-dim" style="font-size: 12px;">
+        paste the BUNDLE the other wgflow generated from your
+        registration. once submitted, this wgflow installs them as a
+        peer and the tunnel handshakes within ~5 seconds.
+      </p>
+      <label style="display:flex; flex-direction: column; gap: 4px;">
+        <span class="mono-dim" style="font-size: 11px;">paste bundle</span>
+        <textarea id="fed-bnd-text" class="mono"
+                  placeholder="# wgflow multisite BUNDLE — DO NOT EDIT&#10;# wgflow-multisite-bundle-name: ...&#10;..."
+                  style="min-height: 220px; font-size: 11px;"></textarea>
+      </label>
+      <div style="display:flex; gap: 8px; justify-content: flex-end;">
+        <button class="ghost" id="fed-bnd-cancel">cancel</button>
+        <button class="primary" id="fed-bnd-submit">complete pairing</button>
+      </div>
+    </div>`;
+  modal.classList.add('show');
+
+  $('#fed-bnd-cancel').onclick = () => modal.classList.remove('show');
+  $('#fed-bnd-submit').onclick = async () => {
+    const bundle = ($('#fed-bnd-text').value || '').trim();
+    if (!bundle) {
+      toast('paste a bundle first', 'error');
+      return;
+    }
+    const btn = $('#fed-bnd-submit');
+    btn.disabled = true;
+    btn.textContent = 'completing...';
+    try {
+      await api('POST', `/api/multisite/links/${link.id}/import-complete`, { bundle });
+      toast('paired — tunnel coming up');
+      modal.classList.remove('show');
+      await fedRefresh();
+    } catch (e) {
+      toast('complete failed: ' + (e.message || ''), 'error');
+      btn.disabled = false;
+      btn.textContent = 'complete pairing';
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// + create from registration (creator side)
+// ---------------------------------------------------------------------------
+
+function fedOpenPairModal() {
+  const modal = $('#modal');
+  const title = $('#modal-title');
+  const body  = $('#modal-body');
+  if (!modal || !body) return;
+
+  const defaultEndpoint = _fedState.defaultEndpoint || '';
+
+  title.textContent = 'create from registration';
+  body.innerHTML = `
+    <div style="display:flex; flex-direction: column; gap: 14px;">
+      <p class="mono-dim" style="font-size: 12px;">
+        paste the REGISTRATION the other wgflow generated. once
+        submitted, this wgflow installs them as a peer immediately
+        and returns a bundle for them to paste back.
+      </p>
+      <label style="display:flex; flex-direction: column; gap: 4px;">
+        <span class="mono-dim" style="font-size: 11px;">paste registration</span>
+        <textarea id="fed-create-reg" class="mono"
+                  placeholder="# wgflow multisite REGISTRATION — DO NOT EDIT&#10;# wgflow-multisite-registration-name: ...&#10;..."
+                  style="min-height: 160px; font-size: 11px;"></textarea>
+      </label>
+      <label style="display:flex; flex-direction: column; gap: 4px;">
+        <span class="mono-dim" style="font-size: 11px;">name override (optional)</span>
+        <input id="fed-create-name" class="mono" maxlength="64" placeholder="leave blank to use registration name">
+      </label>
+      <label style="display:flex; flex-direction: column; gap: 4px;">
+        <span class="mono-dim" style="font-size: 11px;">your public WG endpoint (host:port)</span>
+        <input id="fed-create-endpoint" class="mono"
+               value="${fedEscapeHtml(defaultEndpoint)}"
+               placeholder="vpn.example.com:51820">
+      </label>
+      <label style="display:flex; flex-direction: column; gap: 4px;">
+        <span class="mono-dim" style="font-size: 11px;">advertised networks (CIDRs reachable through THIS wgflow)</span>
+        <input id="fed-create-adv" class="mono" placeholder="192.168.99.0/24">
+      </label>
+      <div style="display:flex; gap: 8px; justify-content: flex-end;">
+        <button class="ghost" id="fed-create-cancel">cancel</button>
+        <button class="primary" id="fed-create-submit">generate bundle</button>
+      </div>
+    </div>`;
+  modal.classList.add('show');
+
+  $('#fed-create-cancel').onclick = () => modal.classList.remove('show');
+  $('#fed-create-submit').onclick = async () => {
+    const registration = ($('#fed-create-reg').value || '').trim();
+    const name = ($('#fed-create-name').value || '').trim() || null;
+    const endpoint = ($('#fed-create-endpoint').value || '').trim();
+    const advRaw = ($('#fed-create-adv').value || '').trim();
+    if (!registration) {
+      toast('paste a registration first', 'error');
+      return;
+    }
+    const advertised = advRaw ? advRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
+    const btn = $('#fed-create-submit');
+    btn.disabled = true;
+    btn.textContent = 'generating...';
+    try {
+      const result = await api('POST', '/api/multisite/links', {
+        registration, name, endpoint, advertised_networks: advertised,
+      });
+      fedShowBundle(result);
+    } catch (e) {
+      toast('create failed: ' + (e.message || ''), 'error');
+      btn.disabled = false;
+      btn.textContent = 'generate bundle';
+    }
+  };
+}
+
+function fedShowBundle(result) {
+  const modal = $('#modal');
+  const title = $('#modal-title');
+  const body  = $('#modal-body');
+
+  title.textContent = `bundle for: ${result.name}`;
+  body.innerHTML = `
+    <div style="display:flex; flex-direction: column; gap: 12px;">
+      <p class="mono-dim" style="font-size: 12px; padding: 8px; background: var(--bg-3); border-left: 2px solid var(--accent);">
+        copy this bundle. paste into the OTHER wgflow\'s pending link
+        (click <strong>complete pairing</strong> on the row showing
+        <span class="mono">${fedEscapeHtml(result.name)}</span>). the
+        tunnel will handshake within ~5s after they submit.
+      </p>
+      <p class="mono-dim" style="font-size: 11px;">
+        you: <span class="mono">${fedEscapeHtml(result.local_overlay_addr)}</span> ·
+        them: <span class="mono">${fedEscapeHtml(result.remote_overlay_addr)}</span>
+      </p>
+      <textarea id="fed-bundle-text" class="mono" readonly
+                style="min-height: 240px; font-size: 11px; background: var(--bg-3);">${fedEscapeHtml(result.bundle)}</textarea>
+      <div style="display:flex; gap: 8px; justify-content: flex-end;">
+        <button class="ghost" id="fed-bundle-close">done</button>
+        <button class="primary" id="fed-bundle-copy">copy to clipboard</button>
+      </div>
+    </div>`;
+
+  $('#fed-bundle-close').onclick = () => {
+    modal.classList.remove('show');
+    fedRefresh();
+  };
+  $('#fed-bundle-copy').onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(result.bundle);
+      toast('bundle copied');
+    } catch (e) {
+      const ta = $('#fed-bundle-text');
+      if (ta) { ta.focus(); ta.select(); }
+      toast('clipboard blocked — textarea selected, press Cmd/Ctrl+C', 'error');
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Init + lifecycle
+// ---------------------------------------------------------------------------
+
+async function fedInit() {
+  let status;
   try {
-    const [links, status] = await Promise.all([
-      api('GET', '/api/federation/links'),
-      api('GET', '/api/federation/status'),
-    ]);
-    _fedState.rows = links || [];
-    _fedState.localMeta = status;
-
-    // Header line: "this wgflow: 10.99.0.5 — 2 links established".
-    const meta = $('#fed-local-meta');
-    if (meta && status) {
-      const addr = (status.local_fed_addr || '').split('/')[0] || '—';
-      const counts = status.links_by_status || {};
-      const established = counts.established || 0;
-      const total = (counts.established || 0) + (counts.pending || 0)
-                  + (counts.failed || 0) + (counts.disabled || 0);
-      meta.textContent = `this: ${addr} · ${established}/${total} established`;
-    }
-
-    // Pending-token banner.
-    const banner = $('#fed-pending-banner');
-    const meta2  = $('#fed-pending-meta');
-    if (banner && status) {
-      if (status.pending_token_active) {
-        banner.style.display = '';
-        if (meta2) {
-          meta2.textContent = `${status.pending_token_seconds_left}s remaining`;
-        }
-      } else {
-        banner.style.display = 'none';
-      }
-    }
-
-    fedRenderTable();
+    status = await api('GET', '/api/multisite/status');
   } catch (e) {
-    // Don't toast on poll errors — the panel stays usable, the next
-    // tick may succeed. Console-log so developers can spot it.
-    console.warn('[federation] refresh failed:', e);
+    console.warn('[multisite] status endpoint failed:', e);
+    return;
   }
+  if (!status || !status.enabled) {
+    if (status && status.reason) {
+      console.warn('[multisite] panel hidden — reason:', status.reason);
+      if (status.error_detail) console.warn('[multisite] error detail:', status.error_detail);
+    }
+    return;
+  }
+  _fedState.enabled = true;
+  if (status.default_endpoint) _fedState.defaultEndpoint = status.default_endpoint;
+  const panel = $('#federation-panel');
+  if (panel) panel.style.display = '';
+
+  const pairBtn    = $('#fed-pair-btn');
+  const connectBtn = $('#fed-connect-btn');
+  if (pairBtn)    pairBtn.onclick    = fedOpenPairModal;
+  if (connectBtn) connectBtn.onclick = fedOpenConnectModal;
+
+  fedRefresh();
+  fedStartPolling();
 }
 
 function fedStartPolling() {
@@ -10863,223 +11684,579 @@ function fedStopPolling() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Pair-token modal (responder side)
-// ---------------------------------------------------------------------------
-
-function fedOpenPairModal() {
-  const modal = $('#modal');
-  const title = $('#modal-title');
-  const body  = $('#modal-body');
-  if (!modal || !body) return;
-  title.textContent = 'generate pairing token';
-
-  // The operator has to tell us our public panel host:port, because we
-  // can't sniff it reliably from the request side. Default to the
-  // current browser's location since most operators DO browse to the
-  // panel via the same hostname they'd federate on — but make it
-  // editable in case wgflow lives on a different DNS name from the WG
-  // public endpoint.
-  const defaultEndpoint = `${window.location.hostname}` +
-    (window.location.port ? `:${window.location.port}` : '');
-
-  body.innerHTML = `
-    <div style="display:flex; flex-direction: column; gap: 14px;">
-      <p class="mono-dim" style="font-size: 12px;">
-        share the resulting URL with the other wgflow's operator. it expires
-        in 10 minutes and is single-use.
-      </p>
-      <label style="display:flex; flex-direction: column; gap: 4px;">
-        <span class="mono-dim" style="font-size: 11px;">our panel endpoint (host:port)</span>
-        <input id="fed-pair-endpoint" class="mono" value="${fedEscapeHtml(defaultEndpoint)}"
-               placeholder="vpn.example.com:443">
-      </label>
-      <label style="display:flex; flex-direction: column; gap: 4px;">
-        <span class="mono-dim" style="font-size: 11px;">name hint (optional)</span>
-        <input id="fed-pair-name" class="mono" placeholder="box-A"
-               maxlength="64">
-      </label>
-      <div style="display:flex; gap: 8px; justify-content: flex-end;">
-        <button class="ghost" id="fed-pair-cancel">cancel</button>
-        <button class="primary" id="fed-pair-submit">generate</button>
-      </div>
-      <div id="fed-pair-result" style="display:none;"></div>
-    </div>`;
-
-  modal.classList.add('open');
-
-  $('#fed-pair-cancel').onclick = () => modal.classList.remove('open');
-  $('#fed-pair-submit').onclick = async () => {
-    const endpoint = ($('#fed-pair-endpoint').value || '').trim();
-    const nameHint = ($('#fed-pair-name').value || '').trim();
-    if (!endpoint) {
-      toast('panel endpoint is required', 'error');
-      return;
-    }
-    try {
-      const r = await api('POST', '/api/federation/links/pair', {
-        panel_endpoint: endpoint, name_hint: nameHint,
-      });
-      // Replace the form with the result.
-      const result = $('#fed-pair-result');
-      result.style.display = '';
-      result.innerHTML = `
-        <div style="border-top: 1px solid var(--border); padding-top: 12px; margin-top: 4px;">
-          <div class="mono-dim" style="font-size: 11px; margin-bottom: 4px;">pairing url (copy + send)</div>
-          <textarea readonly class="mono" id="fed-pair-out"
-                    style="width: 100%; min-height: 80px;">${fedEscapeHtml(r.pair_url)}</textarea>
-          <div style="display:flex; gap: 8px; margin-top: 8px;">
-            <button class="primary" id="fed-pair-copy">copy</button>
-            <span class="mono-dim" style="font-size: 11px; align-self: center;">
-              expires in ${r.expires_in_seconds}s
-            </span>
-          </div>
-        </div>`;
-      $('#fed-pair-copy').onclick = () => {
-        const ta = $('#fed-pair-out');
-        ta.select();
-        try {
-          navigator.clipboard.writeText(ta.value);
-          toast('copied');
-        } catch (_) {
-          // Fallback: execCommand. Some older browsers / non-https contexts.
-          document.execCommand('copy');
-          toast('copied');
-        }
-      };
-      // Disable submit so they don't accidentally generate a second one
-      // before copying the first.
-      $('#fed-pair-submit').disabled = true;
-      // Refresh the panel banner.
-      fedRefresh();
-    } catch (e) {
-      toast('pair failed: ' + (e.message || ''), 'error');
-    }
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Connect-by-URL modal (initiator side)
-// ---------------------------------------------------------------------------
-
-function fedOpenConnectModal() {
-  const modal = $('#modal');
-  const title = $('#modal-title');
-  const body  = $('#modal-body');
-  if (!modal || !body) return;
-  title.textContent = 'connect to remote wgflow';
-
-  body.innerHTML = `
-    <div style="display:flex; flex-direction: column; gap: 14px;">
-      <p class="mono-dim" style="font-size: 12px;">
-        paste the wgflow-pair:// url generated on the other wgflow.
-        the handshake uses webpki TLS — the remote panel needs a valid
-        public certificate for federation in v4.0.
-      </p>
-      <label style="display:flex; flex-direction: column; gap: 4px;">
-        <span class="mono-dim" style="font-size: 11px;">pairing url</span>
-        <textarea id="fed-conn-url" class="mono"
-                  placeholder="wgflow-pair://host:port/code…"
-                  style="min-height: 60px;"></textarea>
-      </label>
-      <label style="display:flex; flex-direction: column; gap: 4px;">
-        <span class="mono-dim" style="font-size: 11px;">our local label for this link</span>
-        <input id="fed-conn-name" class="mono" placeholder="box-B"
-               maxlength="64">
-      </label>
-      <div style="display:flex; gap: 8px; justify-content: flex-end;">
-        <button class="ghost" id="fed-conn-cancel">cancel</button>
-        <button class="primary" id="fed-conn-submit">connect</button>
-      </div>
-    </div>`;
-
-  modal.classList.add('open');
-
-  $('#fed-conn-cancel').onclick = () => modal.classList.remove('open');
-  $('#fed-conn-submit').onclick = async () => {
-    const url  = ($('#fed-conn-url').value  || '').trim();
-    const name = ($('#fed-conn-name').value || '').trim();
-    if (!url || !name) {
-      toast('url and name are both required', 'error');
-      return;
-    }
-    const btn = $('#fed-conn-submit');
-    btn.disabled = true;
-    btn.textContent = 'connecting…';
-    try {
-      await api('POST', '/api/federation/links/connect',
-                { pair_url: url, name });
-      toast('link created');
-      modal.classList.remove('open');
-      fedRefresh();
-    } catch (e) {
-      toast('connect failed: ' + (e.message || ''), 'error');
-    } finally {
-      btn.disabled = false;
-      btn.textContent = 'connect';
-    }
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Boot
-// ---------------------------------------------------------------------------
-
-async function fedInit() {
-  let status;
-  try {
-    status = await api('GET', '/api/federation/status');
-  } catch (e) {
-    // Status endpoint missing or auth-blocked. Stay hidden — the legacy
-    // panel UI continues to work as before.
-    return;
-  }
-  if (!status || !status.enabled) {
-    return;
-  }
-
-  _fedState.enabled = true;
-  const panel = $('#federation-panel');
-  if (panel) panel.style.display = '';
-
-  // Wire header buttons.
-  const pairBtn    = $('#fed-pair-btn');
-  const connectBtn = $('#fed-connect-btn');
-  const cancelBtn  = $('#fed-pending-cancel');
-  if (pairBtn)    pairBtn.onclick    = fedOpenPairModal;
-  if (connectBtn) connectBtn.onclick = fedOpenConnectModal;
-  if (cancelBtn)  cancelBtn.onclick  = async () => {
-    try {
-      await api('DELETE', '/api/federation/links/pending');
-      toast('pairing window cancelled');
-      fedRefresh();
-    } catch (e) {
-      toast('cancel failed: ' + (e.message || ''), 'error');
-    }
-  };
-
-  // Initial fetch + start polling.
-  await fedRefresh();
-  fedStartPolling();
-
-  // Re-inject drag handles in case the panel just appeared after the
-  // reorder system already ran. Idempotent — reorderInjectHandles
-  // checks for existing handles before adding new ones.
-  if (typeof reorderInjectHandles === 'function') {
-    reorderInjectHandles();
-  }
-}
-
-// Hook into the existing boot path. fedInit is async and self-gated, so
-// firing it once at DOMContentLoaded is safe even when multisite is off.
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', fedInit);
-} else {
-  // Already past DOMContentLoaded — schedule a microtask.
-  setTimeout(fedInit, 0);
+function fedEscapeHtml(s) {
+  if (s === null || s === undefined) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/\'/g, '&#39;');
 }
 
 window.addEventListener('beforeunload', fedStopPolling);
+
+// ===========================================================================
+// v4.1.1: upstream WireGuard client connections
+// ===========================================================================
+// Operators paste a WireGuard client conf (or upload the .conf file);
+// we POST to /api/upstream/preview which parses + runs the AllowedIPs
+// safety filter and returns what WOULD be created. The operator sees
+// the filter diff (full-tunnel replaced, overlapping CIDRs stripped)
+// before clicking "create" — at which point we POST to /api/upstream/
+// connections to actually persist + bring up the wgN interface.
+//
+// Lifecycle:
+//   - Reads at fed panel init (upstreamRefresh, called from fedRefresh).
+//   - "+ import" button opens the import modal.
+//   - The modal has two stages: paste → preview → confirm.
+//   - Per-row toggle / delete actions hit PUT and DELETE.
+
+const _upstreamState = {
+  rows: [],
+  // Holds the parsed preview between the "preview" and "create" steps
+  // of the import modal so we don't re-parse client-side.
+  pendingPreview: null,
+  pendingConfText: null,
+};
+
+async function upstreamRefresh() {
+  try {
+    _upstreamState.rows = await api('GET', '/api/upstream/connections') || [];
+    upstreamRender();
+  } catch (e) {
+    console.warn('[upstream] refresh failed:', e);
+  }
+}
+
+function upstreamRender() {
+  const tbody = $('#upstream-tbody');
+  if (!tbody) return;
+  if (!_upstreamState.rows.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="empty">no upstream connections · click + import to add</td></tr>';
+    return;
+  }
+  tbody.innerHTML = '';
+  for (const u of _upstreamState.rows) {
+    const tr = document.createElement('tr');
+    tr.dataset.upstreamId = u.id;
+    if (!u.enabled) tr.style.opacity = '0.55';
+
+    // Status dot — green if recent handshake (within 180s, same threshold
+    // as federation), amber if no handshake yet, red if there's a
+    // last_error. Disabled rows show a gray dot.
+    let dotColor = 'var(--fg-muted)';
+    let statusLabel = 'disabled';
+    if (u.enabled) {
+      if (u.last_error) { dotColor = 'var(--danger)'; statusLabel = 'error'; }
+      else if (u.last_handshake_ts && (Date.now()/1000 - u.last_handshake_ts) < 180) {
+        dotColor = 'var(--accent)'; statusLabel = 'connected';
+      } else { dotColor = 'var(--warn)'; statusLabel = 'connecting'; }
+    }
+
+    // AllowedIPs cell. Show declared and applied side by side when they
+    // differ — operator should always be able to see what was filtered.
+    const declared = (u.remote_allowed_ips_declared || '').split(',').map(s=>s.trim()).filter(Boolean);
+    const applied  = (u.remote_allowed_ips_applied  || '').split(',').map(s=>s.trim()).filter(Boolean);
+    const declaredStr = fedEscapeHtml(declared.join(', '));
+    const appliedStr  = fedEscapeHtml(applied.join(', '));
+    const aipsCell = (declared.join(',') === applied.join(','))
+      ? `<div class="mono-dim" style="font-size:10px;">routes: ${appliedStr}</div>`
+      : `<div class="mono-dim" style="font-size:10px;">declared: ${declaredStr}</div>
+         <div class="mono-dim" style="font-size:10px; color:var(--accent);">applied: ${appliedStr}</div>`;
+
+    tr.innerHTML = `
+      <td>
+        <input type="checkbox" data-up-action="toggle" ${u.enabled ? 'checked' : ''}>
+      </td>
+      <td>
+        <span class="status-dot" style="display:inline-block; width:8px; height:8px; border-radius:50%; background:${dotColor}; margin-right:6px;" title="${statusLabel}"></span>
+        <span class="mono">${fedEscapeHtml(u.name)}</span>
+        <div class="mono-dim" style="font-size:10px;">
+          ${fedEscapeHtml(u.interface_name)} · ${fedEscapeHtml(u.local_address)}
+          ${u.upstream_dns ? ` · dns: ${fedEscapeHtml(u.upstream_dns)}` : ''}
+        </div>
+      </td>
+      <td>
+        <span class="mono-dim" style="font-size:11px;">${fedEscapeHtml(u.remote_endpoint)}</span>
+        ${aipsCell}
+        ${u.last_error ? `<div style="color:var(--danger); font-size:10px; margin-top:2px;">${fedEscapeHtml(u.last_error)}</div>` : ''}
+      </td>
+      <td class="num">${u.last_handshake_ts ? fmtAgo(u.last_handshake_ts) : '—'}</td>
+      <td>
+        <button class="ghost" data-up-action="delete" title="forget this upstream">✕</button>
+      </td>`;
+    tbody.appendChild(tr);
+  }
+  tbody.onclick = upstreamHandleRowClick;
+  tbody.onchange = upstreamHandleRowClick;
+}
+
+async function upstreamHandleRowClick(ev) {
+  const target = ev.target.closest('[data-up-action]');
+  if (!target) return;
+  const row = target.closest('[data-upstream-id]');
+  if (!row) return;
+  const id = row.dataset.upstreamId;
+  const action = target.dataset.upAction;
+  const u = _upstreamState.rows.find(x => String(x.id) === String(id));
+  if (!u) return;
+
+  try {
+    if (action === 'toggle') {
+      await api('PUT', `/api/upstream/connections/${id}`,
+                { enabled: target.checked });
+      toast(target.checked ? `${u.name} enabled` : `${u.name} disabled`);
+      await upstreamRefresh();
+    } else if (action === 'delete') {
+      if (!confirm(`forget upstream '${u.name}'? this tears down the kernel interface and removes the row.`)) return;
+      await api('DELETE', `/api/upstream/connections/${id}`);
+      toast(`removed ${u.name}`);
+      await upstreamRefresh();
+    }
+  } catch (e) {
+    toast('action failed: ' + (e.message || ''), 'error');
+    if (action === 'toggle') target.checked = !target.checked;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Import modal — two-stage flow: paste → preview → confirm
+// ---------------------------------------------------------------------------
+
+function upstreamOpenImportModal() {
+  const modal = $('#modal');
+  const title = $('#modal-title');
+  const body  = $('#modal-body');
+  if (!modal || !body) return;
+
+  // Stage 1: paste-text or file upload.
+  title.textContent = 'import upstream WireGuard conf';
+  body.innerHTML = `
+    <div style="display:flex; flex-direction: column; gap: 14px;">
+      <p class="mono-dim" style="font-size: 12px;">
+        paste the contents of a WireGuard client conf
+        (the <span class="mono">[Interface]</span> +
+        <span class="mono">[Peer]</span> blocks). this wgflow will become
+        a client of the configured endpoint on its own kernel interface.
+      </p>
+      <p class="mono-dim" style="font-size: 11px; padding: 8px; background: var(--bg-3); border-left: 2px solid var(--warn);">
+        full-tunnel <span class="mono">AllowedIPs = 0.0.0.0/0</span> will
+        be filtered on import: routing every packet through the upstream
+        would lock you out of this panel. you'll see the filter result
+        on the next screen and can override before confirming.
+      </p>
+      <label style="display:flex; flex-direction: column; gap: 4px;">
+        <span class="mono-dim" style="font-size: 11px;">
+          paste conf, or drop a .conf file
+        </span>
+        <textarea id="up-conf-text" class="mono"
+                  placeholder="[Interface]&#10;PrivateKey = …&#10;Address = …&#10;&#10;[Peer]&#10;PublicKey = …&#10;…"
+                  style="min-height: 200px; font-size: 11px;"></textarea>
+        <div style="display:flex; gap: 8px; align-items: center;">
+          <input type="file" id="up-conf-file" accept=".conf,text/plain" style="font-size: 11px;">
+          <span class="mono-dim" style="font-size: 10px;">file fills the textarea</span>
+        </div>
+      </label>
+      <div style="display:flex; gap: 8px; justify-content: flex-end;">
+        <button class="ghost" id="up-import-cancel">cancel</button>
+        <button class="primary" id="up-import-preview">preview →</button>
+      </div>
+    </div>`;
+  modal.classList.add('show');
+
+  $('#up-import-cancel').onclick = () => modal.classList.remove('show');
+  $('#up-conf-file').onchange = (ev) => {
+    const f = ev.target.files && ev.target.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => { $('#up-conf-text').value = reader.result; };
+    reader.readAsText(f);
+  };
+  $('#up-import-preview').onclick = upstreamPreviewStage;
+}
+
+async function upstreamPreviewStage() {
+  const conf = ($('#up-conf-text').value || '').trim();
+  if (!conf) { toast('paste a conf or upload a file', 'error'); return; }
+  const btn = $('#up-import-preview');
+  btn.disabled = true;
+  btn.textContent = 'parsing…';
+  try {
+    const preview = await api('POST', '/api/upstream/preview',
+                              { conf_text: conf });
+    _upstreamState.pendingPreview  = preview;
+    _upstreamState.pendingConfText = conf;
+    upstreamShowPreview(preview);
+  } catch (e) {
+    toast('parse failed: ' + (e.message || ''), 'error');
+    btn.disabled = false;
+    btn.textContent = 'preview →';
+  }
+}
+
+function upstreamShowPreview(preview) {
+  const title = $('#modal-title');
+  const body  = $('#modal-body');
+  title.textContent = 'review + confirm';
+
+  // Build the AllowedIPs review section. If the filter changed
+  // anything, surface the diff prominently with a warning color.
+  const declared = preview.remote_allowed_ips_declared || [];
+  const applied  = preview.remote_allowed_ips_applied  || [];
+  const filtered = preview.full_tunnel_replaced || (preview.stripped_overlaps && preview.stripped_overlaps.length);
+
+  let aipsBlock = '';
+  if (filtered) {
+    aipsBlock = `
+      <div style="padding: 10px 12px; background: var(--bg-3); border-left: 2px solid var(--warn); margin-bottom: 10px;">
+        <div class="mono-dim" style="font-size: 11px; margin-bottom: 4px;">
+          ⚠ AllowedIPs filtered for safety
+        </div>
+        <div class="mono-dim" style="font-size: 10px;">
+          declared: ${fedEscapeHtml(declared.join(', '))}
+        </div>
+        ${preview.full_tunnel_replaced ? '<div class="mono-dim" style="font-size: 10px;">→ 0.0.0.0/0 replaced with RFC1918 ranges</div>' : ''}
+        ${(preview.stripped_overlaps || []).map(s => `<div class="mono-dim" style="font-size: 10px;">→ stripped: ${fedEscapeHtml(s)}</div>`).join('')}
+      </div>`;
+  }
+
+  body.innerHTML = `
+    <div style="display:flex; flex-direction: column; gap: 12px;">
+      <label style="display:flex; flex-direction: column; gap: 4px;">
+        <span class="mono-dim" style="font-size: 11px;">your label for this upstream</span>
+        <input id="up-name" class="mono" placeholder="mullvad-fr" maxlength="64">
+      </label>
+
+      <div style="font-size: 12px;">
+        <div class="mono-dim" style="font-size: 11px; margin-bottom: 6px;">parsed:</div>
+        <div class="mono" style="font-size: 11px; line-height: 1.6;">
+          endpoint: ${fedEscapeHtml(preview.remote_endpoint)}<br>
+          local address: ${fedEscapeHtml(preview.local_address)}
+          ${preview.mtu ? `<br>mtu: ${preview.mtu}` : ''}
+          ${preview.upstream_dns && preview.upstream_dns.length
+            ? `<br><span class="mono-dim">dns (captured, not yet applied):</span> ${fedEscapeHtml(preview.upstream_dns.join(', '))}`
+            : ''}
+          ${preview.has_psk ? '<br><span class="mono-dim">presharedkey:</span> ✓' : ''}
+        </div>
+      </div>
+
+      ${aipsBlock}
+
+      <label style="display:flex; flex-direction: column; gap: 4px;">
+        <span class="mono-dim" style="font-size: 11px;">
+          applied AllowedIPs (edit if needed; comma-separated)
+        </span>
+        <input id="up-applied-aips" class="mono" style="font-size: 11px;"
+               value="${fedEscapeHtml(applied.join(', '))}">
+        <span class="mono-dim" style="font-size: 10px;">
+          0.0.0.0/0 is hard-refused — specify actual CIDRs you want to route.
+        </span>
+      </label>
+
+      <div style="display:flex; gap: 8px; justify-content: flex-end;">
+        <button class="ghost" id="up-confirm-back">← back</button>
+        <button class="primary" id="up-confirm-create">create</button>
+      </div>
+    </div>`;
+
+  $('#up-confirm-back').onclick = upstreamOpenImportModal;
+  $('#up-confirm-create').onclick = upstreamCreateConfirm;
+}
+
+async function upstreamCreateConfirm() {
+  const modal = $('#modal');
+  const name = ($('#up-name').value || '').trim();
+  if (!name) { toast('name is required', 'error'); return; }
+  const overrideStr = ($('#up-applied-aips').value || '').trim();
+  const overrideList = overrideStr
+    ? overrideStr.split(',').map(s => s.trim()).filter(Boolean)
+    : null;
+
+  // If the operator's edited applied list matches what the filter
+  // suggested, send no override (server applies its own filter again
+  // for symmetry). Otherwise send what they typed.
+  const filterSuggested = (_upstreamState.pendingPreview.remote_allowed_ips_applied || []).join(',');
+  const operatorTyped = (overrideList || []).join(',');
+  const sendOverride = (operatorTyped && operatorTyped !== filterSuggested) ? overrideList : null;
+
+  const btn = $('#up-confirm-create');
+  btn.disabled = true;
+  btn.textContent = 'creating…';
+  try {
+    await api('POST', '/api/upstream/connections', {
+      name,
+      conf_text: _upstreamState.pendingConfText,
+      allowed_ips_override: sendOverride,
+    });
+    toast(`upstream ${name} created`);
+    modal.classList.remove('show');
+    _upstreamState.pendingPreview  = null;
+    _upstreamState.pendingConfText = null;
+    await upstreamRefresh();
+  } catch (e) {
+    toast('create failed: ' + (e.message || ''), 'error');
+    btn.disabled = false;
+    btn.textContent = 'create';
+  }
+}
+
+(function initUpstream() {
+  const wire = () => {
+    const importBtn = $('#upstream-import-btn');
+    if (importBtn) importBtn.onclick = upstreamOpenImportModal;
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', wire);
+  } else {
+    setTimeout(wire, 0);
+  }
+})();
+
+// ===========================================================================
+// v4.1: blocklist sources
+// ===========================================================================
+// Multi-source DNS blocklist management. Operators subscribe to URLs
+// returning hosts-format text; on refresh we fetch all enabled sources,
+// dedup across all, write a single merged file at
+// /etc/dnsmasq.d/blocklist.hosts, and SIGHUP dnsmasq.
+//
+// Lifecycle:
+//   1. boot: GET /api/server reveals local_dns_enabled. If false, the
+//      panel stays hidden (gated via applyLocalDnsVisibility).
+//   2. When the panel becomes visible: GET /api/blocklist/sources +
+//      /api/blocklist/status to populate the table and header.
+//   3. User actions: toggle (PUT /sources/{id}), add custom (POST
+//      /sources), delete (DELETE), refresh-all (POST /refresh).
+//
+// Refresh is operator-triggered — we don't poll. Hosts files don't
+// change on a meaningful cadence; making the operator press a button
+// is the right semantics.
+
+const _blocklistState = {
+  rows: [],
+  lastStatus: null,
+  refreshing: false,
+};
+
+function blocklistFmtAgo(ts) {
+  if (!ts) return 'never';
+  return fmtAgo(ts);
+}
+
+async function blocklistRefresh() {
+  // Reads. Doesn't trigger a network refresh — that's blocklistRefreshAll.
+  try {
+    const [rows, status] = await Promise.all([
+      api('GET', '/api/blocklist/sources'),
+      api('GET', '/api/blocklist/status'),
+    ]);
+    _blocklistState.rows = rows || [];
+    _blocklistState.lastStatus = status;
+    blocklistRender();
+  } catch (e) {
+    console.warn('[blocklist] read failed:', e);
+  }
+}
+
+function blocklistRender() {
+  const tbody = $('#blocklist-tbody');
+  const status = $('#blocklist-status');
+  if (!tbody) return;
+
+  // Header line: "last merged: 2 minutes ago · 142,891 entries · 3/5 sources enabled"
+  if (status && _blocklistState.lastStatus) {
+    const s = _blocklistState.lastStatus;
+    const parts = [];
+    if (s.last_merged_ts) {
+      parts.push(`last merged: ${blocklistFmtAgo(s.last_merged_ts)}`);
+      parts.push(`${(s.last_merged_count || 0).toLocaleString()} entries`);
+    } else {
+      parts.push('not yet merged');
+    }
+    parts.push(`${s.enabled_sources}/${s.total_sources} enabled`);
+    status.textContent = parts.join(' · ');
+  }
+
+  if (!_blocklistState.rows.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">no blocklist sources configured · click + to add</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = '';
+  for (const src of _blocklistState.rows) {
+    const tr = document.createElement('tr');
+    tr.dataset.sourceId = src.id;
+    // Color the row dim when disabled so the operator's eye finds the
+    // active sources first.
+    if (!src.enabled) tr.style.opacity = '0.55';
+
+    // Last-fetch column. Three states with distinct visuals:
+    //   - never fetched yet → em-dash
+    //   - fetched + no error → relative time, normal color
+    //   - error → relative time + error string in red below
+    let lastFetchCell = '—';
+    if (src.last_fetched_ts) {
+      lastFetchCell = blocklistFmtAgo(src.last_fetched_ts);
+    }
+
+    // Entries cell shows count + overlap. "142,891 (-3,205)" reads as
+    // "142,891 entries, of which 3,205 were already covered by another
+    // enabled source." That overlap number is what tells the operator
+    // whether enabling a second similar list is actually adding value.
+    let entriesCell = '—';
+    if (src.last_entry_count != null) {
+      entriesCell = src.last_entry_count.toLocaleString();
+      if (src.last_overlap_count) {
+        entriesCell += ` <span class="mono-dim" style="font-size:10px;">−${src.last_overlap_count.toLocaleString()} dup</span>`;
+      }
+    }
+
+    tr.innerHTML = `
+      <td><input type="checkbox" data-bl-action="toggle" ${src.enabled ? 'checked' : ''}></td>
+      <td>
+        <span class="mono">${fedEscapeHtml(src.name)}</span>
+        ${src.is_preset ? '<span class="mono-dim" style="font-size:10px;"> · preset</span>' : ''}
+      </td>
+      <td><span class="mono-dim" style="font-size:11px; word-break:break-all;">${fedEscapeHtml(src.url)}</span>
+        ${src.last_error ? `<div style="color:var(--danger); font-size:10px; margin-top:2px;">${fedEscapeHtml(src.last_error)}</div>` : ''}
+      </td>
+      <td class="num">${entriesCell}</td>
+      <td class="num">${lastFetchCell}</td>
+      <td>
+        <button class="ghost" data-bl-action="delete" title="remove this source">✕</button>
+      </td>`;
+    tbody.appendChild(tr);
+  }
+  tbody.onclick = blocklistHandleRowClick;
+  tbody.onchange = blocklistHandleRowClick;  // checkbox triggers change, not click
+}
+
+async function blocklistHandleRowClick(ev) {
+  const target = ev.target.closest('[data-bl-action]');
+  if (!target) return;
+  const row = target.closest('[data-source-id]');
+  if (!row) return;
+  const id = row.dataset.sourceId;
+  const action = target.dataset.blAction;
+  const src = _blocklistState.rows.find(r => String(r.id) === String(id));
+  if (!src) return;
+
+  try {
+    if (action === 'toggle') {
+      await api('PUT', `/api/blocklist/sources/${id}`,
+                { enabled: target.checked });
+      toast(target.checked ? `${src.name} enabled` : `${src.name} disabled`);
+      await blocklistRefresh();
+    } else if (action === 'delete') {
+      if (!confirm(`remove '${src.name}'? you can re-add the URL manually if needed.`)) return;
+      await api('DELETE', `/api/blocklist/sources/${id}`);
+      toast(`removed ${src.name}`);
+      await blocklistRefresh();
+    }
+  } catch (e) {
+    toast('action failed: ' + (e.message || ''), 'error');
+    // Revert the checkbox if the toggle failed.
+    if (action === 'toggle') target.checked = !target.checked;
+  }
+}
+
+function blocklistOpenAddModal() {
+  const modal = $('#modal');
+  const title = $('#modal-title');
+  const body  = $('#modal-body');
+  if (!modal || !body) return;
+  title.textContent = 'add blocklist source';
+  body.innerHTML = `
+    <div style="display:flex; flex-direction: column; gap: 14px;">
+      <p class="mono-dim" style="font-size: 12px;">
+        URL must return a hosts-format text file (lines like
+        <span class="mono">0.0.0.0 ads.example.com</span>). Adblock Plus
+        format (<span class="mono">||domain^</span>) is not supported —
+        most popular blocklists publish a hosts-format variant alongside
+        the Adblock format.
+      </p>
+      <label style="display:flex; flex-direction: column; gap: 4px;">
+        <span class="mono-dim" style="font-size: 11px;">name (your label, must be unique)</span>
+        <input id="bl-add-name" class="mono" placeholder="my-custom-list" maxlength="64">
+      </label>
+      <label style="display:flex; flex-direction: column; gap: 4px;">
+        <span class="mono-dim" style="font-size: 11px;">URL</span>
+        <input id="bl-add-url" class="mono" placeholder="https://…/hosts">
+      </label>
+      <div style="display:flex; gap: 8px; justify-content: flex-end;">
+        <button class="ghost" id="bl-add-cancel">cancel</button>
+        <button class="primary" id="bl-add-submit">add</button>
+      </div>
+    </div>`;
+  modal.classList.add('show');
+  $('#bl-add-cancel').onclick = () => modal.classList.remove('show');
+  $('#bl-add-submit').onclick = async () => {
+    const name = ($('#bl-add-name').value || '').trim();
+    const url  = ($('#bl-add-url').value  || '').trim();
+    if (!name || !url) {
+      toast('name and url are both required', 'error');
+      return;
+    }
+    try {
+      await api('POST', '/api/blocklist/sources', { name, url });
+      toast(`added ${name}`);
+      modal.classList.remove('show');
+      await blocklistRefresh();
+    } catch (e) {
+      toast('add failed: ' + (e.message || ''), 'error');
+    }
+  };
+}
+
+async function blocklistRefreshAll() {
+  if (_blocklistState.refreshing) return;
+  _blocklistState.refreshing = true;
+  const btn = $('#blocklist-refresh-all');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '↻ fetching…';
+  }
+  try {
+    const summary = await api('POST', '/api/blocklist/refresh');
+    // Build a concise toast: "fetched 3, unchanged 0, errors 1 · 142,891 unique"
+    const parts = [];
+    if (summary.sources_fetched)   parts.push(`fetched ${summary.sources_fetched}`);
+    if (summary.sources_unchanged) parts.push(`unchanged ${summary.sources_unchanged}`);
+    if (summary.sources_error)     parts.push(`errors ${summary.sources_error}`);
+    if (summary.merged_unique_count) {
+      parts.push(`${summary.merged_unique_count.toLocaleString()} unique`);
+    }
+    toast(parts.join(' · ') || 'no enabled sources');
+    await blocklistRefresh();
+  } catch (e) {
+    toast('refresh failed: ' + (e.message || ''), 'error');
+  } finally {
+    _blocklistState.refreshing = false;
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = '↻ refresh';
+    }
+  }
+}
+
+(function initBlocklist() {
+  const wire = () => {
+    const addBtn = $('#blocklist-add');
+    if (addBtn) addBtn.onclick = blocklistOpenAddModal;
+    const refreshBtn = $('#blocklist-refresh-all');
+    if (refreshBtn) refreshBtn.onclick = blocklistRefreshAll;
+    // Initial population. If local_dns_enabled is false the panel
+    // stays hidden via applyLocalDnsVisibility, but we still populate
+    // — the user might toggle DNS on later and we want the data ready.
+    blocklistRefresh();
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', wire);
+  } else {
+    setTimeout(wire, 0);
+  }
+})();
 
 </script>
 

@@ -40,7 +40,20 @@ CREATE TABLE IF NOT EXISTS peers (
     -- imported from bare-WG sources where only the public key is known
     -- (operator's clients have the privkeys; wgflow can't re-issue configs).
     -- The UI gates the "download config" button on this flag.
-    has_private_key INTEGER NOT NULL DEFAULT 1
+    has_private_key INTEGER NOT NULL DEFAULT 1,
+    -- v4.2-rebuild: peer classification.
+    --   'client'    → normal client peer (phone, laptop, etc.). Default.
+    --                 Surfaced in the live-peers panel.
+    --   'multisite' → management peer (the other half of a multisite
+    --                 link). Surfaced in the multisite panel's
+    --                 managed-peers sub-section. Has the partner
+    --                 wgflow's overlay address as a /32 in AllowedIPs
+    --                 plus any networks the partner advertised.
+    --                 Tinted with --accent so it tracks instance theme.
+    -- The wg0 peer table doesn't care about this distinction — both
+    -- types appear in the rendered wg0.conf identically. The split
+    -- only matters for UI filtering and ACL rule generation.
+    peer_type       TEXT NOT NULL DEFAULT 'client'
 );
 
 -- Migrate older databases that pre-date the last_handshake_at column.
@@ -229,32 +242,88 @@ CREATE TABLE IF NOT EXISTS network_settings (
 --                 hasn't completed a handshake within the probe window
 --   disabled    — operator-disabled (mirrors enabled=0; redundant but
 --                 the column carries the human-facing state)
+-- v4.2-rebuild: multisite federation links.
+--
+-- Symmetric design — replaces v4.2-pre. Both wgflows peer with each
+-- other on wg0 (no separate kernel interface, no new UDP port). Each
+-- multisite link maps to one peer entry on each side, both tagged
+-- peer_type='multisite'.
+--
+-- Pairing flow (two copy-pastes — no callback, no chicken-and-egg):
+--
+--   1. wgB (importer) clicks "+ import" → "start": wgflow generates a
+--      keypair, allocates an overlay address candidate, stores
+--      privkey on the federation_links row in role='importer',
+--      status='pending-bundle'. Returns a registration text block
+--      containing wgB's pubkey + endpoint + advertised + overlay
+--      address candidate. Operator copies this string out.
+--
+--   2. wgA (creator) clicks "+ create from registration", pastes the
+--      registration. wgA picks its own overlay address (.1 by default,
+--      next free if .1 taken), generates PSK. Inserts a peer row
+--      tagged peer_type='multisite' with wgB's pubkey + endpoint —
+--      wgA NOW has wgB as a wg0 peer. Inserts federation_links row
+--      role='creator', status='established'. Returns a bundle text
+--      block containing wgA's pubkey + endpoint + PSK + overlay
+--      addresses + advertised. Operator copies this string back.
+--
+--   3. wgB (importer) pastes the bundle, completes import: inserts
+--      a peer row for wgA with the supplied pubkey + endpoint + PSK,
+--      transitions status to 'established'. wg0 syncs, tunnel
+--      handshakes within ~5s, the overlay is reachable.
+--
+-- Each side has the other's pubkey before the tunnel needs to come
+-- up — no chicken-and-egg, no callback over a not-yet-established
+-- tunnel. The auth was always "operator pasted these strings by
+-- hand"; we no longer pretend it's anything else.
+--
+-- Status values:
+--   'pending-bundle' → importer side, waiting for bundle paste.
+--                      privkey persists on this row until paste
+--                      completes (then it moves to peers.private_key
+--                      via the import endpoint and is cleared here).
+--   'established'    → both peer rows in place, tunnel can come up.
+--                      Most rows live here.
+--   'failed'         → operator-visible permanent state. Currently
+--                      reachable only via manual mark — automatic
+--                      transitions are reserved for future work.
+--
+-- peer_id is NULL on the importer side until the bundle is pasted
+-- (we don't have wgA's pubkey yet). Once status='established' it
+-- points to the peers.id of the multisite-typed peer for the
+-- remote.
+--
+-- importer_privkey lives on the row only during the pending-bundle
+-- window. It moves to peers.private_key on import-complete and is
+-- cleared from the row. We keep it on federation_links rather than
+-- pre-creating the peer row because the peer row needs the remote's
+-- pubkey, which we don't have until the bundle arrives.
 CREATE TABLE IF NOT EXISTS federation_links (
     id                    INTEGER PRIMARY KEY AUTOINCREMENT,
     name                  TEXT NOT NULL UNIQUE,
-    role                  TEXT NOT NULL,              -- 'initiator' | 'responder'
-    -- Per-link WG identity (NOT the server-wide WG keypair).
-    local_privkey         TEXT NOT NULL,
-    local_pubkey          TEXT NOT NULL,
-    remote_pubkey         TEXT NOT NULL,
+    role                  TEXT NOT NULL,                -- 'creator' | 'importer'
+    peer_id               INTEGER REFERENCES peers(id) ON DELETE SET NULL,
+    -- Importer side only: holds wgB's freshly-generated privkey
+    -- between the registration step and the bundle import. Cleared
+    -- (set to NULL) once the import completes and the privkey moves
+    -- to peers.private_key.
+    importer_privkey      TEXT,
+    -- PSK shared between the two peer entries.
     psk                   TEXT NOT NULL,
-    -- Where the remote wgflow's WG endpoint lives, on the public internet.
-    remote_wg_endpoint    TEXT NOT NULL,              -- "host:port"
-    -- Federation overlay addresses. Both stored as "x.x.x.x/32".
-    -- local_fed_addr is denormalized from network_settings.federation_local_addr
-    -- so syncconf doesn't need a second query at apply time. All rows for
-    -- one wgflow have the same local_fed_addr.
-    local_fed_addr        TEXT NOT NULL,
-    remote_fed_addr       TEXT NOT NULL,
-    -- Where to reach the remote wgflow's panel — used for follow-up RPCs
-    -- (probe, future ACL sync). Stored as "host:port"; the scheme is
-    -- implied https. Cert pinning is by WebPKI only in v4.0 (no SPKI pin).
-    remote_panel_endpoint TEXT NOT NULL,
-    -- Display metadata exchanged at handshake.
+    local_overlay_addr    TEXT NOT NULL,
+    remote_overlay_addr   TEXT NOT NULL,
+    local_advertised      TEXT NOT NULL DEFAULT '',
+    remote_advertised     TEXT NOT NULL DEFAULT '',
+    -- Endpoint of the remote wgflow's wg0. Always non-NULL once
+    -- pairing exchanges keys (registration carries importer's
+    -- endpoint; bundle carries creator's endpoint).
+    remote_endpoint       TEXT,
+    -- Display metadata. Currently unused — placeholder for v4.2
+    -- panel federation work where each side sees the other's
+    -- instance label in the panel header.
     remote_instance_id    TEXT,
     remote_instance_name  TEXT,
-    -- Status fields.
-    status                TEXT NOT NULL DEFAULT 'pending',
+    status                TEXT NOT NULL DEFAULT 'pending-bundle',
     last_handshake_ts     INTEGER,
     last_error            TEXT,
     enabled               INTEGER NOT NULL DEFAULT 1,
@@ -262,6 +331,96 @@ CREATE TABLE IF NOT EXISTS federation_links (
 );
 
 CREATE INDEX IF NOT EXISTS idx_fed_links_status ON federation_links(status);
+CREATE INDEX IF NOT EXISTS idx_fed_links_role   ON federation_links(role);
+
+-- v4.1: blocklist sources.
+--
+-- One row per upstream URL that returns a hosts-format text file.
+-- Multiple sources can be enabled simultaneously; on refresh we fetch
+-- every enabled source, parse, dedup across all, and write a single
+-- merged file to /etc/dnsmasq.d/blocklist.hosts. dnsmasq picks it up
+-- via addn-hosts= (which honors SIGHUP, unlike address= directives).
+--
+-- Presets are seeded on first run (see app/blocklist.py:seed_presets).
+-- Operators can freely add custom sources, toggle enabled, or delete
+-- any row including presets — preset rows are not protected, only
+-- pre-populated.
+--
+-- last_etag is the HTTP ETag from the previous fetch. Sent back as
+-- If-None-Match on the next refresh so unchanged sources return 304
+-- and we don't burn bandwidth re-downloading 100k-line hosts files.
+--
+-- last_overlap_count is how many entries in this source were already
+-- covered by another enabled source at the most recent merge. Lets
+-- the UI surface "this list adds N net new entries on top of what
+-- you already had," which is the actual question operators want
+-- answered when they're considering whether to enable another list.
+CREATE TABLE IF NOT EXISTS blocklist_sources (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    name               TEXT NOT NULL UNIQUE,
+    url                TEXT NOT NULL,
+    enabled            INTEGER NOT NULL DEFAULT 1,
+    is_preset          INTEGER NOT NULL DEFAULT 0,
+    last_fetched_ts    INTEGER,
+    last_entry_count   INTEGER,
+    last_overlap_count INTEGER,
+    last_error         TEXT,
+    last_etag          TEXT,
+    created_at         TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_blocklist_enabled ON blocklist_sources(enabled);
+
+-- v4.1.1: upstream WireGuard client connections.
+--
+-- Each row is an outbound WG tunnel where THIS wgflow is the client.
+-- Independent from federation_links (which is symmetric wgflow↔wgflow
+-- peering on wg0); upstream connections live on their own kernel
+-- interfaces (wg1, wg2, ...) and are managed separately to avoid
+-- AllowedIPs collisions and to keep server-role traffic isolated from
+-- client-role traffic at the kernel level.
+--
+-- Two AllowedIPs columns:
+--   remote_allowed_ips_declared = what was in the imported conf, verbatim.
+--                                 Surfaced in the UI for transparency
+--                                 ("your conf says X, we're applying Y").
+--   remote_allowed_ips_applied  = what we actually route through. Filter
+--                                 logic (see app/upstream.py:_filter_allowed_ips)
+--                                 strips full-tunnel and overlapping
+--                                 CIDRs by default to prevent the
+--                                 operator from locking themselves
+--                                 out of the panel on first import.
+--
+-- upstream_dns is captured from the conf's [Interface] DNS = line for
+-- future use (override-our-resolver feature, behavior TBD per the v4.1
+-- design discussion). Parsed and stored, not yet applied anywhere.
+--
+-- interface_name is allocated by app/upstream.py:_allocate_interface
+-- when the row is inserted. Operators don't pick it; they pick `name`.
+CREATE TABLE IF NOT EXISTS upstream_connections (
+    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name                        TEXT NOT NULL UNIQUE,
+    interface_name              TEXT NOT NULL UNIQUE,
+    -- [Interface] section
+    local_privkey               TEXT NOT NULL,
+    local_address               TEXT NOT NULL,
+    upstream_dns                TEXT,
+    mtu                         INTEGER,
+    -- [Peer] section
+    remote_pubkey               TEXT NOT NULL,
+    remote_psk                  TEXT,
+    remote_endpoint             TEXT NOT NULL,
+    remote_allowed_ips_declared TEXT NOT NULL,
+    remote_allowed_ips_applied  TEXT NOT NULL,
+    persistent_keepalive        INTEGER,
+    -- State
+    enabled                     INTEGER NOT NULL DEFAULT 1,
+    last_handshake_ts           INTEGER,
+    last_error                  TEXT,
+    created_at                  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_upstream_enabled ON upstream_connections(enabled);
 """
 
 
@@ -511,6 +670,13 @@ class DB:
                              # when the operator first generates a
                              # pairing token or pastes one). Format when
                              # populated: "x.x.x.x/32".
+                             # v4.1: blocklist merge state. Populated by
+                             # blocklist.refresh_all() each time the operator
+                             # clicks "refresh" in the panel. The frontend
+                             # shows "last merged X seconds ago, N entries"
+                             # in the panel header.
+                             ("blocklist_last_merged_ts", ""),
+                             ("blocklist_last_merged_count", ""),
                              ("federation_local_addr", "")):
             row = conn.execute(
                 "SELECT value FROM network_settings WHERE key = ?", (key,)
@@ -520,6 +686,70 @@ class DB:
                     "INSERT INTO network_settings (key, value) VALUES (?, ?)",
                     (key, default),
                 )
+
+        # Federation schema migration. Trigger conditions:
+        #   v4.0 schema → has `remote_wg_endpoint` column
+        #   v4.2-pre schema → has `local_privkey` column
+        #   v4.2-rebuild (callback variant) → has `pairing_token` column
+        # Any of these triggers DROP + recreate. The current
+        # v4.2-rebuild (registration variant, after callback was
+        # scrapped) has neither pairing_token nor any of the older
+        # columns — it has `importer_privkey` instead. Operator
+        # confirmed at each rebuild point that no production data
+        # was being preserved.
+        fed_sql_row = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type='table' AND name='federation_links'"
+        ).fetchone()
+        fed_sql_text = (fed_sql_row[0] if fed_sql_row else "") or ""
+        legacy = ("remote_wg_endpoint" in fed_sql_text     # v4.0
+                  or "local_privkey" in fed_sql_text       # v4.2-pre
+                  or "pairing_token" in fed_sql_text)      # v4.2-rebuild (callback)
+        if legacy:
+            conn.execute("SAVEPOINT fed_links_rebuild")
+            try:
+                conn.execute("DROP INDEX IF EXISTS idx_fed_links_status")
+                conn.execute("DROP INDEX IF EXISTS idx_fed_links_role")
+                conn.execute("DROP TABLE federation_links")
+                # The CREATE TABLE IF NOT EXISTS in the schema string at
+                # the top of this module already ran in this same
+                # _migrate, so we have to re-execute it now that the
+                # legacy table is gone. The rest of the schema is
+                # idempotent so this is safe.
+                conn.executescript(SCHEMA)
+                conn.execute("RELEASE fed_links_rebuild")
+            except Exception:
+                conn.execute("ROLLBACK TO fed_links_rebuild")
+                raise
+
+        # v4.2-rebuild: add peer_type column to peers table if missing.
+        # Existing peers default to 'client' — preserves behavior for
+        # everything except multisite-managed peers (which only this
+        # version creates).
+        peers_sql_row = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type='table' AND name='peers'"
+        ).fetchone()
+        peers_sql_text = (peers_sql_row[0] if peers_sql_row else "") or ""
+        if peers_sql_text and "peer_type" not in peers_sql_text:
+            conn.execute("SAVEPOINT peers_add_peer_type")
+            try:
+                conn.execute(
+                    "ALTER TABLE peers ADD COLUMN peer_type TEXT NOT NULL "
+                    "DEFAULT 'client'"
+                )
+                conn.execute("RELEASE peers_add_peer_type")
+            except Exception:
+                conn.execute("ROLLBACK TO peers_add_peer_type")
+                raise
+
+        # v4.1: seed blocklist presets if the table is empty. We import
+        # locally to avoid a top-of-file circular import (blocklist.py
+        # has no DB dependency itself, but importing it from db.py at
+        # module load time could create a cycle if anything in
+        # blocklist's import chain ever references db).
+        from . import blocklist
+        blocklist.seed_presets(conn)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, check_same_thread=False, timeout=10.0)

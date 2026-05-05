@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shlex
 import statistics
 import subprocess
@@ -536,3 +537,154 @@ async def tool_iperf3(target: str) -> dict:
     )
 
 DIAG_TOOLS["iperf3"] = tool_iperf3
+
+
+# ---------------------------------------------------------------------------
+# iperf3 server (one-shot)
+# ---------------------------------------------------------------------------
+#
+# Different shape from the client tool: we run `iperf3 -s -1` which
+# means "listen, accept ONE client test, print results, exit". The
+# operator points another machine at this wgflow with `iperf3 -c
+# <host> -p <port>`, and the result of that test prints here.
+#
+# Bounded by a 60-second wrapper timeout so the server doesn't hang
+# forever if no client connects. Honors a custom port via the target
+# field (e.g. "5202" or ":5202") — defaults to 5201.
+
+async def tool_iperf3_server(target: str) -> dict:
+    """One-shot iperf3 server — listens for a single client test."""
+    raw = (target or "").strip()
+    port = 5201
+    if raw:
+        # Accept "5202", ":5202", or "host:5202" (host part ignored;
+        # we always bind to 0.0.0.0). Just extract the port if
+        # present.
+        port_str = raw.rsplit(":", 1)[-1] if ":" in raw else raw
+        try:
+            port = int(port_str)
+        except ValueError:
+            raise ValueError(f"port must be a number: {port_str!r}")
+        if not (1 <= port <= 65535):
+            raise ValueError(f"port out of range (1-65535): {port}")
+
+    # `-s` server, `-1` one-shot exit-after-one-test, `-p` port.
+    # `-J` JSON output for parseability — but we'll display raw text
+    # because the frontend's iperf3-client branch is the JSON
+    # consumer; the server output is a transcript we pass through.
+    # No `-J`: keep human-readable output.
+    return await _run_tool(
+        ["iperf3", "-s", "-1", "-p", str(port)],
+        timeout=60,
+    )
+
+
+DIAG_TOOLS["iperf3-server"] = tool_iperf3_server
+
+
+# ---------------------------------------------------------------------------
+# tcpdump
+# ---------------------------------------------------------------------------
+#
+# Operator picks an interface (one of the allowlist below) plus an
+# optional BPF filter expression. We run tcpdump for at most ~10s OR
+# until N packets are captured, whichever comes first, then return
+# the captured trace.
+#
+# Risk model:
+#   - Interface is picked from an allowlist (we don't let the operator
+#     tcpdump on something we don't expect to exist).
+#   - Filter expression is passed as a single argv element, never via
+#     a shell. tcpdump's own BPF parser validates it — bad filters
+#     come back as a stderr error which we surface verbatim.
+#   - Output is capped at 200 packets so a busy interface doesn't
+#     return a megabyte of text.
+#   - We use -c (max packets) instead of a separate timeout. tcpdump
+#     exits naturally after -c packets. The wrapping _run_tool
+#     timeout is the safety net.
+
+# Interfaces we allow operators to capture on. wg0 is the gateway.
+# Other interfaces: docker eth0 (for debugging upstream connectivity),
+# loopback (rare but useful for local-only services), and any wg<N>
+# upstream interface that may exist (legacy v4.1.1 feature). We don't
+# allow arbitrary interface names — caller-supplied strings are
+# checked against this set.
+_TCPDUMP_ALLOWED_IFACES_PREFIXES = ("wg", "eth", "lo", "any")
+_TCPDUMP_FILTER_RE = re.compile(r"^[A-Za-z0-9 .:/_\-=&|!()<>]*$")
+_TCPDUMP_MAX_PACKETS = 200
+_TCPDUMP_TIMEOUT = 12      # 10s of capture + 2s margin
+
+
+async def tool_tcpdump(target: str) -> dict:
+    """Run tcpdump on a chosen interface with optional BPF filter.
+
+    Target convention (we shoehorn into the existing single-string
+    target field rather than adding a new parameter shape — keeps the
+    diag-tools wiring consistent):
+
+        target = "<iface>" — capture everything on iface for ~10s
+        target = "<iface>:<bpf>" — capture matching BPF, e.g.
+                 "wg0:icmp", "wg0:host 10.99.0.1", "any:port 53"
+
+    Returns up to 200 packets or 10 seconds, whichever comes first.
+    """
+    raw = target.strip()
+    if not raw:
+        raise ValueError("specify an interface, e.g. 'wg0' or 'wg0:icmp'")
+
+    if ":" in raw:
+        iface, _, bpf = raw.partition(":")
+        iface = iface.strip()
+        bpf = bpf.strip()
+    else:
+        iface = raw
+        bpf = ""
+
+    # Interface allowlist — must start with a known prefix and contain
+    # only safe chars.
+    if not iface or not re.fullmatch(r"[a-zA-Z0-9_-]{1,16}", iface):
+        raise ValueError(f"interface name invalid: {iface!r}")
+    if not any(iface.startswith(p) for p in _TCPDUMP_ALLOWED_IFACES_PREFIXES):
+        raise ValueError(
+            f"interface {iface!r} not allowed. permitted prefixes: "
+            f"{', '.join(_TCPDUMP_ALLOWED_IFACES_PREFIXES)}"
+        )
+
+    # Filter expression: bounded length, character-class allowlist
+    # (sufficient for typical BPF: ip/host/port/net/and/or/not/etc).
+    if bpf:
+        if len(bpf) > 200:
+            raise ValueError("filter expression too long (max 200 chars)")
+        if not _TCPDUMP_FILTER_RE.match(bpf):
+            raise ValueError(
+                "filter contains characters not in the safe set "
+                "(letters, digits, space, .:/_-=&|!()<>)"
+            )
+
+    # Wrap with `timeout -s INT N` so tcpdump receives SIGINT after N
+    # seconds even if it hasn't hit the -c packet count. tcpdump
+    # handles SIGINT gracefully — flushes captured packets to stdout,
+    # prints a summary line ("N packets captured"), exits 0. Without
+    # the explicit signal, _run_tool's asyncio timeout would SIGKILL
+    # the process and we'd lose every captured packet.
+    #
+    # The capture window is _TCPDUMP_TIMEOUT - 2 (10s) so the wrapping
+    # _run_tool budget (12s) has slack for the SIGINT round-trip and
+    # the post-exit stdout flush.
+    capture_secs = max(1, _TCPDUMP_TIMEOUT - 2)
+    cmd = [
+        "timeout", "-s", "INT", str(capture_secs),
+        "tcpdump",
+        "-n",                              # don't resolve DNS
+        "-i", iface,
+        "-c", str(_TCPDUMP_MAX_PACKETS),   # exit early if N packets seen
+        "-tt",                             # timestamps as unix epoch (compact)
+        "-q",                              # quick mode (less noise per packet)
+    ]
+    if bpf:
+        cmd.append(bpf)
+
+    return await _run_tool(cmd, timeout=_TCPDUMP_TIMEOUT)
+
+
+DIAG_TOOLS["tcpdump"] = tool_tcpdump
