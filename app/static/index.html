@@ -3002,7 +3002,7 @@
         <span class="instance-chrome" id="instance-chrome">
           <span class="instance-sep">⟫</span><span class="instance-name" id="instance-name"></span><span class="instance-edit-btn" id="instance-edit-btn" title="edit instance name and color">⚙</span>
         </span>
-        <span class="sub">wireguard control panel · v4.2.2 · <span id="brand-author" class="brand-author" title="about wgflow">gcblauth</span> <span id="matrix-replay" class="matrix-replay-btn" title="replay matrix intro">◆</span></span>
+        <span class="sub">wireguard control panel · v4.2.4 · <span id="brand-author" class="brand-author" title="about wgflow">gcblauth</span> <span id="matrix-replay" class="matrix-replay-btn" title="replay matrix intro">◆</span></span>
       </div>
     </div>
     <div class="header-right">
@@ -3905,7 +3905,7 @@
     <div class="about-brand">
       <span class="bracket">[</span>wgflow<span class="bracket">]</span>
     </div>
-    <div class="about-version">v4.2.2</div>
+    <div class="about-version">v4.2.4</div>
     <div class="about-line">wireguard control panel</div>
     <a class="about-link" href="https://github.com/gcblauth/wgflow" target="_blank" rel="noopener">
       github.com/gcblauth/wgflow
@@ -4140,9 +4140,18 @@ function render() {
   const tbody = $('#peers-tbody');
   const live = (wsPayload && wsPayload.peers) || [];
 
-  // Filter then sort: online first, then by name.
+  // Filter then sort. Order:
+  //   1. Multisite peers always first (federation neighbors are
+  //      conceptually upstream peers of this wgflow — they're
+  //      operationally more important than client peers and the
+  //      operator wants to see them first when scanning the list)
+  //   2. Online clients before offline clients
+  //   3. Alphabetical by name within each group
   const filtered = filterPeers(peersDB, searchQuery);
   const sorted = [...filtered].sort((a, b) => {
+    const ma = a.peer_type === 'multisite' ? 1 : 0;
+    const mb = b.peer_type === 'multisite' ? 1 : 0;
+    if (ma !== mb) return mb - ma;
     const la = live.find(l => l.id === a.id);
     const lb = live.find(l => l.id === b.id);
     const oa = la && la.online ? 1 : 0;
@@ -11475,6 +11484,110 @@ function fedRender() {
   }
   tbody.onclick = fedHandleRowClick;
   tbody.onchange = fedHandleRowClick;
+
+  // Mobile card rendering — same data, stacked layout. Desktop CSS
+  // hides #fed-cards; mobile CSS hides #fed-table. Without this
+  // mobile users would see an empty multisite panel: the table
+  // hides correctly but no cards were ever populated. Bug fix in
+  // v4.2.4.
+  fedRenderCards();
+}
+
+function fedRenderCards() {
+  const wrap = $('#fed-cards');
+  if (!wrap) return;
+  if (!_fedState.rows.length) {
+    wrap.innerHTML = '<div class="mono-dim" style="padding: 18px; text-align: center;">no multisite links</div>';
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  for (const row of _fedState.rows) {
+    // Replicate the same per-row derivations the table render uses.
+    // Kept inline rather than factored out because the table-row
+    // template is one big string-template and pulling out shared
+    // helpers would be more disruption than the duplication
+    // saves.
+    const remoteInst = (row.remote_instance_name || '').trim();
+    const localLabel = (row.name || '').trim();
+    const primaryName = remoteInst || localLabel || '(unnamed)';
+    const secondaryName = (remoteInst && localLabel &&
+                           localLabel.toLowerCase() !== remoteInst.toLowerCase())
+      ? `label: ${localLabel}` : '';
+
+    const remoteAddr = (row.remote_overlay_addr || '').split('/')[0] || '—';
+    const pkSnippet = row.peer_public_key
+      ? row.peer_public_key.slice(0, 16) + '…'
+      : '';
+
+    const localAdvText = (row.local_advertised || '').trim() || '—';
+    const remoteAdvText = (row.remote_advertised || '').trim() || '—';
+
+    const handshakeText = row.peer_last_handshake
+      ? fmtAgo(row.peer_last_handshake)
+      : (row.status === 'pending-bundle' ? 'awaiting bundle' : 'never');
+    const statusLabel = fedStatusLabel(row);
+    const statusDot = fedStatusDot(row);
+
+    // Buttons match desktop: complete pairing if pending, open
+    // panel if established + remote_overlay_addr known, then
+    // disable + delete.
+    const buttons = [];
+    if (row.status === 'pending-bundle') {
+      buttons.push(`<button class="ghost" data-fed-action="complete">complete pairing</button>`);
+    }
+    if (row.status === 'established' && row.remote_overlay_addr) {
+      const url = `http://${remoteAddr}:8080/`;
+      buttons.push(`<button class="ghost" data-fed-action="open-panel" data-url="${fedEscapeHtml(url)}">open panel</button>`);
+    }
+    buttons.push(`<button class="ghost" data-fed-action="toggle-confirm">${row.enabled ? 'disable' : 'enable'}</button>`);
+    buttons.push(`<button class="ghost" data-fed-action="delete-confirm" style="color: var(--danger);">delete</button>`);
+
+    const card = document.createElement('div');
+    card.className = 'peer-card';
+    card.dataset.linkId = row.id;
+    card.style.background = 'color-mix(in srgb, var(--accent) 6%, transparent)';
+    if (!row.enabled) card.style.opacity = '0.55';
+
+    card.innerHTML = `
+      <div class="peer-card-row">
+        <div class="peer-card-name">
+          <span class="status-dot" style="display:inline-block; width:8px; height:8px; border-radius:50%; background:${statusDot}; margin-right: 6px;" title="${fedEscapeHtml(statusLabel)}"></span>
+          ${fedEscapeHtml(primaryName)}
+        </div>
+        <div class="peer-card-status">${fedEscapeHtml(row.role || '')}</div>
+      </div>
+      ${secondaryName ? `<div class="peer-card-row peer-card-meta"><span class="mono-dim" style="font-size: 10px;">${fedEscapeHtml(secondaryName)}</span></div>` : ''}
+      <div class="peer-card-row peer-card-meta">
+        <span class="mono">${fedEscapeHtml(remoteAddr)}</span>
+        <span class="mono-dim">${fedEscapeHtml(handshakeText)}</span>
+      </div>
+      ${pkSnippet ? `<div class="peer-card-row peer-card-meta"><span class="mono-dim" style="font-size: 10px;">${fedEscapeHtml(pkSnippet)}</span></div>` : ''}
+      <div class="peer-card-row peer-card-meta">
+        <span class="mono-dim" style="font-size: 11px;">we expose:</span>
+        <span class="mono" style="font-size: 11px; text-align: right;">${fedEscapeHtml(localAdvText)}</span>
+      </div>
+      <div class="peer-card-row peer-card-meta">
+        <span class="mono-dim" style="font-size: 11px;">they expose:</span>
+        <span class="mono" style="font-size: 11px; text-align: right;">${fedEscapeHtml(remoteAdvText)}</span>
+      </div>
+      <div class="peer-card-actions">
+        ${buttons.join('')}
+      </div>
+    `;
+    frag.appendChild(card);
+  }
+  wrap.innerHTML = '';
+  wrap.appendChild(frag);
+
+  // Wire delegation once. The card buttons emit the same
+  // data-fed-action attributes as the table-row buttons, so we
+  // dispatch to the existing fedHandleRowClick handler. The
+  // handler resolves the row via closest('[data-link-id]') —
+  // that's set on each card, same as on each tr.
+  if (!wrap._delegationBound) {
+    wrap._delegationBound = true;
+    wrap.addEventListener('click', fedHandleRowClick);
+  }
 }
 
 async function fedHandleRowClick(ev) {

@@ -439,6 +439,82 @@ def _load_peer_acls(peer_id: int) -> List[acl_mod.ACLEntry]:
     return flat
 
 
+def _cleanup_orphan_multisite_peers() -> None:
+    """Remove any peers row of type='multisite' that no
+    federation_links row references via peer_id.
+
+    These rows exist when a federation_links row was deleted (or
+    its schema was re-migrated, dropping the row) but the paired
+    peer entry was left behind — the kernel keeps using the old
+    peer entry until the next replay, the live-peers panel shows
+    a peer that doesn't correspond to any link, and the operator
+    sees ghost connections.
+
+    Self-healing: every replay drops orphans. Idempotent (a clean
+    state is a no-op).
+
+    Also detects multisite peer rows whose address is the same as
+    our OWN local overlay address (a peer record for ourselves —
+    impossible from a working pairing flow, but operators have
+    accidentally pasted their own bundle into their own import-
+    complete during development thrash). Drops those too and logs
+    loudly so the operator sees what happened.
+    """
+    conn = get_db().conn
+    orphans = conn.execute(
+        """SELECT p.id, p.name, p.public_key, p.address
+           FROM peers p
+           WHERE p.peer_type = 'multisite'
+             AND NOT EXISTS (
+               SELECT 1 FROM federation_links f
+               WHERE f.peer_id = p.id
+             )"""
+    ).fetchall()
+
+    # Detect self-referencing multisite peers (address overlaps with
+    # the wgflow's own local_overlay_addr from any link).
+    own_overlays = set()
+    for r in conn.execute(
+        "SELECT local_overlay_addr FROM federation_links"
+    ).fetchall():
+        v = (r["local_overlay_addr"] or "").split("/", 1)[0].strip()
+        if v:
+            own_overlays.add(v)
+    self_refs = []
+    if own_overlays:
+        for r in conn.execute(
+            "SELECT id, name, public_key, address FROM peers "
+            "WHERE peer_type = 'multisite'"
+        ).fetchall():
+            addr = (r["address"] or "").split("/", 1)[0].strip()
+            if addr in own_overlays:
+                self_refs.append(r)
+
+    to_drop = list(orphans) + [r for r in self_refs
+                               if r["id"] not in {o["id"] for o in orphans}]
+    if not to_drop:
+        return
+
+    with get_db().write() as c:
+        for row in to_drop:
+            kind = ("self-reference" if row in self_refs else "orphan")
+            print(
+                f"[multisite] cleaning {kind} peer "
+                f"id={row['id']} name={row['name']!r} "
+                f"address={row['address']} pubkey={(row['public_key'] or '')[:16]}…",
+                flush=True,
+            )
+            c.execute("DELETE FROM peers WHERE id = ?", (row["id"],))
+            # Also clear any federation_links.peer_id pointing at the
+            # row we just dropped — keeps the link row but it'll
+            # display as "no paired peer" until repair (which the
+            # operator does by repairing or deleting the link).
+            c.execute(
+                "UPDATE federation_links SET peer_id = NULL WHERE peer_id = ?",
+                (row["id"],),
+            )
+
+
 def _replay_state_to_kernel() -> None:
     """On startup, push the DB state to wg + iptables.
 
@@ -446,6 +522,10 @@ def _replay_state_to_kernel() -> None:
     create are also volatile. We must rebuild both from sqlite.
     """
     ipt.ensure_base_chain()
+
+    # Clean up orphan multisite peers BEFORE we read the peer set
+    # for sync — otherwise syncconf would re-install ghosts.
+    _cleanup_orphan_multisite_peers()
 
     peers = _load_all_peers_for_sync()
     wg.syncconf(peers)

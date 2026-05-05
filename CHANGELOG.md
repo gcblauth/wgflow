@@ -5,6 +5,66 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.2.4] — 2026-05-05
+
+### Fixed
+
+- **Multisite panel was empty on mobile**. The DOM had a
+  `#fed-cards` container for mobile-card layout (intended to
+  parallel the live-peers panel's mobile cards), and the CSS
+  correctly hid `#fed-table` and showed `#fed-cards` on narrow
+  viewports — but no JS code ever populated `#fed-cards`. Mobile
+  users saw the multisite panel header + create/import buttons
+  but no link rows. Fixed by adding `fedRenderCards()`, called
+  from `fedRender()` after the desktop table render. Cards
+  surface the same data as the desktop row (status, primary name,
+  secondary label, remote overlay, handshake, advertised CIDRs,
+  pubkey snippet) plus the same action buttons (complete pairing
+  / open panel / disable / delete). Click delegation reuses the
+  existing `fedHandleRowClick` since the buttons emit the same
+  `data-fed-action` attributes as the desktop versions.
+
+---
+
+## [4.2.3] — 2026-05-05
+
+Multisite display + state-hygiene fixes after operator reports of
+ghost peers and incorrect "never connected" status on live links.
+
+### Fixed
+
+- **Live-peers "never connected" on healthy multisite peers**.
+  Root cause was a stale or self-referencing peer row in `peers`
+  whose pubkey didn't match the kernel — the lookup against
+  `wg show wg0 dump` came back empty so `latest_handshake` was 0.
+  Replay now self-heals by dropping multisite peer rows that:
+    * have no `federation_links.peer_id` pointing at them
+      (orphan), OR
+    * have an `address` that overlaps with this wgflow's own
+      `local_overlay_addr` from any link (self-reference; only
+      possible from operator error during pairing development,
+      but we'd rather drop the row than show a ghost).
+  Each cleanup is logged so the operator sees what happened.
+  `federation_links.peer_id` is set to NULL for any link that
+  was pointing at a dropped peer row.
+
+### Changed
+
+- **Multisite peers always sort to the top of the live-peers
+  list**. Federation neighbors are operationally upstream peers
+  of this wgflow — they belong above client peers in the visual
+  hierarchy. Previous order was online-then-alphabetical with
+  no special treatment.
+
+### Caveats
+
+- The self-healing cleanup runs on every replay (which is every
+  config-changing operation plus every container start). If you
+  end up with another ghost row from a future bug, restart the
+  container (or trigger any peer change) to clean it up.
+
+---
+
 ## [4.2.2] — 2026-05-05
 
 Multi-wgflow safety: the overlay-address allocator and pairing
