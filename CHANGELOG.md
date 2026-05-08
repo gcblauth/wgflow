@@ -5,6 +5,63 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.2.6] — 2026-05-08
+
+### Fixed
+
+- **Server hangs after ~1-2 days uptime (bare-metal mode in
+  particular)**. The `public_ip()` helper used
+  `asyncio.create_subprocess_exec("curl", ...)` to fetch the
+  server's public IP, called from `network_status` on every panel
+  refresh. On Python 3.10 this calls `fork()` from the asyncio
+  event loop, while a worker thread (the metrics tick) may
+  concurrently be inside its own `subprocess.run("wg show")`
+  call. Linux `fork()` from a multithreaded Python process can
+  wedge the child if it inherits a held lock with no thread to
+  release it. Diagnosed by py-spy showing the main asyncio
+  thread permanently blocked at `create_subprocess_exec` with a
+  ghost uvicorn child process (PPID = main pid) accumulating in
+  the cgroup. The hung event loop accepts TCP connections at the
+  kernel layer but never reads or responds, producing the
+  observed symptom: `curl` hangs, `systemctl status` reports the
+  service active, restart fixes.
+
+  Fix: replaced the curl shell-out with `httpx.AsyncClient.get()`.
+  No fork, no subprocess; the request rides on the asyncio event
+  loop directly. No lock interaction with worker threads.
+
+### Caveats
+
+- Other call sites still use `asyncio.create_subprocess_exec`
+  (the diag tool runners, the speedtest curl path, etc.). They
+  remain technically vulnerable to the same fork-from-
+  multithreaded deadlock, but their cold call frequency means
+  the race window is much narrower than the hot `public_ip` path
+  was. A broader refactor to remove asyncio subprocess usage
+  across the codebase is deferred — this hotfix targets the
+  demonstrated failure.
+
+- Container deployments restart the process if it crashes;
+  bare-metal systemd units do not auto-recover from a hung
+  process (the process is "running" from systemd's view, just
+  unresponsive). Operators running bare-metal who want belt-
+  and-braces protection can add a systemd watchdog: set
+  `WatchdogSec=60s` in the unit, add a heartbeat call in the
+  app. Not implemented in this release; bare-metal operators
+  are encouraged to monitor for hung-state via external probes
+  (Prometheus blackbox, uptime-kuma, a simple cron `curl` with
+  systemctl restart on failure).
+
+### Diagnostic
+
+`scripts/wgflow-hang-diag.sh` (delivered separately during
+incident triage) collects everything needed to confirm the
+deadlock if it recurs. Specifically: py-spy stack dumps,
+CLOSE_WAIT pile-ups on port 8080, and the ghost-child process
+fingerprint.
+
+---
+
 ## [4.2.5] — 2026-05-05
 
 ### Added

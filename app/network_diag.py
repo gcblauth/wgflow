@@ -31,6 +31,8 @@ import subprocess
 import time
 from typing import Optional
 
+import httpx
+
 
 # ---------------------------------------------------------------------------
 # Public IP detection
@@ -52,28 +54,47 @@ async def public_ip(force: bool = False) -> Optional[str]:
     """Return the server's public IPv4 address. Cached for 5 minutes.
 
     Returns None if every source fails (offline, captive portal, etc.).
+
+    v4.2.6: switched from `asyncio.create_subprocess_exec("curl", ...)`
+    to `httpx`. The subprocess approach calls `fork()` from the asyncio
+    event loop while a worker thread (the metrics tick) may
+    concurrently be inside its own `subprocess.run("wg show")` call.
+    Linux fork from a multithreaded Python process can wedge the
+    child if it inherits a held lock with no thread to release it —
+    we observed the asyncio main thread frozen at
+    `create_subprocess_exec` with a still-running ghost child
+    process, hanging the entire event loop indefinitely (manifested
+    as the panel becoming unresponsive after a day or two of
+    uptime). httpx does no fork, no subprocess; the request rides
+    on the asyncio event loop directly. No lock interaction with
+    threads.
     """
     now = time.time()
     if not force and _PUBLIC_IP_CACHE["ip"] and (now - _PUBLIC_IP_CACHE["fetched_at"]) < _PUBLIC_IP_TTL:
         return _PUBLIC_IP_CACHE["ip"]
 
-    for url in _PUBLIC_IP_SOURCES:
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "curl", "-s", "-4", "--max-time", "4", url,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
-            ip = stdout.decode().strip()
-            # Validate: looks like an IPv4 address.
-            parts = ip.split(".")
-            if len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
-                _PUBLIC_IP_CACHE["ip"] = ip
-                _PUBLIC_IP_CACHE["fetched_at"] = now
-                return ip
-        except Exception:
-            continue
+    # 4-second per-source timeout (matches the old curl --max-time).
+    # connect+read covered by the same budget.
+    timeout = httpx.Timeout(4.0, connect=4.0)
+    # transport=AsyncHTTPTransport(retries=0) — we already iterate
+    # sources, no need for httpx-level retries.
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+            for url in _PUBLIC_IP_SOURCES:
+                try:
+                    resp = await client.get(url)
+                    ip = resp.text.strip()
+                    parts = ip.split(".")
+                    if len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+                        _PUBLIC_IP_CACHE["ip"] = ip
+                        _PUBLIC_IP_CACHE["fetched_at"] = now
+                        return ip
+                except Exception:
+                    continue
+    except Exception:
+        # AsyncClient construction itself failed — exotic, but don't
+        # crash the request just to learn our public IP.
+        pass
     return None
 
 
