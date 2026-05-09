@@ -32,6 +32,7 @@ from . import acl as acl_mod
 from . import auth
 from . import dns_log as dns_log_mod
 from . import dns_overrides
+from . import telemetry
 from . import multisite as multisite_mod
 from . import blocklist as blocklist_mod
 from . import upstream as upstream_mod
@@ -770,6 +771,13 @@ def _persist_speedtest(result: dict) -> None:
 
 
 app = FastAPI(title="wgflow", lifespan=lifespan)
+
+# Module-load timestamp. Used by /healthz to report uptime, and by
+# anything that wants a "since when has the process been alive"
+# reference. Module-load time is close enough to "process start"
+# for a Python process whose main job is to serve HTTP — the diff
+# between import and accept() is well under a second on cold start.
+_APP_STARTED_AT: float = time.time()
 
 
 # ---------------------------------------------------------------------------
@@ -4855,4 +4863,21 @@ def manifest_json():
 
 @app.get("/healthz")
 def healthz():
-    return JSONResponse({"ok": True})
+    """Liveness probe. Public (no auth required).
+
+    Used by setup-one-time.sh after install to confirm the panel
+    is up. Also suitable for external monitoring (uptime-kuma,
+    Prometheus blackbox, systemd watchdog). Returns 200 with a
+    small JSON payload as soon as the FastAPI app is serving.
+
+    `uptime_seconds` is computed against module-load time
+    (`_APP_STARTED_AT` set near the top of main.py). Doesn't account
+    for time the process spent stuck in a deadlock — if the panel
+    is unresponsive due to a hang, /healthz won't respond either,
+    which is exactly what we want for liveness semantics.
+    """
+    return JSONResponse({
+        "ok": True,
+        "version": telemetry.WGFLOW_VERSION,
+        "uptime_seconds": max(0, int(time.time() - _APP_STARTED_AT)),
+    })

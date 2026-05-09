@@ -177,3 +177,20 @@ def load() -> Settings:
 
 
 SETTINGS = load()
+
+# Startup sanity warning. If WG_ENDPOINT was never set the placeholder
+# `vpn.example.com:51820` ends up baked into every generated client
+# config, producing peers that can't connect from anywhere. We log a
+# loud warning at startup so the operator notices BEFORE distributing
+# configs. Non-fatal — wgflow still runs (the panel works, internal
+# state is fine), but cli output drives the operator to set the var
+# via .env / systemd override.
+if SETTINGS.endpoint.startswith("vpn.example.com"):
+    print(
+        "[wgflow] WARNING: WG_ENDPOINT is unset (placeholder "
+        f"{SETTINGS.endpoint!r} in use). Client configs generated "
+        "by this wgflow will reference vpn.example.com and won't "
+        "connect from anywhere. Set WG_ENDPOINT in your .env or "
+        "systemd override to your public hostname:port.",
+        flush=True,
+    )

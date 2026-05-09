@@ -5,6 +5,96 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.3.0] — 2026-05-09
+
+First release with a one-shot installer. Operators run one
+script, answer a few questions, get a working wgflow. Repeat
+deployments and CI use the same script with --noninteractive.
+
+### Added
+
+- **`setup-one-time.sh`** at the repo root. Docker by default;
+  `--bare-metal` for systemd-based install. `--force` to reconfigure
+  an existing install. `--noninteractive` for scripted runs (reads
+  env vars instead of prompting).
+  - Detects prior install: existing `.env`, running `wgflow` container,
+    `/etc/systemd/system/wgflow.service`, `/data/wgflow.sqlite`. Refuses
+    to clobber without `--force`.
+  - With `--force`, backs up existing `.env` to `.env.backup-<TS>`.
+  - Prompts for: WG_ENDPOINT (required), WG_LOCAL_DNS (default off),
+    DNS upstreams (only if DNS on), Import panel visibility (default
+    off), telemetry consent (default yes), WG_SUBNET (default
+    10.13.13.0/24).
+  - Generates random admin password, writes to
+    `/root/.wgflow-initial-password` (chmod 600), prints the file
+    path (not the password) to stdout.
+  - Writes `.env` at the repo root with explicit values for every
+    variable (no implicit defaults to chase in the README).
+  - Starts the service (`docker compose up -d` or
+    `systemctl enable --now wgflow`).
+  - Verifies install by polling `/healthz` for up to 20s, plus
+    `wg show wg0`. Failures are warnings, not errors — the panel
+    may need a few more seconds.
+
+- **`/healthz` endpoint** now returns `{"ok": true, "version":
+  "X.Y.Z", "uptime_seconds": N}`. Used by `setup-one-time.sh` and
+  suitable for uptime-kuma / Prometheus blackbox / systemd
+  watchdog. Public (no auth required) — was already on the
+  PUBLIC_PATHS allowlist but the handler was a stub.
+
+### Changed
+
+- **WebSocket reconnect no longer thrashes on auth failure**. The
+  `/ws/status` close handler used to schedule a reconnect
+  unconditionally; if the session was expired (server returns
+  close code 4401), the panel retried every ~16 seconds forever,
+  filling journalctl with 403 lines (see v4.2.x deployment notes).
+  Now the close handler inspects the close code: 4401 / 4404 /
+  first-hop 1006 → re-probe `/api/auth/status`, show login if auth
+  is required, only reconnect if the session is actually valid.
+
+- **`WG_ENDPOINT` placeholder warning at startup**. If
+  `WG_ENDPOINT` is unset and the placeholder `vpn.example.com:51820`
+  is in use, the app logs a loud warning at boot. Non-fatal — the
+  panel still runs, internal state is fine — but the operator sees
+  the message before distributing client configs that wouldn't
+  connect from anywhere.
+
+- **DNS panels (Queries, Blocklists, DNS Overrides)** were already
+  gated on `WG_LOCAL_DNS` via `applyLocalDnsVisibility()`. Verified
+  the gate works end-to-end with the new setup-one-time.sh
+  defaults (DNS off → all three panels hidden). No code change,
+  noted for completeness.
+
+### Deferred to follow-up releases
+
+- README split (quick-start / config reference / operations
+  guide). Doing this requires the script to be in operators' hands
+  first so the README can document the real flow, not a
+  speculative one.
+- systemd watchdog support. The app would emit `sd_notify
+  WATCHDOG=1` periodically; the unit gets `WatchdogSec=120`. Belt-
+  and-braces for the bare-metal hang we fixed in v4.2.6.
+- Telemetry payload additions (D/C/E/F/H from the v4.2.x
+  discussion). Need its own focused release.
+- Panel-to-panel sync API for multisite advertised-networks. Same
+  reason.
+
+### Notes for upgraders
+
+If you have an existing wgflow install from any version ≤ 4.2.x,
+running `setup-one-time.sh` without `--force` will detect your
+install and exit cleanly without changes — you keep running
+exactly as before. To opt in to the new `.env`-driven layout, run
+`setup-one-time.sh --force`; your previous config is backed up to
+`.env.backup-<timestamp>`.
+
+If you're on `install-baremetal.sh` from v4.2.x, your installed
+config in `/etc/systemd/system/wgflow.service.d/override.conf`
+will keep working. Migration to the `.env` model is opt-in.
+
+---
+
 ## [4.2.6] — 2026-05-08
 
 ### Fixed
