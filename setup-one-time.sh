@@ -39,18 +39,25 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.env"
-PASSWORD_FILE="/root/.wgflow-initial-password"
+# Initial admin password is written to the repo root alongside .env
+# (chmod 600). Lives with the deployment files rather than /root so
+# that removing the deployment dir removes the password file too.
+PASSWORD_FILE="${SCRIPT_DIR}/.wgflow-initial-password"
 LOG_PREFIX="[setup]"
 
-# ANSI colors (only if stdout is a tty — pipe-safe).
+# ANSI colors (only if stdout is a tty — pipe-safe). Use $'...'
+# (ANSI-C quoting) so bash interprets the \033 escape at assignment
+# time. Without this the constants hold the literal six-character
+# string "\033[1m" which gets emitted verbatim by printf/heredocs
+# (the bug from v4.3.0 — operator saw codes in the terminal).
 if [[ -t 1 ]]; then
-    C_RESET='\033[0m'
-    C_BOLD='\033[1m'
-    C_DIM='\033[2m'
-    C_GREEN='\033[32m'
-    C_YELLOW='\033[33m'
-    C_RED='\033[31m'
-    C_CYAN='\033[36m'
+    C_RESET=$'\033[0m'
+    C_BOLD=$'\033[1m'
+    C_DIM=$'\033[2m'
+    C_GREEN=$'\033[32m'
+    C_YELLOW=$'\033[33m'
+    C_RED=$'\033[31m'
+    C_CYAN=$'\033[36m'
 else
     C_RESET= C_BOLD= C_DIM= C_GREEN= C_YELLOW= C_RED= C_CYAN=
 fi
@@ -244,6 +251,82 @@ validate_cidr() {
     return 0
 }
 
+validate_port() {
+    local v="$1"
+    if [[ ! "$v" =~ ^[0-9]+$ ]]; then
+        warn "expected a number (1-65535), got: $v"
+        return 1
+    fi
+    if (( v < 1 || v > 65535 )); then
+        warn "port out of range (1-65535)"
+        return 1
+    fi
+    return 0
+}
+
+validate_bind_iface() {
+    local v="$1"
+    if [[ "$v" != "0.0.0.0" && "$v" != "127.0.0.1" && ! "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        warn "expected 0.0.0.0, 127.0.0.1, or another IPv4 (got: $v)"
+        return 1
+    fi
+    return 0
+}
+
+validate_acl() {
+    # Coarse ACL syntax check. The app does the authoritative parse via
+    # acl.parse_entry; we just refuse obvious garbage here so the operator
+    # gets immediate feedback instead of discovering the typo after the
+    # service starts. Format per entry (comma-separated):
+    #   [!]IP-or-CIDR[:port[/proto]]
+    # plus optional `# comment` at end of any entry. We tolerate
+    # whitespace around commas.
+    local v="$1"
+    [[ -z "$v" ]] && { warn "ACL cannot be empty (use 10.0.0.0/8 for permissive default)"; return 1; }
+    local IFS=','
+    local entry
+    for entry in $v; do
+        # Trim whitespace.
+        entry="${entry#"${entry%%[![:space:]]*}"}"
+        entry="${entry%"${entry##*[![:space:]]}"}"
+        [[ -z "$entry" ]] && continue
+        # Strip optional bang prefix.
+        entry="${entry#!}"
+        # Strip optional comment.
+        entry="${entry%%#*}"
+        entry="${entry%"${entry##*[![:space:]]}"}"
+        # Now expect IP, IP/cidr, IP:port, or IP:port/proto.
+        if [[ ! "$entry" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(/[0-9]+)?(:[0-9]+(/[a-zA-Z]+)?)?$ ]]; then
+            warn "invalid ACL entry: '${entry}' (expected IP[/cidr][:port[/proto]])"
+            return 1
+        fi
+    done
+    return 0
+}
+
+# Returns 0 if the given port is currently bound by any listener on
+# the host. iface is informational — for the host network namespace
+# any specific-IP listener will conflict with our 0.0.0.0 bind, and
+# any 0.0.0.0 listener will conflict with our specific-IP bind, so
+# we just ask "is anything listening on this port".
+port_in_use() {
+    local port="$1"
+    command -v ss >/dev/null 2>&1 || return 2   # can't check
+    # `ss -tlnH "sport = :PORT"` filters to listening TCP sockets
+    # bound to PORT. Any output means something is listening.
+    local lines
+    lines=$(ss -tlnH "sport = :${port}" 2>/dev/null)
+    [[ -n "$lines" ]]
+}
+
+# Best-effort: tell the operator which process owns a port.
+port_owner_hint() {
+    local port="$1"
+    if command -v ss >/dev/null 2>&1; then
+        ss -tlnpH "sport = :${port}" 2>/dev/null | head -3 | sed 's/^/         /'
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # Banner
 # ---------------------------------------------------------------------------
@@ -327,47 +410,169 @@ if [[ "$WG_LOCAL_DNS" == "1" ]]; then
 fi
 echo
 
-# (3) Migration / import panel
-echo "  ${C_BOLD}3. Import from another VPN${C_RESET}"
+# (3) Client subnet — moved EARLIER than in the v4.3.0 initial layout
+#     because question 5 (multisite) needs to validate the federation
+#     subnet doesn't overlap with this one. Asked before the multisite
+#     toggle.
+echo "  ${C_BOLD}3. WireGuard client subnet${C_RESET} ${C_DIM}(advanced, defaults usually fine)${C_RESET}"
+echo "     The /24 from which peer addresses are allocated. Change only"
+echo "     if it conflicts with networks you already use."
+prompt_string WG_SUBNET "     subnet" "10.13.13.0/24" validate_cidr
+echo
+
+# (4) Migration / import panel
+echo "  ${C_BOLD}4. Import from another VPN${C_RESET}"
 echo "     If you're migrating from wg-easy, PiVPN, or a bare WireGuard"
 echo "     setup, the Import panel can read those configs and create"
 echo "     peers in wgflow. You can disable this later from Settings."
 prompt_yesno WGFLOW_MIGRATION_DEFAULT_ENABLED "     show Import panel?" "no"
 echo
 
-# (4) Telemetry
-echo "  ${C_BOLD}4. Anonymous telemetry${C_RESET}"
+# (5) Telemetry
+echo "  ${C_BOLD}5. Anonymous telemetry${C_RESET}"
 echo "     wgflow sends a small payload every ~30 min: version, peer"
 echo "     count, total RX/TX bytes, uptime, instance ID (a random"
 echo "     string we generate). No peer identifiers, no IPs, no names."
 echo "     See README §Telemetry for what's sent and how to opt out."
-prompt_yesno WGFLOW_TELEMETRY "     send anonymous stats?" "yes"
+prompt_yesno WGFLOW_TELEMETRY_ENABLED "     send anonymous stats?" "yes"
 echo
 
-# (5) Subnet (rarely changed but useful for LAN-conflict cases)
-echo "  ${C_BOLD}5. WireGuard subnet${C_RESET} ${C_DIM}(advanced, defaults usually fine)${C_RESET}"
-echo "     The /24 from which peer addresses are allocated. Change only"
-echo "     if it conflicts with networks you already use."
-prompt_string WG_SUBNET "     subnet" "10.13.13.0/24" validate_cidr
+# (6) Multisite federation
+echo "  ${C_BOLD}6. Multisite federation${C_RESET}"
+echo "     Pair this wgflow with other wgflows over WireGuard, so"
+echo "     advertised LANs on each side can reach the other. Adds a"
+echo "     Multisite panel; uses a separate /24 overlay subnet for"
+echo "     federation traffic (default 10.99.0.0/24, must NOT overlap"
+echo "     with your client subnet)."
+prompt_yesno WG_MULTISITE "     enable multisite federation?" "yes"
+WG_FEDERATION_SUBNET_VAL="10.99.0.0/24"
+if [[ "$WG_MULTISITE" == "1" ]]; then
+    echo
+    echo "     Federation overlay subnet (advanced, default is fine in"
+    echo "     most cases — change only if it conflicts with networks"
+    echo "     you already use)."
+    prompt_string WG_FEDERATION_SUBNET "     federation subnet" "10.99.0.0/24" validate_cidr
+    WG_FEDERATION_SUBNET_VAL="$WG_FEDERATION_SUBNET"
+    # Sanity: federation subnet must not overlap with client subnet.
+    # Cheap check: must not be the exact same /24.
+    if [[ "$WG_FEDERATION_SUBNET_VAL" == "$WG_SUBNET" ]]; then
+        fail "federation subnet ${WG_FEDERATION_SUBNET_VAL} overlaps with client subnet ${WG_SUBNET}. they must be different."
+    fi
+fi
+echo
+
+# (7) Default ACL for new peers
+echo "  ${C_BOLD}7. Default ACL for new peers${C_RESET}"
+echo "     What destinations can a NEW peer reach when first created."
+echo "     (Per-peer ACLs can be edited later from the panel.)"
+echo
+echo "     Format: comma-separated entries. Each entry is one of:"
+echo "       ${C_DIM}10.0.0.0/8${C_RESET}                  CIDR block (any port, any proto)"
+echo "       ${C_DIM}192.168.1.7${C_RESET}                 single host (bare IP = /32)"
+echo "       ${C_DIM}192.168.1.7:3389/tcp${C_RESET}        single host + port + proto"
+echo "       ${C_DIM}!10.0.0.5/32${C_RESET}                deny rule (! prefix)"
+echo
+echo "     ${C_DIM}10.0.0.0/8${C_RESET}        broad — peers reach anything in private LANs (default)"
+echo "     ${C_DIM}narrow example${C_RESET}    192.168.99.7:3389/tcp,192.168.99.133/32,192.168.99.132/32"
+echo "                       (only RDP on .7, and full access to .133 / .132)"
+prompt_string WG_DEFAULT_ACL "     default ACL" "10.0.0.0/8" validate_acl
+echo
+
+# (8) iptables drop logging
+echo "  ${C_BOLD}8. iptables drop logging${C_RESET}"
+echo "     When ON: rejected packets are logged with WGFLOW-DROP: prefix"
+echo "     (rate-limited). Useful for debugging ACLs and tracking attack"
+echo "     surface. Noisy on busy installs; off by default."
+prompt_yesno WGFLOW_IPTABLES_LOG "     enable drop logging?" "no"
+echo
+
+# (9) Admin panel bind + port
+echo "  ${C_BOLD}9. Admin panel binding${C_RESET}"
+echo "     Where the wgflow admin panel is reachable on this host."
+echo "     ${C_DIM}0.0.0.0${C_RESET}    — listen on all interfaces (any IP)"
+echo "     ${C_DIM}127.0.0.1${C_RESET}  — loopback only (use when fronting with a"
+echo "                  reverse proxy that provides TLS / extra auth)"
+prompt_string HOSTBIND_WG_PANEL "     bind interface" "0.0.0.0" validate_bind_iface
+echo
+# Pick a default port. If 8080 is already in use on this host,
+# warn now and suggest 8081 — but still let the operator pick
+# anything.
+DEFAULT_PORT=8080
+if port_in_use "$DEFAULT_PORT"; then
+    warn "port ${DEFAULT_PORT} is already in use on this host:"
+    port_owner_hint "$DEFAULT_PORT" >&2
+    DEFAULT_PORT=8081
+    warn "suggesting ${DEFAULT_PORT} instead — pick any free port below"
+fi
+echo "     Host-side port for the admin panel (the container always"
+echo "     listens on 8080 internally; this is just what the HOST"
+echo "     publishes it as)."
+while true; do
+    prompt_string HOSTBIND_WG_PANEL_PORT "     host port" "${DEFAULT_PORT}" validate_port
+    if port_in_use "$HOSTBIND_WG_PANEL_PORT"; then
+        warn "port ${HOSTBIND_WG_PANEL_PORT} is in use:"
+        port_owner_hint "$HOSTBIND_WG_PANEL_PORT" >&2
+        if [[ $INTERACTIVE -eq 0 ]]; then
+            fail "port ${HOSTBIND_WG_PANEL_PORT} is in use and we can't prompt for another (--noninteractive)"
+        fi
+        unset HOSTBIND_WG_PANEL_PORT
+        continue
+    fi
+    break
+done
 echo
 
 # ---------------------------------------------------------------------------
 # Password generation
 # ---------------------------------------------------------------------------
 
-say "Generating initial admin password..."
+say "Initial admin password..."
 
-# 32 bytes of urandom → 64 hex chars. Use /dev/urandom (universally
-# available) rather than openssl rand (may not be installed on
-# minimal containers we'll build inside).
-WGFLOW_AUTH_PASSWORD="$(head -c 32 /dev/urandom | xxd -p | tr -d '\n')"
+# Generate a 16-byte random hex string as the proposed default
+# (32 chars, 128 bits of entropy — under bcrypt's 72-byte input
+# limit and short enough that copy-pasting between terminals is
+# painless). Use od (always available on Linux) rather than xxd
+# (not on minimal Ubuntu/Debian).
+RANDOM_PASSWORD="$(od -A n -t x1 -N 16 < /dev/urandom | tr -d ' \n')"
+
+# In interactive mode, show the random default and let the operator
+# accept it (Enter) or type their own. In --noninteractive mode,
+# use the random default unless PANEL_PASSWORD is preset in the
+# environment.
+if [[ -n "${PANEL_PASSWORD:-}" ]]; then
+    say "  using PANEL_PASSWORD from environment"
+elif [[ $INTERACTIVE -eq 0 ]]; then
+    PANEL_PASSWORD="$RANDOM_PASSWORD"
+    say "  generated random password (will be saved to ${PASSWORD_FILE})"
+else
+    echo
+    echo "     A random password has been generated for the admin user."
+    echo "     Press Enter to use it, or type your own password."
+    echo "     ${C_DIM}generated: ${RANDOM_PASSWORD}${C_RESET}"
+    echo
+    printf "     password [random]: "
+    read -r typed_password
+    if [[ -z "$typed_password" ]]; then
+        PANEL_PASSWORD="$RANDOM_PASSWORD"
+        echo "     ${C_GREEN}using generated password${C_RESET}"
+    else
+        # Sanity: bcrypt rejects inputs over 72 bytes. Warn early.
+        if [[ ${#typed_password} -gt 72 ]]; then
+            warn "your password is ${#typed_password} chars (>72); bcrypt will reject it"
+            warn "either pick something shorter or press Ctrl-C and re-run"
+        fi
+        PANEL_PASSWORD="$typed_password"
+        echo "     ${C_GREEN}using your password${C_RESET}"
+    fi
+    echo
+fi
 
 # Write to a root-owned, chmod-600 file. We print the file PATH
 # (not the password) so it doesn't end up in journalctl, ssh
 # scrollback, terminal multiplexer buffers, etc.
 mkdir -p "$(dirname "$PASSWORD_FILE")"
 umask 077
-printf '%s\n' "$WGFLOW_AUTH_PASSWORD" > "$PASSWORD_FILE"
+printf '%s\n' "$PANEL_PASSWORD" > "$PASSWORD_FILE"
 chmod 600 "$PASSWORD_FILE"
 ok "admin password written → ${PASSWORD_FILE}"
 
@@ -384,6 +589,55 @@ SUBNET_MASK="${WG_SUBNET#*/}"
 SUBNET_PREFIX="${SUBNET_NET%.*}"
 WG_SERVER_ADDRESS="${SUBNET_PREFIX}.1/${SUBNET_MASK}"
 
+# Defaults for variables we don't prompt for but which docker-compose
+# references. Setting them here (rather than relying on shell-side
+# `${VAR:-default}` in compose) keeps the .env self-documenting and
+# means operators editing values can see all the knobs in one place.
+HOSTBIND_WG_PANEL_VAL="${HOSTBIND_WG_PANEL:-0.0.0.0}"
+HOSTBIND_WG_PANEL_PORT_VAL="${HOSTBIND_WG_PANEL_PORT:-8080}"
+# Backwards-compat: previous setup.sh wrote HOSTBIND_WG_PANEL as
+# `host:port` (e.g. 127.0.0.1:8080), assuming the compose file's
+# 2-part form `${HOSTBIND_WG_PANEL}:8080/tcp`. We've switched the
+# compose file to the unambiguous 3-part form
+# `${HOSTBIND_WG_PANEL}:${HOSTBIND_WG_PANEL_PORT}:8080/tcp`, so
+# HOSTBIND_WG_PANEL is now interface-only. If the operator's env
+# still has the legacy host:port form, split it: the IP becomes
+# HOSTBIND_WG_PANEL, the port becomes HOSTBIND_WG_PANEL_PORT.
+if [[ "$HOSTBIND_WG_PANEL_VAL" == *:* ]]; then
+    legacy="$HOSTBIND_WG_PANEL_VAL"
+    legacy_port="${HOSTBIND_WG_PANEL_VAL##*:}"
+    HOSTBIND_WG_PANEL_VAL="${HOSTBIND_WG_PANEL_VAL%:*}"
+    # If the operator already set HOSTBIND_WG_PANEL_PORT explicitly,
+    # respect that — otherwise lift the legacy port out.
+    if [[ -z "${HOSTBIND_WG_PANEL_PORT:-}" ]] && [[ "$legacy_port" =~ ^[0-9]+$ ]]; then
+        HOSTBIND_WG_PANEL_PORT_VAL="$legacy_port"
+    fi
+    warn "HOSTBIND_WG_PANEL was '${legacy}' (host:port). v4.3.0 expects"
+    warn "interface only — normalized to '${HOSTBIND_WG_PANEL_VAL}' (port"
+    warn "${HOSTBIND_WG_PANEL_PORT_VAL} kept as HOSTBIND_WG_PANEL_PORT)."
+fi
+WGFLOW_BIND_VAL="${WGFLOW_BIND:-0.0.0.0:8080}"
+WGFLOW_IPTABLES_LOG_VAL="${WGFLOW_IPTABLES_LOG:-0}"
+WG_DEFAULT_ACL_VAL="${WG_DEFAULT_ACL:-10.0.0.0/8}"
+KERNEL_LOG_PATH_VAL="${KERNEL_LOG_PATH:-/dev/null}"
+
+# Default WG_DNS_UPSTREAMS even when DNS is off — docker-compose
+# references this variable unconditionally and will warn about
+# unbound vars. The container-side code reads WG_LOCAL_DNS=0 and
+# ignores the upstream list, so writing the default is harmless.
+if [[ "$WG_LOCAL_DNS" != "1" ]]; then
+    WG_DNS_UPSTREAMS_VAL="8.8.8.8,8.8.4.4,1.1.1.1"
+fi
+
+# Peer-side DNS — when local DNS is on, peers resolve via the
+# wgflow server itself (so blocklists apply); when off, peers
+# get a public resolver in their generated config.
+if [[ "$WG_LOCAL_DNS" == "1" ]]; then
+    WG_PEER_DNS_VAL="${SUBNET_PREFIX}.1"
+else
+    WG_PEER_DNS_VAL="1.1.1.1"
+fi
+
 cat > "$ENV_FILE" <<EOF
 # wgflow configuration
 # Generated by setup-one-time.sh on $(date -Is)
@@ -392,8 +646,8 @@ cat > "$ENV_FILE" <<EOF
 #   Docker:      docker compose up -d
 #   Bare-metal:  systemctl restart wgflow
 #
-# Variables you DIDN'T set during setup get the defaults below;
-# they're written explicitly so you can find and edit them.
+# Every variable docker-compose references is set explicitly here
+# so you can find and tune any knob without hunting through docs.
 
 # ---- Public endpoint -------------------------------------------------------
 # The host:port peers connect to over WireGuard. Must be reachable
@@ -406,54 +660,87 @@ WG_LISTEN_PORT=51820
 WG_SUBNET=${WG_SUBNET}
 WG_SERVER_ADDRESS=${WG_SERVER_ADDRESS}
 
+# Default ACL applied to new client peers — controls which destinations
+# they can reach by default. 10.0.0.0/8 covers most private LANs;
+# tighten if you want more restrictive defaults.
+WG_DEFAULT_ACL=${WG_DEFAULT_ACL_VAL}
+
 # ---- Local DNS -------------------------------------------------------------
-# 1 = run dnsmasq inside wgflow with blocklist support, DNS Queries +
+# 1 = run dnsmasq inside wgflow with blocklist support; DNS Queries +
 # Blocklists + DNS Overrides panels visible.
 # 0 = no DNS server, those panels hidden.
 WG_LOCAL_DNS=${WG_LOCAL_DNS}
-$(if [[ "$WG_LOCAL_DNS" == "1" ]]; then echo "WG_DNS_UPSTREAMS=${WG_DNS_UPSTREAMS_VAL}"; else echo "# WG_DNS_UPSTREAMS=8.8.8.8,8.8.4.4,1.1.1.1   (uncomment if you turn DNS on)"; fi)
+WG_DNS_UPSTREAMS=${WG_DNS_UPSTREAMS_VAL}
 
-# Peer-side DNS field in generated client configs. Usually the wgflow
-# server itself (so peers use the local DNS); change to a public
-# resolver if you don't want peers using your local DNS.
-$(if [[ "$WG_LOCAL_DNS" == "1" ]]; then echo "WG_PEER_DNS=${SUBNET_PREFIX}.1"; else echo "WG_PEER_DNS=1.1.1.1"; fi)
+# Peer-side DNS field in generated client configs. When WG_LOCAL_DNS=1
+# this is the wgflow itself (so peers use the local DNS); otherwise
+# a public resolver.
+WG_PEER_DNS=${WG_PEER_DNS_VAL}
 
 # ---- Authentication --------------------------------------------------------
-# 1 = require password to access the admin panel (recommended).
-# Password is the SHA256 of the value in WGFLOW_AUTH_PASSWORD_FILE,
-# which is read at startup. We write a random initial password to
-# ${PASSWORD_FILE}; you can change it from the panel after first
-# login.
-WGFLOW_AUTH=1
-WGFLOW_AUTH_PASSWORD_FILE=${PASSWORD_FILE}
+# The plaintext password is bcrypt-hashed at startup. We also save the
+# value in ${PASSWORD_FILE} (chmod 600) for your records — you can
+# change it from the panel (Settings → Account) after first login.
+# Leave empty to DISABLE the panel password entirely (not recommended).
+PANEL_PASSWORD=${PANEL_PASSWORD}
 
 # ---- Migration importer ----------------------------------------------------
-# 1 = show the Import panel for migrating from wg-easy / PiVPN / bare WG.
-# 0 = hide. Can be toggled in Settings after install.
+# 1 = show the Import panel for migrating from wg-easy / PiVPN /
+# bare WG. 0 = hide. This seeds the initial state; once you toggle
+# it in the panel (Settings → Features), the DB row wins and this
+# variable is no longer consulted.
 WGFLOW_MIGRATION_DEFAULT_ENABLED=${WGFLOW_MIGRATION_DEFAULT_ENABLED}
 
 # ---- Telemetry -------------------------------------------------------------
 # 1 = send anonymous stats to wgflow.2ps.in every 30 min.
 # See README §Telemetry for what's sent. Opt out by setting to 0.
-WGFLOW_TELEMETRY=${WGFLOW_TELEMETRY}
+WGFLOW_TELEMETRY_ENABLED=${WGFLOW_TELEMETRY_ENABLED}
+# Community-shared HMAC key for telemetry payload signing. The public
+# collector at wgflow.2ps.in accepts payloads signed with this key.
+# It's intentionally a known constant — the signature is an integrity
+# check, not authentication of origin (the collector enforces its own
+# per-IP rate limits and per-instance approval). Change ONLY if you
+# run your own collector with a private signing arrangement.
+WGFLOW_TELEMETRY_SECRET=wgflow-community-default
 
 # ---- Multisite federation --------------------------------------------------
-# 1 = enable the Multisite panel for pairing this wgflow with another
-# wgflow over WireGuard. Each pairing produces a federation_links row;
-# overlay traffic uses the 10.99.0.0/24 subnet.
-WGFLOW_MULTISITE_ENABLED=1
+# 1 = enable the Multisite panel for pairing this wgflow with other
+# wgflows over WireGuard. Each pairing produces a federation_links
+# row; overlay traffic uses the federation subnet below.
+WG_MULTISITE=${WG_MULTISITE}
+# Subnet used for the federation overlay (NOT for client peers).
+# Each paired wgflow gets one /32 from this range. Must NOT overlap
+# with WG_SUBNET.
+WG_FEDERATION_SUBNET=${WG_FEDERATION_SUBNET_VAL}
+# Optional: override the public host:port other wgflows should send
+# WG traffic to. Defaults to WG_ENDPOINT when unset (most operators
+# want this default — only override if your federation listener is
+# on a different UDP port from your client listener).
+WG_FEDERATION_ENDPOINT=
 
-# ---- Panel bind ------------------------------------------------------------
-# Where the FastAPI/uvicorn admin panel listens. Default binds to
-# all interfaces on port 8080. Change to 127.0.0.1:8080 if you're
-# fronting with a reverse proxy.
-WGFLOW_BIND=0.0.0.0:8080
+# ---- Panel bind / port mapping ---------------------------------------------
+# HOSTBIND_WG_PANEL is the host-side interface to bind for the admin
+# panel. 0.0.0.0 = all interfaces; 127.0.0.1 = loopback only (when
+# fronting with a reverse proxy).
+HOSTBIND_WG_PANEL=${HOSTBIND_WG_PANEL_VAL}
+# HOSTBIND_WG_PANEL_PORT is the host-side port. The container always
+# listens on 8080 internally; this is what the host publishes it as.
+# Change if 8080 is already taken by another service on this host.
+HOSTBIND_WG_PANEL_PORT=${HOSTBIND_WG_PANEL_PORT_VAL}
+# WGFLOW_BIND is what uvicorn binds INSIDE the container. The two
+# must agree on the container-side port (8080 by default); the
+# host-side is set by HOSTBIND_WG_PANEL_PORT above.
+WGFLOW_BIND=${WGFLOW_BIND_VAL}
 
 # ---- Advanced --------------------------------------------------------------
 # Iptables drop logging: 0 = quiet, 1 = log rejected packets (rate-
-# limited) with WGFLOW-DROP: prefix. Useful for debugging ACLs;
-# noisy on busy installs.
-WGFLOW_DROP_LOGGING=0
+# limited, prefix WGFLOW-DROP:). Useful for debugging ACLs; noisy
+# on busy installs.
+WGFLOW_IPTABLES_LOG=${WGFLOW_IPTABLES_LOG_VAL}
+
+# Path to mount for kernel log streaming (the panel's Logs tab can
+# tail this). Default /dev/null disables the feature.
+KERNEL_LOG_PATH=${KERNEL_LOG_PATH_VAL}
 EOF
 
 chmod 600 "$ENV_FILE"
@@ -484,11 +771,49 @@ fi
 # Start the service
 # ---------------------------------------------------------------------------
 
+# Operator may want to inspect the .env before anything starts.
+# Prompt unless --noninteractive.
+START_NOW="1"
+if [[ $INTERACTIVE -eq 1 ]]; then
+    echo
+    if [[ $MODE_DOCKER -eq 1 ]]; then
+        echo "Ready to build and start wgflow. This runs:"
+        echo "  ${C_DIM}docker compose up -d --build${C_RESET}"
+    else
+        echo "Ready to install and start wgflow. This runs:"
+        echo "  ${C_DIM}install-baremetal.sh${C_RESET}"
+    fi
+    echo "You can also stop here and run it yourself later."
+    prompt_yesno _START_NOW "build and start now?" "yes"
+    START_NOW="$_START_NOW"
+    echo
+fi
+
+if [[ "$START_NOW" != "1" ]]; then
+    cat <<EOF
+
+${C_YELLOW}Skipped service start.${C_RESET} Your .env is at ${ENV_FILE}.
+
+When you're ready:
+$(if [[ $MODE_DOCKER -eq 1 ]]; then
+    echo "  cd ${SCRIPT_DIR}"
+    echo "  sudo docker compose up -d --build"
+else
+    echo "  sudo ${SCRIPT_DIR}/install-baremetal.sh"
+fi)
+
+EOF
+    exit 0
+fi
+
 say "Starting wgflow..."
 
 if [[ $MODE_DOCKER -eq 1 ]]; then
     cd "$SCRIPT_DIR"
-    if ! docker compose up -d 2>&1; then
+    # --build forces a build on first install and is a no-op on
+    # re-runs where the image is already current. Cheaper than
+    # branching on "is this the first time?".
+    if ! docker compose up -d --build 2>&1; then
         fail "docker compose up failed — check 'docker compose logs' for details"
     fi
     ok "docker compose started"
@@ -511,12 +836,31 @@ fi
 
 say "Verifying..."
 
-# Wait up to 20s for /healthz to respond. The panel takes a couple
-# seconds to come up cold (Python import, sqlite open, wg syncconf).
-VERIFY_HOST="${WGFLOW_BIND%:*}"
+# .env was just written; we set the script's variables to compute it,
+# but for the verify path we want to be robust to whatever the .env
+# actually contains (in case the operator edited it between write
+# and start). Source it. `set -u` is on, so any unset reference
+# below would abort — that's why we explicitly set fallback vars
+# right after.
+set +u
+# shellcheck disable=SC1090
+source "$ENV_FILE"
+set -u
+
+# Resolve which host:port to curl. In Docker mode, the panel is
+# exposed on the host via HOSTBIND_WG_PANEL:HOSTBIND_WG_PANEL_PORT.
+# In bare-metal, uvicorn binds directly per WGFLOW_BIND
+# (default 0.0.0.0:8080).
+if [[ $MODE_DOCKER -eq 1 ]]; then
+    VERIFY_HOST="${HOSTBIND_WG_PANEL:-0.0.0.0}"
+    VERIFY_PORT="${HOSTBIND_WG_PANEL_PORT:-8080}"
+else
+    # Bare-metal: parse WGFLOW_BIND (e.g. "0.0.0.0:8080").
+    VERIFY_HOST="${WGFLOW_BIND%:*}"
+    VERIFY_PORT="${WGFLOW_BIND##*:}"
+fi
+# 0.0.0.0 isn't curl-able; rewrite to loopback for the probe.
 [[ "$VERIFY_HOST" == "0.0.0.0" ]] && VERIFY_HOST="127.0.0.1"
-VERIFY_PORT="${WGFLOW_BIND##*:}"
-VERIFY_PORT="${VERIFY_PORT:-8080}"
 VERIFY_URL="http://${VERIFY_HOST}:${VERIFY_PORT}/healthz"
 
 VERIFY_OK=0
