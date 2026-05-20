@@ -1,0 +1,57 @@
+# wgflow .dockerignore
+#
+# Keeps the Docker build context lean and prevents host-side runtime
+# state from leaking into the image. The Dockerfile only needs:
+#   app/  dnsmasq.conf.template  entrypoint.sh
+# Everything else here is excluded.
+
+# --- Runtime state (bare-metal installs write these into the repo) ---
+data/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+# --- Python bytecode / venvs ---
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+/opt/venv/
+
+# --- Secrets / generated config (must never be baked into an image) ---
+.env
+.env.*
+.wgflow-initial-password
+*.key
+*.pem
+
+# --- Release artifacts ---
+release-tarballs/
+*.tar.gz
+
+# --- Git / editor / OS noise ---
+.git/
+.gitignore
+.DS_Store
+*.swp
+*~
+tmp/
+
+# --- Docs that don't belong in the image (keep the image small) ---
+README.md
+CHANGELOG.md
+RELEASE_NOTES_*.md
+LICENSE
+docs/
+scripts/
+
+# --- The compose/setup files themselves (not needed inside the image) ---
+docker-compose.yml
+Dockerfile
+.dockerignore
+setup.sh
+setup-one-time.sh
+install-baremetal.sh
+entrypoint-baremetal.sh

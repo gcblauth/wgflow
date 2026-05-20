@@ -1335,18 +1335,60 @@ def _peer_client_conf(
     entries = _load_peer_acls(peer_id)
 
     # AllowedIPs in the client config controls what the CLIENT routes
-    # through the tunnel. Two cases:
-    #   - Split-tunnel (allow-only ACL): use the allow-entry CIDRs so
-    #     only whitelisted traffic goes through the VPN
-    #   - Full-tunnel (any deny entry present): use 0.0.0.0/0 so ALL
-    #     traffic goes through the tunnel; the server-side deny rules
-    #     then block specific destinations. Without 0.0.0.0/0 on the
-    #     client side, traffic to denied destinations would bypass the
-    #     tunnel entirely and the deny rules would never fire.
-    if acl_mod.has_any_deny(entries):
-        allowed = ["0.0.0.0/0"]
-    else:
-        allowed = [e.cidr for e in entries if not e.is_deny] if entries else ["0.0.0.0/32"]
+    # through the tunnel. We build it from the peer's ALLOW entries —
+    # the deny entries stay server-side (enforced by the WGFLOW-PEER-N
+    # iptables chain). Rationale:
+    #
+    #   - Old behaviour (pre-4.3.2): any deny in the ACL → AllowedIPs
+    #     = 0.0.0.0/0 (full-tunnel). The deny was enforced at the
+    #     server, but the client routed ALL its traffic through the
+    #     tunnel — wasteful for peers whose actual reachable surface
+    #     is small (a phone with @dok + !@ddeny would tunnel its
+    #     YouTube traffic only for the server to drop nothing of it).
+    #
+    #   - New behaviour: AllowedIPs is the union of allow CIDRs only.
+    #     The peer becomes split-tunnel by default — only the
+    #     destinations it can ACTUALLY reach get tunneled. Traffic
+    #     toward denied destinations still gets tunneled if those
+    #     IPs fall inside an allow CIDR (the deny then drops them at
+    #     the server), but unrelated internet traffic exits locally.
+    #
+    # If the operator wants the historical full-tunnel + selective
+    # deny behaviour, they put `0.0.0.0/0` explicitly in the allow
+    # list AND keep their `!...` deny entries: the allow gives the
+    # broad AllowedIPs, the denies still get enforced server-side.
+    #
+    # Edge case: a peer with deny entries and NO allow entries would
+    # produce an empty AllowedIPs list, which WireGuard rejects. We
+    # surface that as a 422 instead of a malformed config — see below.
+    allow_cidrs = [e.cidr for e in entries if not e.is_deny]
+    # Deduplicate preserving order: an alias expansion can yield the
+    # same CIDR twice across overlapping aliases.
+    seen = set()
+    allowed = []
+    for c in allow_cidrs:
+        if c not in seen:
+            seen.add(c)
+            allowed.append(c)
+
+    if not allowed:
+        # Either an empty ACL or all-deny. WireGuard rejects an empty
+        # AllowedIPs and there's no sensible "everything except X"
+        # primitive in the protocol — the operator needs to add at
+        # least one allow rule (use `0.0.0.0/0` for full-tunnel).
+        if entries:
+            raise HTTPException(
+                422,
+                f"peer {row['name']!r} has only deny rules and no allow rules — "
+                f"WireGuard's AllowedIPs cannot be empty. Add an allow rule "
+                f"(use `0.0.0.0/0` to keep the previous full-tunnel behaviour, "
+                f"or list the destinations the peer should reach).",
+            )
+        raise HTTPException(
+            422,
+            f"peer {row['name']!r} has no ACL entries — cannot generate a config "
+            f"without at least one AllowedIPs prefix.",
+        )
 
     # Pick the dns value to render.
     if dns_override_provided:

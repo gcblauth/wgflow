@@ -5,6 +5,44 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.3.2] — 2026-05-20
+
+**Behavior change**: peer client configs are now split-tunnel by
+default. This affects what gets written into the `AllowedIPs` line
+of generated peer `.conf` files; nothing about the WireGuard
+protocol, the iptables ACL enforcement, or the server-side
+behaviour changes.
+
+- Generated peer configs now derive `AllowedIPs` from the peer's
+  **allow** rules only — denied destinations no longer force the
+  config to full-tunnel. Previously, a single `!...` deny rule
+  on a peer made `AllowedIPs = 0.0.0.0/0`, so the client routed
+  all of its traffic through the tunnel just for the server to
+  drop a small slice of it.
+- Alias references are expanded before computing `AllowedIPs`,
+  so `@dok` expands to its CIDRs in the config (as it always did
+  in iptables). Deduplication preserves order.
+- Deny rules continue to be enforced by the server iptables
+  chain (`WGFLOW-PEER-<id>`) exactly as before. This change is
+  purely about which prefixes get into the client's routing
+  table, not about access control.
+- For the historical "full-tunnel with selective deny" pattern,
+  put `0.0.0.0/0` explicitly in the allow list: the allow gives
+  the broad `AllowedIPs`, the deny entries still drop the
+  excluded destinations at the server.
+- New error (HTTP 422) when generating a peer config for a peer
+  whose ACL has **only deny rules and no allow rules** —
+  WireGuard rejects an empty `AllowedIPs` and there's no
+  "everything except X" primitive at the protocol level. The
+  error message points the operator at adding an allow rule
+  (`0.0.0.0/0` for the previous full-tunnel behaviour, or a
+  concrete list of destinations).
+- Existing peers' already-installed `.conf` files are not
+  affected — they keep working as imported. Only newly
+  downloaded / regenerated configs reflect the new logic.
+
+---
+
 ## [4.3.1] — 2026-05-19
 
 ACL alias editor brought in line with the peer ACL editor.
@@ -38,6 +76,13 @@ ACL alias editor brought in line with the peer ACL editor.
   chart box.
 - `fmtBytes` no longer returns a malformed string for sub-1-byte
   values (could produce `512.0 undefined` for a fractional tick).
+- Throughput chart: left axis gutter (`pad.l`) is now computed
+  dynamically from the widest Y-axis label this render will show,
+  instead of being fixed at 50 viewBox units. The fixed gutter was
+  enough for the original 3-tick / KB-range layout but truncated
+  the leading digit of MB-range labels (e.g. `2.0 MB/s` showed
+  as `.0 MB/s`, and two such labels stacked vertically appeared
+  as duplicates). Now the gutter widens to fit whatever's drawn.
 - New `scripts/host-tune.sh` — optional host-side performance
   tuning for WireGuard throughput. Applies larger UDP socket
   buffers (`net.core.*` sysctl), NIC hardware offloads via

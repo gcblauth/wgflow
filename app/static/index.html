@@ -3002,7 +3002,7 @@
         <span class="instance-chrome" id="instance-chrome">
           <span class="instance-sep">⟫</span><span class="instance-name" id="instance-name"></span><span class="instance-edit-btn" id="instance-edit-btn" title="edit instance name and color">⚙</span>
         </span>
-        <span class="sub">wireguard control panel · v4.3.1 · <span id="brand-author" class="brand-author" title="about wgflow">gcblauth</span> <span id="matrix-replay" class="matrix-replay-btn" title="replay matrix intro">◆</span></span>
+        <span class="sub">wireguard control panel · v4.3.2 · <span id="brand-author" class="brand-author" title="about wgflow">gcblauth</span> <span id="matrix-replay" class="matrix-replay-btn" title="replay matrix intro">◆</span></span>
       </div>
     </div>
     <div class="header-right">
@@ -3913,7 +3913,7 @@
     <div class="about-brand">
       <span class="bracket">[</span>wgflow<span class="bracket">]</span>
     </div>
-    <div class="about-version">v4.3.1</div>
+    <div class="about-version">v4.3.2</div>
     <div class="about-line">wireguard control panel</div>
     <a class="about-link" href="https://github.com/gcblauth/wgflow" target="_blank" rel="noopener">
       github.com/gcblauth/wgflow
@@ -4044,8 +4044,12 @@ const pctClass = (p) => p >= 85 ? 'danger' : (p >= 65 ? 'warn' : '');
 function drawThroughput(series) {
   const svg = $('#throughput-chart');
   const W = 1000, H = 180;
-  const pad = { t: 12, r: 8, b: 20, l: 50 };
-  const innerW = W - pad.l - pad.r;
+  // pad.l is computed below from the actual axis labels — different
+  // throughput ranges need different left margins ('100 KB/s' is short,
+  // '512.0 KB/s' is wide, '0 B/s' is shortest). Start with a placeholder
+  // and overwrite once we know maxV.
+  const pad = { t: 12, r: 8, b: 20, l: 70 };
+  let innerW = W - pad.l - pad.r;
   const innerH = H - pad.t - pad.b;
 
   if (!series.length) { svg.innerHTML = ''; return; }
@@ -4114,6 +4118,17 @@ function drawThroughput(series) {
   // maxV is now a nice number, these land on readable values
   // (e.g. maxV=2MB → 0, 500KB, 1MB, 1.5MB, 2MB).
   const yTicks = [0, maxV / 4, maxV / 2, (maxV * 3) / 4, maxV];
+
+  // Compute pad.l dynamically: width the axis gutter to fit the widest
+  // label this render will show. Rough character-width estimate of
+  // ~7 viewBox units per char at the axis-label font size, plus 8 units
+  // for the gap between label and grid. Without this the labels get
+  // clipped against the SVG's left edge — '2.0 MB/s' is ~56 units and
+  // a fixed 50-unit gutter cuts the first character off.
+  const labelStrings = yTicks.map(v => `${fmtBytes(v)}/s`);
+  const widestLabelChars = Math.max(...labelStrings.map(s => s.length));
+  pad.l = Math.max(50, widestLabelChars * 7 + 10);
+  innerW = W - pad.l - pad.r;
   const yLines = yTicks.map(v =>
     `<line class="grid-line" x1="${pad.l}" x2="${pad.l + innerW}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}"/>`
   ).join('');
