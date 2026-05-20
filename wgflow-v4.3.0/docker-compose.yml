@@ -1,0 +1,71 @@
+services:
+  wgflow:
+    build: .
+    container_name: wgflow
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    sysctls:
+      net.ipv4.ip_forward: "1"
+      net.ipv4.conf.all.src_valid_mark: "1"
+      net.netfilter.nf_conntrack_acct: "1"
+    ports:
+      - "${WG_LISTEN_PORT}:${WG_LISTEN_PORT}/udp"
+      # 3-part form: host_interface:hostPort:containerPort/proto.
+      # HOSTBIND_WG_PANEL is the interface only (0.0.0.0 for all
+      # interfaces, 127.0.0.1 for loopback-only behind a reverse
+      # proxy). HOSTBIND_WG_PANEL_PORT is the host-side port (the
+      # container always listens on 8080 internally).
+      - "${HOSTBIND_WG_PANEL}:${HOSTBIND_WG_PANEL_PORT:-8080}:8080/tcp"
+      # v4.2-pre: federation listener (wg1 server-side) on 56969.
+      # Removed in v4.2-rebuild — the asymmetric wg1 design was
+      # scrapped in favor of mgmt-peers on wg0, which uses the
+      # existing WG_LISTEN_PORT. Operators upgrading from v4.2-pre
+      # can drop the WG_FED_PORT line from their compose file (or
+      # leave it; nothing reads it anymore).
+    volumes:
+      - ./data:/data
+      # Dynamically mounts based on the .env selection
+      - ${KERNEL_LOG_PATH:-/dev/null}:${KERNEL_LOG_PATH:-/dev/null}:ro
+    environment:
+      WG_INTERFACE: ${WG_INTERFACE}
+      WG_LISTEN_PORT: ${WG_LISTEN_PORT}
+      WG_SUBNET: ${WG_SUBNET}
+      WG_SERVER_ADDRESS: ${WG_SERVER_ADDRESS}
+      WG_ENDPOINT: ${WG_ENDPOINT}
+      WG_LOCAL_DNS: ${WG_LOCAL_DNS}
+      WG_PEER_DNS: ${WG_PEER_DNS}
+      WG_DNS_UPSTREAMS: ${WG_DNS_UPSTREAMS}
+      WG_DEFAULT_ACL: ${WG_DEFAULT_ACL}
+      WGFLOW_DATA_DIR: "/data"
+      WGFLOW_BIND: ${WGFLOW_BIND}
+      PANEL_PASSWORD: ${PANEL_PASSWORD}
+      WGFLOW_IPTABLES_LOG: ${WGFLOW_IPTABLES_LOG}
+      WGFLOW_TELEMETRY_ENABLED: ${WGFLOW_TELEMETRY_ENABLED}
+      # Show / hide the Import panel (migration from wg-easy / PiVPN /
+      # bare WG). Seeds the network_settings DB row on first install;
+      # after that, toggling via the panel sticks. Defaults to 1 (the
+      # panel exists, operator can toggle from inside).
+      WGFLOW_MIGRATION_DEFAULT_ENABLED: ${WGFLOW_MIGRATION_DEFAULT_ENABLED:-1}
+      # Optional. Leave empty to use the per-instance derived secret
+      # (recommended). Set this only if you are running your own collector
+      # and have a shared key arrangement with it.
+      WGFLOW_TELEMETRY_SECRET: ${WGFLOW_TELEMETRY_SECRET:-}
+      # v4.2-rebuild: multi-site federation. When enabled (default),
+      # the panel shows a Multisite section where this wgflow can
+      # pair with other wgflows. Symmetric design — both sides peer
+      # with each other on wg0 with mgmt-peer entries (peer_type=
+      # 'multisite') and a secondary 10.99.0.X/32 overlay address on
+      # wg0. No new UDP port; reuses WG_LISTEN_PORT. Set to 0/false
+      # to hide the panel section and disable the feature entirely.
+      WG_MULTISITE: ${WG_MULTISITE:-1}
+      # Subnet used for the federation overlay. Each paired wgflow gets
+      # one /32 from this range; the routes apply only to traffic
+      # between paired gateway boxes (NOT client peers, by iptables).
+      # Must NOT overlap with WG_SUBNET. Default 10.99.0.0/24.
+      WG_FEDERATION_SUBNET: ${WG_FEDERATION_SUBNET:-10.99.0.0/24}
+      # Optional. Public host:port other wgflows should send WG traffic
+      # to. Defaults to WG_ENDPOINT — override only if your federation
+      # listener is on a different UDP port from your client listener.
+      WG_FEDERATION_ENDPOINT: ${WG_FEDERATION_ENDPOINT:-}
