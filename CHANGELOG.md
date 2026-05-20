@@ -5,6 +5,84 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.4.0] — 2026-05-20
+
+Second Windows installer flow alongside the existing encrypted-zip
+one. Different threat model, different UX. Plus a redesign of the
+post-creation passphrase modal.
+
+### New: user-context PowerShell installer
+
+A direct `.ps1` download (no zip, no passphrase) for operators
+installing on their own machine or distributing over a channel
+they already trust:
+
+- New endpoint `GET /api/peers/{id}/install-script-usercontext`
+  returns the `.ps1` plaintext over HTTPS. No 7-Zip dependency
+  on the recipient side.
+- New "ps1 direct" tile in the peer actions menu, alongside the
+  existing "ps1 zip" tile. The two coexist — operators pick
+  based on the distribution scenario.
+- New `installer_script.render_install_script_user_context` and
+  `_PS1_USER_TEMPLATE` in `app/installer_script.py`.
+
+The new script itself is materially smarter than the legacy one:
+
+- **Selective elevation** — does detection, backup planning, and
+  log setup in user context. UAC only for the operations that
+  genuinely need admin (service install/uninstall).
+- **Smarter WireGuard detection** — looks at machine-wide AND
+  per-user registry uninstall keys, matches by `DisplayName LIKE
+  'WireGuard*'` rather than a single hardcoded path.
+- **Backup awareness** — before replacing a same-named tunnel,
+  drops a marker file at
+  `%LOCALAPPDATA%\\wgflow-backups\\<peer>-<ts>.replaced.txt`
+  pointing at where the prior config lived. (WireGuard's own
+  config store is admin-only readable, so this is the
+  user-recoverable trail.)
+- **Structured logging** — `%LOCALAPPDATA%\\wgflow\\install.log`
+  with timestamp/level/peer prefix, rotated when it exceeds
+  64 KB (keeps last 5).
+- **`-Action Install|Uninstall|Update`** parameter.
+  Install is the default for double-click. Uninstall removes
+  this peer's tunnel + cleans up wgflow markers. Update is an
+  alias of Install (idempotent replace).
+- **`-RemoveWireGuardClient`** flag pairs with `-Action Uninstall`
+  to also remove the entire WireGuard client. Prompts for an
+  explicit "type REMOVE" confirmation because this also removes
+  any non-wgflow tunnels the user might have.
+- **`-NoLog`** flag for one-off runs that shouldn't write to disk.
+- **Proper exit codes** (10 = elevation failed, 20 = install
+  failed, 30 = tunnel install failed, 40 = uninstall failed).
+- **No final `Read-Host`** — script terminates cleanly so it
+  can be run from an existing terminal session without leaving
+  a hanging prompt window.
+
+### Encrypted-zip flow kept (and modal redesigned)
+
+The legacy `install-script` endpoint and its AES-encrypted zip
+distribution are unchanged — different use case (untrusted
+email channel, passphrase out-of-band). The post-creation
+passphrase modal got a clearer redesign:
+
+- Passphrase larger and visually separated, with a prominent
+  copy button.
+- Three-step "how to deliver" callout (send zip; send passphrase
+  separately; never the same email).
+- `mailto:` template button that pre-fills a recipient email
+  with the install steps but deliberately omits the passphrase.
+- 7-Zip requirement now a yellow warning bar with a direct link
+  to the 7-Zip download page (it's the #1 support call from
+  this flow).
+
+### Build
+
+- New CSS class `.copy-row` for the user-context modal's
+  inline `<code>` + copy-button pattern. Matches the existing
+  `.passphrase-box` aesthetic.
+
+---
+
 ## [4.3.2] — 2026-05-20
 
 **Behavior change**: peer client configs are now split-tunnel by

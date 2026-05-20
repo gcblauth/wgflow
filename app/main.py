@@ -1528,6 +1528,70 @@ def peer_install_script(
     )
 
 
+@app.get("/api/peers/{peer_id}/install-script-usercontext")
+def peer_install_script_user_context(
+    peer_id: int,
+    dns: Optional[str] = None,
+):
+    """Return a Windows .ps1 installer for this peer, plain (not zipped).
+
+    This is the v4.4.0 "user-context" variant of the installer endpoint
+    above. Different threat model:
+
+      - Recipient is the wgflow operator (or someone they trust),
+        authenticated to the panel, downloading this directly over
+        HTTPS. The transport is the channel — no insecure email leg.
+      - The .ps1 is delivered as plaintext (with the same embedded
+        private key it always has — HTTPS protects it in transit).
+        No zip, no passphrase to communicate, no 7-Zip required on
+        the recipient side.
+
+    The script itself is smarter than the legacy one:
+      - Elevates only for the operations that require admin.
+      - Detects WireGuard in machine-wide AND per-user installs.
+      - Backs up info about any existing tunnel with the same name
+        before replacing it (drops a marker in
+        %LOCALAPPDATA%\\wgflow-backups\\ so the user knows a replace
+        happened).
+      - Structured logging to %LOCALAPPDATA%\\wgflow\\install.log
+        (rotated).
+      - -Action Uninstall mode (removes this peer's tunnel) and
+        -RemoveWireGuardClient flag (removes WireGuard entirely,
+        with confirmation prompt).
+
+    Optional `?dns=` query param overrides DNS in the bundled config
+    (same semantics as the /config and /install-script endpoints).
+    """
+    conn = get_db().conn
+    row = conn.execute("SELECT name FROM peers WHERE id = ?", (peer_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "peer not found")
+
+    safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in row["name"])
+    provided = dns is not None
+    _, conf_text = _peer_client_conf(peer_id, dns_override=dns,
+                                      dns_override_provided=provided)
+
+    try:
+        ps1_text = installer_script.render_install_script_user_context(
+            safe_name, conf_text,
+        )
+    except ValueError as e:
+        raise HTTPException(500, f"could not render installer: {e}")
+
+    return Response(
+        content=ps1_text,
+        # Marked as application/octet-stream rather than text/plain so the
+        # browser triggers a download instead of trying to display the
+        # script (which contains a base64 private-key blob the user
+        # shouldn't see floating in a tab).
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_name}-install.ps1"',
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # Server config / defaults
 # ---------------------------------------------------------------------------

@@ -1467,6 +1467,24 @@
     user-select: all;
   }
 
+  /* v4.4.0: code + copy-button inline rows (user-context installer modal). */
+  .copy-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    padding: 8px 10px;
+  }
+  .copy-row-text {
+    flex: 1;
+    font-family: var(--f-mono);
+    font-size: 12px;
+    color: var(--fg);
+    word-break: break-all;
+    user-select: all;
+  }
+
   /* ---------- Login overlay ---------- */
   #login-overlay {
     position: fixed;
@@ -3002,7 +3020,7 @@
         <span class="instance-chrome" id="instance-chrome">
           <span class="instance-sep">⟫</span><span class="instance-name" id="instance-name"></span><span class="instance-edit-btn" id="instance-edit-btn" title="edit instance name and color">⚙</span>
         </span>
-        <span class="sub">wireguard control panel · v4.3.2 · <span id="brand-author" class="brand-author" title="about wgflow">gcblauth</span> <span id="matrix-replay" class="matrix-replay-btn" title="replay matrix intro">◆</span></span>
+        <span class="sub">wireguard control panel · v4.4.0 · <span id="brand-author" class="brand-author" title="about wgflow">gcblauth</span> <span id="matrix-replay" class="matrix-replay-btn" title="replay matrix intro">◆</span></span>
       </div>
     </div>
     <div class="header-right">
@@ -3913,7 +3931,7 @@
     <div class="about-brand">
       <span class="bracket">[</span>wgflow<span class="bracket">]</span>
     </div>
-    <div class="about-version">v4.3.2</div>
+    <div class="about-version">v4.4.0</div>
     <div class="about-line">wireguard control panel</div>
     <a class="about-link" href="https://github.com/gcblauth/wgflow" target="_blank" rel="noopener">
       github.com/gcblauth/wgflow
@@ -5716,6 +5734,10 @@ function openActionsMenu(peer) {
         <div class="action-tile-title">ps1 zip</div>
         <div class="action-tile-sub">windows auto-installer · encrypted, emailable</div>
       </button>
+      <button class="action-tile" data-act="ps1-user" data-id="${peer.id}">
+        <div class="action-tile-title">ps1 direct</div>
+        <div class="action-tile-sub">windows installer · for your own machine · install / uninstall</div>
+      </button>
       <button class="action-tile" data-act="acl" data-id="${peer.id}">
         <div class="action-tile-title">acl</div>
         <div class="action-tile-sub">edit allowed destinations</div>
@@ -5742,6 +5764,7 @@ function openActionsMenu(peer) {
         if (act === 'cfg-view') openConfViewer(peer);
         else if (act === 'qr')  showQR(id, peer.name);
         else if (act === 'ps1') downloadInstallerZip(id);
+        else if (act === 'ps1-user') downloadInstallerUserContext(id, peer.name);
         else if (act === 'acl') openAclEditor(peer);
         else if (act === 'key') openPrivateKeyViewer(peer);
       }, 50);
@@ -5967,6 +5990,116 @@ function openAclEditor(peer) {
 
    v3.7: prompts the operator first, allowing them to either keep the
    auto-generated Diceware passphrase or supply their own (12+ chars). */
+/* v4.4.0: download the user-context .ps1 (direct, no zip, no passphrase).
+   For operators downloading the installer for THEIR OWN machine — runs
+   over HTTPS, no insecure email leg, no 7-Zip needed on the recipient.
+   The .ps1 itself is smarter than the legacy one: lighter elevation,
+   structured logging, Install/Uninstall actions, optional client-wide
+   uninstall. See docs/INSTALLERS.md for the threat-model rationale. */
+async function downloadInstallerUserContext(peerId, peerName) {
+  toast('preparing installer…');
+  try {
+    const url = `/api/peers/${peerId}/install-script-usercontext`;
+    const r = await fetch(url, { credentials: 'same-origin' });
+    if (!r.ok) {
+      const data = await r.json().catch(() => ({}));
+      throw new Error(data.detail || ('download failed: ' + r.status));
+    }
+    const blob = await r.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const safe = peerName.replace(/[^a-zA-Z0-9_-]/g, '_');
+    a.href = blobUrl;
+    a.download = `${safe}-install.ps1`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(blobUrl);
+    showUserContextInfoModal(peerName, safe);
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+/* v4.4.0: post-download info for the user-context installer. No
+   passphrase to show — instead, a quick how-to-run and how-to-uninstall
+   crib, plus a copyable PowerShell one-liner that downloads + runs the
+   script in a single command for advanced users. */
+function showUserContextInfoModal(peerName, safeName) {
+  const file = `${safeName}-install.ps1`;
+  const runLine     = `powershell -ExecutionPolicy Bypass -File .\\${file}`;
+  const uninstLine  = `powershell -ExecutionPolicy Bypass -File .\\${file} -Action Uninstall`;
+  const fullClean   = `powershell -ExecutionPolicy Bypass -File .\\${file} -Action Uninstall -RemoveWireGuardClient`;
+  openModal(`installer downloaded · ${escape(peerName)}`, `
+    <div style="font-size: 13px; line-height: 1.6;">
+      <p style="margin-top: 0;">
+        Downloaded <code>${escape(file)}</code>. This installer is
+        delivered directly (no zip, no passphrase) — it's meant for your
+        own machine or for a recipient you trust to receive it over a
+        secure channel.
+      </p>
+
+      <div style="margin-top: 18px; padding: 12px;
+                  border: 1px solid var(--border);
+                  background: var(--bg-elev);">
+        <div style="font-size: 11px; text-transform: uppercase;
+                    letter-spacing: 0.08em; opacity: 0.7; margin-bottom: 6px;">
+          install
+        </div>
+        <div class="copy-row">
+          <code class="copy-row-text">${escape(runLine)}</code>
+          <button class="ghost icon" data-copy="${escape(runLine)}" title="copy">⎘</button>
+        </div>
+        <div class="hint" style="margin-top: 6px;">
+          Or right-click the .ps1 → <em>Run with PowerShell</em>.
+          UAC will prompt when admin is needed.
+        </div>
+      </div>
+
+      <div style="margin-top: 12px; padding: 12px;
+                  border: 1px solid var(--border);
+                  background: var(--bg-elev);">
+        <div style="font-size: 11px; text-transform: uppercase;
+                    letter-spacing: 0.08em; opacity: 0.7; margin-bottom: 6px;">
+          uninstall this tunnel
+        </div>
+        <div class="copy-row">
+          <code class="copy-row-text">${escape(uninstLine)}</code>
+          <button class="ghost icon" data-copy="${escape(uninstLine)}" title="copy">⎘</button>
+        </div>
+      </div>
+
+      <div style="margin-top: 12px; padding: 12px;
+                  border: 1px solid var(--border);
+                  background: var(--bg-elev);">
+        <div style="font-size: 11px; text-transform: uppercase;
+                    letter-spacing: 0.08em; opacity: 0.7; margin-bottom: 6px;">
+          uninstall everything (this tunnel + the WireGuard client)
+        </div>
+        <div class="copy-row">
+          <code class="copy-row-text">${escape(fullClean)}</code>
+          <button class="ghost icon" data-copy="${escape(fullClean)}" title="copy">⎘</button>
+        </div>
+        <div class="hint" style="margin-top: 6px;">
+          <strong style="color: var(--warn);">Removes ALL WireGuard tunnels</strong>,
+          not just this one. The script asks for confirmation.
+        </div>
+      </div>
+
+      <div class="hint" style="margin-top: 14px;">
+        Logs at <code>%LOCALAPPDATA%\\wgflow\\install.log</code>.
+        The .ps1 contains this peer's private key — treat the file
+        like a password (delete it after running, or store it as
+        carefully as you would the .conf).
+      </div>
+    </div>
+  `);
+  // Wire up copy buttons.
+  $$('button[data-copy]', $('#modal')).forEach(btn => {
+    btn.onclick = () => secureClipboardWrite(btn.dataset.copy, 'copied');
+  });
+}
+
 async function downloadInstallerZip(peerId) {
   const peer = peersDB.find(p => p.id == peerId);
   const peerName = peer ? peer.name : `peer-${peerId}`;
@@ -6231,28 +6364,110 @@ async function loadClipboardConfig() {
 }
 
 function showPassphraseModal(peerName, passphrase, wasManual) {
-  const note = wasManual
-    ? `Encrypted installer downloaded as <code>${escape(peerName)}-install.zip</code>.
-       This zip is encrypted with the passphrase <em>you provided</em>.`
-    : `Encrypted installer downloaded as <code>${escape(peerName)}-install.zip</code>.
-       Email the zip; share the passphrase via a separate channel
-       (SMS, Signal, in person — <em>not</em> the same email).`;
+  // The peer-specific 7-Zip step is the most common support call from
+  // this flow — Windows' built-in zip viewer silently fails on AES.
+  // Make the requirement loud and provide the download link.
+  const downloadLink = 'https://www.7-zip.org/download.html';
+
+  // Pre-baked mailto template the operator can send. We don't include
+  // the passphrase in the email body — that's the whole point of the
+  // separate-channel rule. We only suggest the structure.
+  const mailtoSubject = `Your VPN installer · ${peerName}`;
+  const mailtoBody =
+    `Hi,\n\n` +
+    `Attached is your VPN installer for ${peerName}.\n\n` +
+    `1. Save the attached ${peerName}-install.zip to your computer\n` +
+    `2. Install 7-Zip if you don't have it: ${downloadLink}\n` +
+    `3. Right-click the .zip → 7-Zip → Extract Here, enter the password I'll send separately\n` +
+    `4. Right-click the extracted .ps1 → Run with PowerShell\n\n` +
+    `The password will arrive in a separate message (NOT in this email).\n\n` +
+    `Thanks.`;
+  const mailtoUrl = `mailto:?subject=${encodeURIComponent(mailtoSubject)}&body=${encodeURIComponent(mailtoBody)}`;
+
+  const sourceNote = wasManual
+    ? `<span style="color: var(--accent);">Custom passphrase</span> you provided.`
+    : `Auto-generated · 8 words, ~100 bits entropy.`;
+
   openModal(`installer ready · ${escape(peerName)}`, `
     <div style="font-size: 13px; line-height: 1.6;">
-      <p style="margin-top: 0;">${note}</p>
-      <div class="passphrase-box">
-        <code id="passphrase-text">${escape(passphrase)}</code>
-        <button class="ghost icon" id="passphrase-copy" title="copy to clipboard">⎘</button>
+
+      <!-- Step 1: zip downloaded confirmation -->
+      <div style="display: flex; gap: 10px; align-items: flex-start;
+                  padding: 10px 12px; background: var(--bg-elev);
+                  border: 1px solid var(--border); margin-top: 0;">
+        <div style="font-size: 18px; color: var(--accent); line-height: 1;">✓</div>
+        <div>
+          <div style="font-weight: 600;">Downloaded</div>
+          <code style="font-size: 11px; opacity: 0.85;">${escape(peerName)}-install.zip</code>
+        </div>
       </div>
-      <div class="hint" style="margin-top: 14px;">
-        <strong style="color: var(--warn);">Recipient needs 7-Zip installed</strong>
-        — Windows' built-in zip extractor can't handle AES-encrypted zips.
-        After extraction, the recipient runs the .ps1 (right-click → "Run with PowerShell")
-        and the tunnel installs itself. The passphrase is unique to this download
-        and cannot be regenerated — re-download the zip if you lose track of it.
+
+      <!-- Step 2: passphrase — the loud part -->
+      <div style="margin-top: 14px;">
+        <div style="font-size: 11px; text-transform: uppercase;
+                    letter-spacing: 0.08em; opacity: 0.7; margin-bottom: 6px;
+                    display: flex; align-items: center; gap: 8px;">
+          <span>passphrase</span>
+          <span style="opacity: 0.6; font-size: 10px; letter-spacing: 0;">${sourceNote}</span>
+        </div>
+        <div class="passphrase-box-v2"
+             style="border: 1px solid var(--accent);
+                    background: var(--bg);
+                    padding: 14px 16px;
+                    display: flex; align-items: center; gap: 12px;">
+          <code id="passphrase-text"
+                style="font-family: var(--f-mono); font-size: 15px;
+                       letter-spacing: 0.04em; color: var(--accent);
+                       word-break: break-all; flex: 1;">${escape(passphrase)}</code>
+          <button class="ghost" id="passphrase-copy"
+                  style="white-space: nowrap; padding: 6px 12px;">
+            ⎘ copy
+          </button>
+        </div>
+        <div class="hint" style="margin-top: 8px;">
+          This passphrase is <strong>unique to this download</strong> and
+          cannot be regenerated — re-download the zip if you lose it.
+        </div>
       </div>
+
+      <!-- Step 3: how to distribute -->
+      <div style="margin-top: 18px; padding: 12px;
+                  background: var(--bg-elev); border: 1px solid var(--border);">
+        <div style="font-size: 11px; text-transform: uppercase;
+                    letter-spacing: 0.08em; opacity: 0.7; margin-bottom: 8px;">
+          how to deliver
+        </div>
+        <ol style="margin: 0; padding-left: 20px;">
+          <li>Send the <strong>.zip</strong> file via email (or any channel)</li>
+          <li>Send the <strong>passphrase</strong> via a <em>different</em> channel — SMS, Signal, voice. <strong>Never the same email.</strong></li>
+        </ol>
+        <div style="margin-top: 10px;">
+          <a href="${mailtoUrl}" class="ghost" style="text-decoration: none;
+                  display: inline-block; padding: 6px 12px;
+                  border: 1px solid var(--border);">
+            ✉ open email with template
+          </a>
+        </div>
+      </div>
+
+      <!-- Step 4: 7-Zip warning (the #1 support topic) -->
+      <div style="margin-top: 14px; padding: 10px 12px;
+                  border-left: 3px solid var(--warn);
+                  background: var(--bg-elev);">
+        <div style="font-weight: 600; color: var(--warn); margin-bottom: 4px;">
+          ⚠ Recipient needs 7-Zip
+        </div>
+        <div style="font-size: 12px;">
+          Windows' built-in zip extractor cannot handle AES-encrypted
+          zips. Tell your recipient to install 7-Zip first:
+          <a href="${downloadLink}" target="_blank" rel="noopener"
+             style="color: var(--accent);">${downloadLink}</a>
+        </div>
+      </div>
+
     </div>
   `);
+
   $('#passphrase-copy').onclick = () =>
     secureClipboardWrite(passphrase, 'passphrase copied');
 }

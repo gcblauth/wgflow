@@ -3,7 +3,7 @@
 **WireGuard with a professional control panel, real per-peer ACLs, and built-in diagnostics — all from one Docker container.**
 
 ```
-[ wgflow ]   wireguard control panel · v4.3.2
+[ wgflow ]   wireguard control panel · v4.4.0
 ```
 
 <img src="https://wgflow.2ps.in/stats.svg" alt="community stats" />
