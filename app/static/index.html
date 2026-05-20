@@ -3002,7 +3002,7 @@
         <span class="instance-chrome" id="instance-chrome">
           <span class="instance-sep">⟫</span><span class="instance-name" id="instance-name"></span><span class="instance-edit-btn" id="instance-edit-btn" title="edit instance name and color">⚙</span>
         </span>
-        <span class="sub">wireguard control panel · v4.3.0 · <span id="brand-author" class="brand-author" title="about wgflow">gcblauth</span> <span id="matrix-replay" class="matrix-replay-btn" title="replay matrix intro">◆</span></span>
+        <span class="sub">wireguard control panel · v4.3.1 · <span id="brand-author" class="brand-author" title="about wgflow">gcblauth</span> <span id="matrix-replay" class="matrix-replay-btn" title="replay matrix intro">◆</span></span>
       </div>
     </div>
     <div class="header-right">
@@ -3519,11 +3519,19 @@
                        maxlength="200">
               </div>
               <div class="field">
-                <label for="alias-new-body">body</label>
+                <label for="alias-new-body">body (one entry per line)</label>
                 <textarea id="alias-new-body" rows="4"
-                          placeholder="192.168.0.0/16, 192.168.1.0/24, 10.0.0.0/8:443/tcp"
+                          placeholder="192.168.0.0/16&#10;192.168.1.0/24&#10;10.0.0.0/8:443/tcp"
                           style="font-family: var(--f-mono); font-size: 12px;"></textarea>
-                <div class="hint">comma-separated · same syntax as peer ACLs · NO denies, NO nesting</div>
+                <div id="alias-new-preview" style="margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px; min-height: 20px;"></div>
+                <div id="alias-new-warn" style="font-size: 11px; margin-top: 4px; color: var(--danger);"></div>
+                <div class="hint" style="margin-top: 4px;">
+                  ip / cidr / ip:port/proto · same syntax as peer ACLs.
+                  <br>aliases are <span style="color: var(--accent); font-weight: 600;">allow-only</span> —
+                  to <span style="color: var(--danger); font-weight: 600;">deny</span> a group,
+                  write <code>!@alias_name</code> in a <em>peer's</em> ACL rules, not here.
+                  <br>no nesting (<code>@other_alias</code> not allowed inside an alias).
+                </div>
               </div>
               <button class="primary" id="alias-create-btn">create alias</button>
             </div>
@@ -3905,7 +3913,7 @@
     <div class="about-brand">
       <span class="bracket">[</span>wgflow<span class="bracket">]</span>
     </div>
-    <div class="about-version">v4.3.0</div>
+    <div class="about-version">v4.3.1</div>
     <div class="about-line">wireguard control panel</div>
     <a class="about-link" href="https://github.com/gcblauth/wgflow" target="_blank" rel="noopener">
       github.com/gcblauth/wgflow
@@ -3973,9 +3981,9 @@ const toast = (msg, kind='') => {
 };
 
 const fmtBytes = (n) => {
-  if (!n) return '0 B';
+  if (!n || n < 1) return '0 B';
   const u = ['B','KB','MB','GB','TB'];
-  const i = Math.min(u.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
+  const i = Math.min(u.length - 1, Math.max(0, Math.floor(Math.log(n) / Math.log(1024))));
   return (n / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1) + ' ' + u[i];
 };
 
@@ -4044,10 +4052,49 @@ function drawThroughput(series) {
 
   const t0 = series[0].ts, t1 = series[series.length - 1].ts;
   const tspan = Math.max(1, t1 - t0);
-  const maxV = Math.max(1, ...series.map(p => Math.max(p.rx || 0, p.tx || 0)));
+
+  // Real data peak across both rx and tx in the visible window.
+  const dataMax = Math.max(1, ...series.map(p => Math.max(p.rx || 0, p.tx || 0)));
+
+  // Axis top: round the data peak UP to a "nice" number and leave a
+  // little headroom so the curve never touches (or appears to clip
+  // against) the top edge.
+  //
+  // niceCeil works in base-1024 to match fmtBytes (KB/MB/GB are
+  // 1024-based here). It picks 1/2/5/10 x 1024^n, so the resulting
+  // axis ticks land on clean values like 500 KB/s, 1 MB/s, 2 MB/s
+  // rather than decimal-rounded noise like 4.8 MB/s.
+  const niceCeil = (v) => {
+    if (v <= 0) return 1;
+    const exp  = Math.floor(Math.log(v) / Math.log(1024));
+    const base = Math.pow(1024, exp);
+    const frac = v / base;            // 1 .. <1024
+    let nice;
+    if (frac <= 1)   nice = 1;
+    else if (frac <= 2)   nice = 2;
+    else if (frac <= 5)   nice = 5;
+    else if (frac <= 10)  nice = 10;
+    else if (frac <= 25)  nice = 25;
+    else if (frac <= 50)  nice = 50;
+    else if (frac <= 100) nice = 100;
+    else if (frac <= 250) nice = 250;
+    else if (frac <= 500) nice = 500;
+    else nice = 1024;
+    return nice * base;
+  };
+  // 12% headroom before rounding, so a peak that's already on a nice
+  // boundary (e.g. exactly 2 MB/s) still gets a tick above it.
+  const maxV = niceCeil(dataMax * 1.12);
 
   const x = t => pad.l + ((t - t0) / tspan) * innerW;
-  const y = v => pad.t + innerH - (v / maxV) * innerH;
+  // Clamp into [pad.t, pad.t+innerH]: with the headroom above, a normal
+  // point never hits the edge, but a late-arriving spike (pushed after
+  // maxV was computed, in theory) stays inside the chart box instead
+  // of drawing outside the SVG viewport.
+  const y = v => {
+    const yy = pad.t + innerH - (Math.max(0, v) / maxV) * innerH;
+    return Math.min(pad.t + innerH, Math.max(pad.t, yy));
+  };
 
   const path = (key) => {
     const d = series.map((p, i) =>
@@ -4063,8 +4110,10 @@ function drawThroughput(series) {
     return top + base;
   };
 
-  // Y-axis ticks: 0, max/2, max
-  const yTicks = [0, maxV / 2, maxV];
+  // Y-axis ticks: quarters of the (nice-rounded) axis max. Because
+  // maxV is now a nice number, these land on readable values
+  // (e.g. maxV=2MB → 0, 500KB, 1MB, 1.5MB, 2MB).
+  const yTicks = [0, maxV / 4, maxV / 2, (maxV * 3) / 4, maxV];
   const yLines = yTicks.map(v =>
     `<line class="grid-line" x1="${pad.l}" x2="${pad.l + innerW}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}"/>`
   ).join('');
@@ -5090,15 +5139,88 @@ async function loadAliases() {
   });
 }
 
+// v4.3.1: shared live-preview for alias editors (create form + edit
+// modal). Mirrors the peer ACL editor's chip preview, with two
+// differences: aliases are allow-only (a `!` entry is flagged as an
+// error, not rendered as a deny chip) and aliases cannot nest (an
+// `@other` entry is flagged too). Pass the textarea value + the ids
+// of the preview container and the warning line.
+//
+// Returns true if the body is clean (safe to save), false if it
+// contains a deny or a nested-alias entry. Callers use the return
+// value to block the save and toast a clear message.
+function renderAliasPreview(val, previewId, warnId) {
+  const preview = document.getElementById(previewId);
+  const warnEl  = document.getElementById(warnId);
+  if (!preview) return true;
+
+  // One entry per line now (was comma-separated pre-4.3.1).
+  const lines = val.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+
+  // Rule text is everything before an optional `# comment`.
+  const ruleOf = (line) => line.split('#', 1)[0].trim();
+
+  const denyLines  = [];
+  const nestLines  = [];
+
+  preview.innerHTML = lines.map(line => {
+    const rulePart    = ruleOf(line);
+    const commentPart = line.includes('#')
+      ? line.substring(line.indexOf('#') + 1).trim() : '';
+    const isDeny  = rulePart.startsWith('!');
+    const isNest  = /^!?@/.test(rulePart);
+
+    if (isDeny) denyLines.push(rulePart);
+    if (isNest) nestLines.push(rulePart);
+
+    // Invalid entries (deny / nested alias) get a warn-colored chip so
+    // the operator sees exactly which line is the problem.
+    let style;
+    if (isDeny || isNest) {
+      style = 'border: 1px solid var(--warn); color: var(--warn); '
+            + 'background: transparent; padding: 2px 8px; font-size: 11px; '
+            + 'font-family: var(--f-body);';
+    } else {
+      style = 'border: 1px solid var(--accent); color: var(--accent); '
+            + 'background: transparent; padding: 2px 8px; font-size: 11px; '
+            + 'font-family: var(--f-body);';
+    }
+    const commentHtml = commentPart
+      ? `<span style="opacity: 0.55; margin-left: 6px; font-style: italic;">— ${escape(commentPart)}</span>`
+      : '';
+    return `<span style="${style}">${escape(rulePart)}${commentHtml}</span>`;
+  }).join('');
+
+  // Build the warning line. Deny and nesting are both hard errors for
+  // an alias body — the server rejects them with 422 anyway, but we
+  // explain WHY and what to do instead before the round-trip.
+  const msgs = [];
+  if (denyLines.length) {
+    msgs.push(
+      `⚠ deny rule${denyLines.length > 1 ? 's' : ''} not allowed in an alias `
+      + `(${denyLines.map(escape).join(', ')}) — aliases are allow-only. `
+      + `to deny this group, use !@${'alias_name'} in a peer's ACL rules.`
+    );
+  }
+  if (nestLines.length) {
+    msgs.push(
+      `⚠ nested alias${nestLines.length > 1 ? 'es' : ''} not allowed `
+      + `(${nestLines.map(escape).join(', ')}) — list the CIDRs directly instead.`
+    );
+  }
+  if (warnEl) warnEl.innerHTML = msgs.join('<br>');
+
+  return denyLines.length === 0 && nestLines.length === 0;
+}
+
 function openAliasEditor(alias) {
   if (!alias) return;
-  // Body re-stringification: round-trip through the comma-separated
-  // textual form the operator types. Server stores structured but the
-  // editor is a textbox — same as the peer ACL editor's shape.
+  // Body re-stringification: one entry per line (v4.3.1 — was a
+  // comma-separated single line before, same as the peer ACL editor).
   const bodyText = alias.body.map(e => {
     const port = e.port ? `:${e.port}/${e.proto}` : '';
     return `${e.cidr}${port}`;
-  }).join(', ');
+  }).join('\n');
 
   openModal(`edit alias · @${escape(alias.name)}`, `
     <div class="field">
@@ -5107,10 +5229,18 @@ function openAliasEditor(alias) {
              autocomplete="off" maxlength="200">
     </div>
     <div class="field">
-      <label for="alias-edit-body">body</label>
-      <textarea id="alias-edit-body" rows="4"
+      <label for="alias-edit-body">body (one entry per line)</label>
+      <textarea id="alias-edit-body" rows="6"
                 style="font-family: var(--f-mono); font-size: 12px;">${escape(bodyText)}</textarea>
-      <div class="hint">comma-separated · NO denies, NO nesting</div>
+      <div id="alias-edit-preview" style="margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px; min-height: 20px;"></div>
+      <div id="alias-edit-warn" style="font-size: 11px; margin-top: 4px; color: var(--danger);"></div>
+      <div class="hint" style="margin-top: 4px;">
+        ip / cidr / ip:port/proto · same syntax as peer ACLs.
+        <br>aliases are <span style="color: var(--accent); font-weight: 600;">allow-only</span> —
+        to <span style="color: var(--danger); font-weight: 600;">deny</span> this group,
+        write <code>!@${escape(alias.name)}</code> in a <em>peer's</em> ACL rules, not here.
+        <br>no nesting (<code>@other_alias</code> not allowed inside an alias).
+      </div>
     </div>
     <div class="hint" style="margin-bottom: 10px;">
       ${alias.ref_count} peer${alias.ref_count === 1 ? '' : 's'} reference this alias.
@@ -5119,9 +5249,31 @@ function openAliasEditor(alias) {
     <button class="primary" id="alias-edit-save">save</button>
   `);
 
+  // Live preview wiring.
+  const bodyEl = $('#alias-edit-body');
+  const refreshPreview = () =>
+    renderAliasPreview(bodyEl.value, 'alias-edit-preview', 'alias-edit-warn');
+  bodyEl.addEventListener('input', refreshPreview);
+  refreshPreview();
+
   $('#alias-edit-save').onclick = async () => {
     const description = $('#alias-edit-desc').value.trim();
-    const body = $('#alias-edit-body').value.trim();
+    const bodyLines = $('#alias-edit-body').value;
+
+    // Block the save locally if the body has denies or nesting — the
+    // server would 422 anyway, this gives a faster, clearer message.
+    if (!renderAliasPreview(bodyLines, 'alias-edit-preview', 'alias-edit-warn')) {
+      toast('fix the highlighted entries before saving', 'error');
+      return;
+    }
+
+    // Server-side parser (parse_list) splits on commas. The editor is
+    // line-based for UX; convert lines → comma form on the wire.
+    const body = bodyLines.split(/\r?\n/).map(s => s.trim()).filter(Boolean).join(', ');
+    if (!body) {
+      toast('alias body cannot be empty', 'error');
+      return;
+    }
     try {
       const r = await api('PUT', `/api/acl-aliases/${encodeURIComponent(alias.name)}`, {
         description, body,
@@ -5142,22 +5294,49 @@ document.addEventListener('click', async (ev) => {
   if (t.id !== 'alias-create-btn') return;
   const name = ($('#alias-new-name').value || '').trim().toLowerCase();
   const description = ($('#alias-new-desc').value || '').trim();
-  const body = ($('#alias-new-body').value || '').trim();
-  if (!name || !body) {
+  const bodyLines = $('#alias-new-body').value || '';
+  if (!name || !bodyLines.trim()) {
     toast('name and body are required', 'error');
     return;
   }
+  // Local validation: deny / nesting are not valid in an alias body.
+  if (!renderAliasPreview(bodyLines, 'alias-new-preview', 'alias-new-warn')) {
+    toast('fix the highlighted entries before creating', 'error');
+    return;
+  }
+  // Editor is line-based; server's parse_list splits on commas.
+  const body = bodyLines.split(/\r?\n/).map(s => s.trim()).filter(Boolean).join(', ');
   try {
     await api('POST', '/api/acl-aliases', { name, description, body });
     $('#alias-new-name').value = '';
     $('#alias-new-desc').value = '';
     $('#alias-new-body').value = '';
+    renderAliasPreview('', 'alias-new-preview', 'alias-new-warn');
     toast(`@${name} created`);
     loadAliases();
   } catch (e) {
     toast(e.message, 'error');
   }
 });
+
+// v4.3.1: live preview on the create form's body textarea. The
+// textarea is in the static HTML. Mirror the codebase's wire pattern:
+// DOMContentLoaded if the document is still parsing, otherwise run
+// now (this script may execute after the DOM is already complete).
+(function wireAliasCreatePreview() {
+  const wire = () => {
+    const el = document.getElementById('alias-new-body');
+    if (el) {
+      el.addEventListener('input', () =>
+        renderAliasPreview(el.value, 'alias-new-preview', 'alias-new-warn'));
+    }
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', wire);
+  } else {
+    wire();
+  }
+})();
 
 // -----------------------------------------------------------------------------
 // forms

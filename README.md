@@ -1,552 +1,184 @@
 # wgflow
 
-**A single-container WireGuard gateway with a real admin panel.**
-
-Run WireGuard, generate peer configs, manage per-peer ACLs, monitor live throughput, run network diagnostics, and serve everything from a self-contained web UI — all from one Docker container.
+**WireGuard with a professional control panel, real per-peer ACLs, and built-in diagnostics — all from one Docker container.**
 
 ```
-[ wgflow ]   wireguard control panel · v3.2
+[ wgflow ]   wireguard control panel · v4.3.1
 ```
 
-## Screenshots:
+<img src="https://wgflow.2ps.in/stats.svg" alt="community stats" />
 
+wgflow turns a Linux box into a WireGuard gateway you can actually operate: generate peer configs, control exactly what each peer can reach, watch live throughput, run network diagnostics, federate multiple sites, and migrate in from wg-easy or PiVPN — all from a self-contained web UI. One container, one SQLite file, no external dependencies.
 
-**Everything you need.**
-
-<img width="700" height="470" alt="image" src="https://github.com/user-attachments/assets/c4095156-6002-448a-81ed-ba6d3288ef10" />
-
-<img width="765" height="470" alt="image" src="https://github.com/user-attachments/assets/bffe2a6a-abde-409f-8307-045669cefc16" />
-
-<img width="828" height="872" alt="image" src="https://github.com/user-attachments/assets/525cb922-4b83-488d-9a98-1cf8ac5c60d0" />
-
-<img width="990" height="927" alt="image" src="https://github.com/user-attachments/assets/b5b4a260-8922-43ab-9a5d-cc38b0fbd11a" />
-
-> See also: [CHANGELOG.md](CHANGELOG.md) for full version history.
+> See [CHANGELOG.md](CHANGELOG.md) for full version history.
 
 ---
 
-## What it is
+## Screenshots
 
-wgflow is a WireGuard server with the missing operator interface. You define what each peer can reach, hand them a `.conf` file or QR code, and watch the connection from a dashboard that streams live data over a WebSocket. ACLs are enforced via per-peer iptables chains with a default-deny policy. Optional dnsmasq integration gives you DNS query logging and override rules for split-horizon scenarios.
-I've had my own cli interface to help me with. With the help of AI I'm trying to make it look cool and more customizable.
-
-It is meant for one-operator deployments managing tens to low hundreds of peers — homelab gateways, small office VPNs, family-and-friends nodes. It is **not** a multi-tenant, multi-server, web-scale product.
-
----
-
-## Why you might want this
-
-- You already understand WireGuard and don't want a full-stack SaaS layer (Tailscale, Twingate) on top of it
-- You need per-peer destination filtering — "alice can reach the NAS, bob can only reach the file server on port 22"
-- You want to see what's happening — handshakes, throughput, DNS queries, dropped packets — from a browser without SSH'ing in
-- You'd like to run a speedtest or `mtr` from the gateway without keeping a tmux session open
-- A single Docker container with one volume is the entire deployment
+<!-- TODO: replace with real screenshots -->
+<!-- 1. Dashboard — live peer list + throughput -->
+<!-- 2. ACL editor — per-peer CIDR/port/proto rules -->
+<!-- 3. Multisite panel — federated wgflows -->
+<!-- 4. Mobile view — responsive peer cards -->
 
 ---
 
-## Feature overview
+## Why wgflow
 
-### Peer management
-- Single create, batch by names list, or batch by count + prefix
-- **Migrate from existing deployments** — auto-detecting importer for wg-easy (v1-v14 `wg0.json` and v15+ `wg-easy.db`), PiVPN (tar/zip of `/etc/wireguard/`), and bare WireGuard (`wg0.conf`); dry-run preview with per-peer status before commit
-- Per-peer ACLs (host / CIDR / port / protocol) with a server-side default applied to new peers
-- Per-peer **DNS preference** at creation: inherit server default, set custom value, or omit entirely (split-tunnel friendly) — overridable at config download time via `?dns=` query param
-- Encrypted ZIP installer for Windows recipients (.ps1 + embedded .conf, AES-256, 60-bit Diceware passphrase)
-- Hot-reload via `wg syncconf` — peer changes don't disrupt existing sessions
+Most WireGuard panels stop at "add peer, download config." wgflow is built for people who actually run the thing in production:
 
-### Live monitoring
-- Per-peer throughput sparklines in the table
-- Global throughput chart with live / 1h / 6h / 24h ranges
-- Cumulative rx/tx counters that **survive container restarts** (with reset detection for wg interface restarts)
-- Three-state peer status (never connected / connected before / online now)
-- Inspector modal per peer: endpoint info with reverse DNS, top destinations from conntrack, ACL hit counts, live flow list, raw `wg show` output, recent DNS queries
-- **Peer ping widget** in the inspector — one-shot or live mode (every 5s), shows split-tunnel filtering hints when ICMP doesn't come back
-
-### DNS (optional, off by default with `WG_LOCAL_DNS=0`)
-- dnsmasq inside the container as the DNS resolver for peers
-- Configurable upstream resolvers (multiple, with strict-order preference)
-- Domain blocklist via [StevenBlack/hosts](https://github.com/StevenBlack/hosts) (~140k entries built into the image)
-- DNS override editor — map domains to internal IPs (NAT loopback workaround)
-- Recent queries panel with per-source color coding (cached / blocked / forwarded / locally answered)
-- AbuseIPDB lookup links on suspicious destinations
-
-### Internet diagnostics
-- **Internet status pill** in the top bar — public IP + last speedtest result, click to open the full diagnostics panel
-- **Multi-endpoint speedtest** — Cloudflare (anycast, bidirectional), Hetzner Falkenstein/Helsinki/Ashburn (download-only), OVH Roubaix (download-only)
-- Speedtest history chart with hover crosshair, per-endpoint color-coded samples, separate Mbps/ms axes
-- Auto-test scheduler (off / 15m / 30m / 1h / 6h / 24h) with live daily-volume estimate
-- **Diagnostic tools**: ping (configurable count) · traceroute · mtr · dig · curl timing breakdown · TCP port test · iperf3 client
-
-### Logs panel
-Four on-demand log streams via WebSocket — opened only when you switch to that tab so resources stay zero when you're not watching:
-- **dnsmasq** — full query and resolver activity
-- **wireguard** — kernel module events (requires host kern.log mount)
-- **iptables drops** — packets that fell through every per-peer ACL chain (requires `WGFLOW_IPTABLES_LOG=1`)
-- **access** — uvicorn HTTP access log
-
-500-line buffer per stream, substring filter, export-to-text.
-
-### UI niceties
-- Light + dark themes with persistent selection (no FOUC on theme load)
-- Authentication: full-page login overlay, `bcrypt`-hashed `PANEL_PASSWORD` env var, 24h cookie session
-- Pagination, search, and column sorting on the peer table
-- Custom inline SVG charts everywhere (no chart.js dependency at runtime)
-- About modal with version + GitHub link
-
-### Multi-site federation (v4.0)
-- Pair two or more wgflow instances so each one's panel is reachable from the others over a private WireGuard overlay network (default `10.99.0.0/24`)
-- One-time pairing URL flow (`wgflow-pair://...`), 10-minute TTL, single-use, rate-limited handshake endpoint
-- Per-link WG keypair + PSK so revoking a single link doesn't ripple
-- Panel section with status dots (green = handshake fresh, amber = pending, red = failed, gray = disabled), per-row probe, enable/disable, forget actions
-- iptables hard backstop: federated peers can reach this box's services but cannot transit through to client peers
-- Disable entirely by setting `WG_MULTISITE=0` — the panel section hides and all federation API endpoints return 404. Default is on; the inbound handshake is gated by an in-memory pairing-code window so the public attack surface is small
-- Trust model in v4.0 is full panel-trust between paired operators (intended use case: one operator owning both ends). A tighter scoped-RPC trust model is planned for v5
+- **Real per-peer ACLs.** Not just on/off — each peer gets a rule set of CIDRs, host\:port\:protocol entries, and deny rules, enforced by a dedicated iptables chain. A phone can be restricted to one RDP host while a laptop gets the whole LAN.
+- **One-command install.** `setup-one-time.sh` walks you through endpoint, DNS, federation, and panel binding, generates a random admin password, writes a fully-commented `.env`, builds, and verifies. Re-runnable, scriptable for CI.
+- **Multisite federation, built in.** Pair two or more wgflows over WireGuard so the LANs behind each become reachable from the others. No third-party mesh service.
+- **Migrate in.** Import panel reads wg-easy, PiVPN, and bare WireGuard configs and turns them into wgflow peers — no manual re-entry.
+- **SQLite is the source of truth.** The kernel state is *rebuilt* from the database on every change, so the panel never lies about what's actually configured. No drift between "what the UI shows" and "what `wg show` says."
+- **Diagnostics that don't need a shell.** ping, traceroute, mtr, dig, curl, tcpdump, iperf3 — all from the panel, scoped to the container.
 
 ---
 
-## Deployment paths
-
-wgflow has two install paths:
-
-- **Docker (recommended).** This is what's tested against every release and used in production. The Quick start below is the Docker flow.
-- **Bare-metal Ubuntu (experimental).** A `install-baremetal.sh` script exists for installing wgflow as a systemd service without Docker. It works (and is used in at least one production instance) but isn't routinely tested against new releases — new features may have Docker-only paths and bare-metal-specific bugs are addressed on request rather than as a release blocker. Use this if you specifically want to avoid Docker and accept the lighter maintenance.
-
----
-
-## Quick start
+## Quick start (Docker)
 
 ```bash
-# 1. Get the code
 git clone https://github.com/gcblauth/wgflow.git
 cd wgflow
-bash setup.sh
-
-# or
-# 2. Edit docker-compose.yml — at minimum:
-#    - WG_ENDPOINT       your public hostname:port (e.g. vpn.example.com:51820)
-#    - WG_DEFAULT_ACL    what new peers can reach by default
-#    - PANEL_PASSWORD    set a password (bcrypt hash or plaintext, see below)
-
-# 3. Bring it up
-docker compose up -d --build
-
-# 4. Open the admin UI on the docker host
-#    http://127.0.0.1:8080
-#    (default port-binding is loopback only — see "Exposing the admin UI safely" below)
+sudo ./setup-one-time.sh
 ```
+
+The installer asks a handful of questions (your public endpoint is the only required one), generates an admin password, builds the image, starts the container, and verifies the panel responds. When it finishes it prints the panel URL and where to find the password.
+
+Then open the panel, log in, **change the admin password**, and add your first peer.
+
+### Bare-metal (no Docker)
+
+```bash
+sudo ./setup-one-time.sh --bare-metal
+```
+
+Installs into a Python venv with a systemd unit instead of a container. Same `.env`, same features.
+
+### Other install flags
+
+| Flag | Effect |
+|------|--------|
+| `--force` | Reconfigure an existing install (backs up the old `.env` first) |
+| `--noninteractive` | Use defaults + environment variables, no prompts (CI-friendly) |
+| `--bare-metal` | systemd + venv instead of Docker |
+| `--help` | Usage |
+
+---
+
+## What you can do with it
+
+### Peers
+Create peers individually or in batches (by name list or by count). Each peer gets a generated keypair, an allocated address, a downloadable config, and a QR code. Enable/disable without deleting. Inspect live handshake, endpoint, and transfer counters.
+
+### Per-peer ACLs
+Every peer has an access-control list controlling which destinations its traffic may reach. Entries are CIDRs, single hosts, `host:port/proto` tuples, or deny rules (`!` prefix). ACLs are enforced by a per-peer iptables chain — not advisory. Named aliases let you reuse common rule sets. The panel shows per-rule hit counts so you can see what's actually being used.
+
+### Local DNS + blocklists *(optional)*
+Turn on the built-in dnsmasq and wgflow becomes a DNS-level ad/tracker blocker for every connected peer — Pi-hole-style. Multiple blocklist sources, deduplicated. A live DNS query log shows what's being resolved and what's being blocked. Per-domain overrides for allowlisting or custom answers.
+
+### Multisite federation *(optional)*
+Pair this wgflow with other wgflows. Each pairing is a symmetric WireGuard link on a dedicated overlay subnet (`10.99.0.0/24` by default). Advertise LANs on each side; routes are reconciled automatically. The panel shows every link with live handshake status and a one-click "open remote panel" button.
+
+### Migration importer *(optional)*
+Coming from another VPN manager? The Import panel reads **wg-easy**, **PiVPN**, and **bare WireGuard** configurations, previews the peers it found, and commits the ones you choose into wgflow's database. Your existing client subnet is preserved so peer configs keep working.
+
+### Diagnostics
+ping, traceroute, mtr, dig, curl, tcpdump, and iperf3 (client and server) — run from the panel, output streamed live. Scheduled speed tests with history. Public-IP detection. Reverse-DNS lookups.
+
+### Live metrics
+Per-peer and aggregate throughput, updated over a WebSocket. Cumulative transfer counters. Sparkline history per peer. The whole dashboard updates without polling.
 
 ---
 
 ## Configuration
 
-Set everything via environment variables in `docker-compose.yml`. Sensible defaults exist for everything except `WG_ENDPOINT`.
+`setup-one-time.sh` writes a fully-commented `.env`. Every value is documented inline. The most important ones:
 
-### WireGuard
+| Variable | Default | What it does |
+|----------|---------|--------------|
+| `WG_ENDPOINT` | *(required)* | Public `host:port` peers connect to |
+| `WG_SUBNET` | `10.13.13.0/24` | Address range for client peers |
+| `WG_LOCAL_DNS` | `0` | Run the built-in DNS server + blocklists |
+| `WG_MULTISITE` | `1` | Enable multisite federation panel |
+| `WG_DEFAULT_ACL` | `10.0.0.0/8` | Default reach for new peers |
+| `WGFLOW_MIGRATION_DEFAULT_ENABLED` | `0` | Show the Import panel |
+| `WGFLOW_IPTABLES_LOG` | `0` | Log rejected packets (debugging) |
+| `HOSTBIND_WG_PANEL` | `0.0.0.0` | Panel bind interface |
+| `HOSTBIND_WG_PANEL_PORT` | `8080` | Panel host-side port |
+| `WGFLOW_TELEMETRY_ENABLED` | `1` | Anonymous usage stats (see below) |
 
-| Variable             | Default                  | Notes                                                          |
-|----------------------|--------------------------|----------------------------------------------------------------|
-| `WG_INTERFACE`       | `wg0`                    | interface name inside the container                            |
-| `WG_LISTEN_PORT`     | `51820`                  | UDP port WireGuard listens on (also exposed in compose ports)  |
-| `WG_SUBNET`          | `10.13.13.0/24`          | tunnel subnet — peers get `.2` upward                          |
-| `WG_SERVER_ADDRESS`  | `10.13.13.1/24`          | server's IP inside the tunnel                                  |
-| `WG_ENDPOINT`        | `vpn.example.com:51820`  | **public** hostname:port peers will dial — set this!           |
-| `WG_DEFAULT_ACL`     | `10.0.0.0/8`             | comma-separated ACL applied to new peers                       |
-| `WG_PEER_DNS`        | _auto_                   | DNS handed to peers — inherits sensibly from `WG_LOCAL_DNS`    |
-
-### DNS
-
-| Variable           | Default                       | Notes                                                              |
-|--------------------|-------------------------------|--------------------------------------------------------------------|
-| `WG_LOCAL_DNS`     | `1`                           | run dnsmasq inside container as resolver — set `0` to disable      |
-| `WG_DNS_UPSTREAMS` | `8.8.8.8,8.8.4.4,1.1.1.1`     | upstreams dnsmasq forwards to (only used when `WG_LOCAL_DNS=1`)    |
-
-When `WG_LOCAL_DNS=1` (default), `WG_PEER_DNS` auto-derives to the server's tunnel IP so peers query the local dnsmasq. When `WG_LOCAL_DNS=0`, it auto-derives to `1.1.1.1`. Override `WG_PEER_DNS` explicitly only if you have a separate internal resolver.
-
-### Logging
-
-| Variable               | Default | Notes                                                                  |
-|------------------------|---------|------------------------------------------------------------------------|
-| `WGFLOW_IPTABLES_LOG`  | `0`     | `1` → log packets dropped by ACL with `WGFLOW-DROP:` prefix (rate-limited) |
-
-### Auth
-
-| Variable          | Default | Notes                                                                     |
-|-------------------|---------|---------------------------------------------------------------------------|
-| `PANEL_PASSWORD`  | `""`    | empty disables auth; can be plaintext or `$2a$` / `$2b$` / `$2y$` bcrypt  |
-
-If you set a plaintext password, wgflow prints a generated bcrypt hash in the container logs at startup — copy that into compose to avoid storing the plaintext.
-
-### Storage
-
-| Variable           | Default  | Notes                                          |
-|--------------------|----------|------------------------------------------------|
-| `WGFLOW_DATA_DIR`  | `/data`  | where keys, sqlite, and per-peer configs live  |
-
-### Telemetry
-
-| Variable                    | Default | Notes                                                                       |
-|-----------------------------|---------|-----------------------------------------------------------------------------|
-| `WGFLOW_TELEMETRY_ENABLED`  | `1`     | `0` disables anonymous stats (peer count, totals, uptime). See Telemetry §  |
-| `WGFLOW_TELEMETRY_SECRET`   | `""`    | Optional shared key for operators running their own collector. Leave empty unless you've arranged this with the project. |
-
-### Migration importer
-
-| Variable                            | Default | Notes                                                                |
-|-------------------------------------|---------|----------------------------------------------------------------------|
-| `WGFLOW_MIGRATION_DEFAULT_ENABLED`  | `1`     | Seeds the importer's enabled-state on first install only. Once the DB row exists, runtime UI/API toggle wins on subsequent restarts. See Migrating from another WireGuard manager § |
-
-### Optional volumes
-
-```yaml
-volumes:
-  - ./data:/data                                  # required
-  - "/var/log/kern.log:/var/log/kern.log:ro"      # optional — enables wireguard + iptables log tabs
-```
+To change anything later: edit `.env`, then `docker compose up -d` (or `systemctl restart wgflow` on bare-metal).
 
 ---
 
-## Architecture
+## Architecture in one paragraph
 
-```
-  ┌──────────────┐          ┌─────────────────── wgflow container ───────────────────┐
-  │ peer devices │  udp/    │                                                        │
-  │  (laptops,   │  51820   │  wg0  ─►  FORWARD ─►  WGFLOW_FORWARD ─►  WGFLOW_PEER_N │
-  │   phones)    │ ───────► │   │                     │                      │       │
-  └──────────────┘          │  10.13.13.0/24          │                      │ ACCEPT│
-                            │                         │ DROP (default deny)  ▼       │
-                            │  FastAPI ◄─► sqlite     │                  MASQUERADE  │
-                            │  :8080 (loopback)       │                      │       │
-                            │  dnsmasq :53 (optional) │                      │       │
-                            └─────────────────────────┼──────────────────────┼───────┘
-                                                                             ▼
-                                                         whitelisted internal hosts
-```
-
-**Key pieces:**
-
-- **wg0** — WireGuard interface, brought up by `wg-quick` from a server-managed `wg0.conf`
-- **WGFLOW_FORWARD** — top-level iptables chain that allows `ESTABLISHED,RELATED`, dispatches to per-peer chains by source IP, and ends with `DROP`
-- **WGFLOW_PEER_{id}** — one chain per peer holding that peer's ACL rules
-- **MASQUERADE** — egress NAT so destination hosts see the container's IP
-- **sqlite** at `/data/wgflow.sqlite` — peers, ACLs, metrics samples, DNS queries, speedtest history, network settings, cumulative traffic counters
-- **FastAPI** at `:8080` — REST API + WebSocket for live data
-- **dnsmasq** at `:53` (when `WG_LOCAL_DNS=1`) — DNS resolver for peers with blocklist + override support
-
-Kernel state (WireGuard config, iptables chains) is **rebuilt from sqlite on every container start** — sqlite is the source of truth, kernel state is derived.
+wgflow keeps **SQLite as the single source of truth**. Every change — a new peer, an ACL edit, a federation link — is written to the database first, then a reconciler **rebuilds the kernel state** (`wg syncconf`, `ip route`, iptables chains) to match. The kernel is never edited incrementally and trusted afterward; it is treated as a cache that gets regenerated. This means the panel can never drift from reality, schema migrations are safe (SAVEPOINT-wrapped), and a corrupted kernel state self-heals on the next change. The web layer is FastAPI + a single static `index.html` (no build step). See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full breakdown.
 
 ---
 
-## UI walkthrough
+## Multi-platform
 
-When you open `http://127.0.0.1:8080`, you get:
-
-**Top bar** — brand + version + author link + ◆ matrix-replay · internet status pill (public IP + last speedtest, click for diagnostics) · uptime · connection state · theme toggle · logout
-
-**Stats row** — total peers · online · online sparkline · rx rate + Σ cumulative · tx rate + Σ cumulative (with ↺ reset) · cpu · mem · load
-
-**Throughput chart** — live / 1h / 6h / 24h ranges, with rx + tx area fills
-
-**Peer table** — paginated, sortable, searchable, with status dot · sparkline · inspect button (⌕) · actions menu (config / qr / install zip / acl) · delete
-
-**Peer management panel** — tabs for `add one` · `batch · names` · `batch · count` · `dns override` · `server`. Each create form has DNS preference (checkbox + editable input).
-
-**DNS recent queries** — last 100 queries with source pill, search filter, AbuseIPDB lookup link on suspicious entries (hidden when `WG_LOCAL_DNS=0`)
-
-**Logs panel** — 4 source tabs (dnsmasq · wireguard · iptables drops · access), start/stop per source, 500-line buffer, filter input, export
-
-**Internet diagnostics panel** (opened from top-bar pill) — speedtest chart with hover crosshair · endpoint dropdown (5 providers, grouped by upload support) · auto-test scheduler · clear-history button · 7 diagnostic tools
+wgflow runs on **Linux x86_64 and ARM64 / ARMv7** — the Docker image is multi-arch and all Python dependencies ship prebuilt wheels for ARM. It runs comfortably on a Raspberry Pi 4 or 5; a Pi 3 works for residential use. The host needs a kernel with the WireGuard module (Linux ≥ 5.6, i.e. any current distro).
 
 ---
 
-## ACL syntax
+## Performance tuning
 
-| Form                  | Meaning                                   |
-|-----------------------|-------------------------------------------|
-| `!10.0.5.22`          | DENY single host, any port/proto          |
-| `10.0.5.22`           | single host, any port/proto               |
-| `10.0.5.0/24`         | CIDR network, any port/proto              |
-| `!10.0.5.22:5432/tcp` | DENY single host, specific port + protocol|
-| `10.0.5.22:5432/tcp`  | single host, specific port + protocol     |
-| `10.0.5.0/24:443/tcp` | CIDR network, specific port + protocol    |
-| `0.0.0.0/0`           | Full tunnel                               |
-
-
-Multiple entries: comma-separated in `WG_DEFAULT_ACL`, one-per-line in the UI textarea.
-
----
-
-## Authentication
-
-Set `PANEL_PASSWORD` in compose to enable auth. Login is a full-page overlay; sessions are 24h cookies. The auth check runs as HTTP middleware (skipped on WebSocket handshakes; the WS handler validates the cookie itself).
-
-For non-interactive use, you can store a bcrypt hash directly:
+For most installs the defaults are fine. When pushing serious throughput, the host kernel (where WireGuard's data plane actually runs) can be tuned — larger UDP socket buffers, NIC hardware offloads, optionally the `performance` CPU governor. The repo ships an opt-in, reversible script:
 
 ```bash
-docker run --rm python:3.12 python -c "import bcrypt; print(bcrypt.hashpw(b'mypass', bcrypt.gensalt()).decode())"
+sudo ./scripts/host-tune.sh            # sysctl + NIC offloads
+sudo ./scripts/host-tune.sh --governor # also pin the CPU governor
+sudo ./scripts/host-tune.sh --revert   # undo everything
 ```
 
-Paste the `$2b$...` output into `PANEL_PASSWORD`.
-
-If `PANEL_PASSWORD=""` (default), auth is disabled — fine for SSH-tunnel-only access, dangerous on a shared network.
-
----
-
-## API reference
-
-All endpoints are under `/api/`. Auth (when enabled) is via the `wgflow_session` cookie set on `/api/auth/login`.
-
-### Peers
-
-| Method   | Path                                  | Notes                                           |
-|----------|---------------------------------------|-------------------------------------------------|
-| `GET`    | `/api/peers`                          | list all peers                                  |
-| `POST`   | `/api/peers`                          | `{name, acl?, dns?}`                            |
-| `POST`   | `/api/peers/batch/names`              | `{names: [...], acl?, dns?}`                    |
-| `POST`   | `/api/peers/batch/count`              | `{count, prefix?, acl?, dns?}`                  |
-| `PUT`    | `/api/peers/{id}/acl`                 | `{acl: [...]}`                                  |
-| `DELETE` | `/api/peers/{id}`                     | remove peer + iptables chain + DNS history      |
-| `DELETE` | `/api/peers?confirm=DELETE`           | wipe all peers (destructive)                    |
-| `GET`    | `/api/peers/{id}/config`              | `?dns=...` overrides stored DNS at download     |
-| `GET`    | `/api/peers/{id}/qr`                  | `?dns=...` same override semantics              |
-| `GET`    | `/api/peers/{id}/install-script`      | encrypted ZIP, passphrase in `X-WGFlow-Passphrase` header |
-| `GET`    | `/api/peers/{id}/inspect`             | endpoint, top destinations, ACL hits, conntrack flows, recent DNS |
-| `GET`    | `/api/peers/{id}/ping`                | ping the peer's tunnel IP from the server       |
-| `GET`    | `/api/peers/{id}/acl-hits`            | iptables packet/byte counters per ACL rule      |
-| `GET`    | `/api/peers/{id}/dns`                 | recent DNS queries from this peer               |
-
-### Server + auth
-
-| Method | Path                  | Notes                                                |
-|--------|-----------------------|------------------------------------------------------|
-| `GET`  | `/api/server`         | server config including `local_dns_enabled`, `peer_dns`, `dns_upstreams`, `uptime_seconds` |
-| `GET`  | `/api/auth/status`    | `{auth_required, authenticated}`                     |
-| `POST` | `/api/auth/login`     | `{password}` → sets cookie                           |
-| `POST` | `/api/auth/logout`    | clears cookie                                        |
-
-### Metrics
-
-| Method | Path                                            | Notes                                          |
-|--------|-------------------------------------------------|------------------------------------------------|
-| `GET`  | `/api/metrics/live`                             | last 5 minutes of throughput + host vitals     |
-| `GET`  | `/api/metrics/history?window=1h`                | `1h`, `6h`, `24h`                              |
-| `GET`  | `/api/metrics/peer/{id}/sparkline`              | last 60s for a single peer                     |
-| `GET`  | `/api/metrics/cumulative`                       | persistent rx/tx since last clear              |
-| `POST` | `/api/metrics/cumulative/reset?confirm=RESET`   | zero the visible cumulative counters           |
-
-### DNS (only meaningful when `WG_LOCAL_DNS=1`)
-
-| Method   | Path                            | Notes                                            |
-|----------|---------------------------------|--------------------------------------------------|
-| `GET`    | `/api/dns/recent`               | recent queries across all peers                  |
-| `GET`    | `/api/dns/overrides`            | list active overrides                            |
-| `POST`   | `/api/dns/overrides`            | `{pattern, target_ip, note?}`                    |
-| `DELETE` | `/api/dns/overrides/{id}`       | remove an override                               |
-| `GET`    | `/api/rdns/{ip}`                | reverse DNS lookup (24h cache)                   |
-
-### Network diagnostics
-
-| Method   | Path                                            | Notes                                                       |
-|----------|-------------------------------------------------|-------------------------------------------------------------|
-| `GET`    | `/api/network/status`                           | public IP + last speedtest summary                          |
-| `GET`    | `/api/network/speedtest/endpoints`              | catalog of 5 endpoints with `supports_upload` + size hints  |
-| `POST`   | `/api/network/speedtest?endpoint=cloudflare`    | run a test (synchronous, 15-30s)                            |
-| `GET`    | `/api/network/speedtest/history?limit=200`      | historical samples                                          |
-| `DELETE` | `/api/network/speedtest/history?confirm=DELETE` | wipe history                                                |
-| `PUT`    | `/api/network/speedtest/schedule`               | `{interval_min, endpoint?}` — 0 disables, min 5             |
-| `POST`   | `/api/network/diag/{tool}`                      | `{target, record_type?, count?}` — `tool` ∈ ping/traceroute/mtr/dig/curl/tcp/iperf3 |
-
-### Logs
-
-| Method | Path                       | Notes                                  |
-|--------|----------------------------|----------------------------------------|
-| `GET`  | `/api/logs/availability`   | which streams are usable + reasons     |
-| `WS`   | `/ws/logs/{source}`        | dnsmasq / wireguard / iptables / access |
-
-### Live status
-
-| Method | Path           | Notes                                                  |
-|--------|----------------|--------------------------------------------------------|
-| `WS`   | `/ws/status`   | combined peer + host + throughput snapshot every 1s    |
-
-### Migration importer
-
-| Method | Path                              | Notes                                                       |
-|--------|-----------------------------------|-------------------------------------------------------------|
-| `POST` | `/api/import/upload`              | multipart `file=…` — auto-detects format, returns preview (403 when migration disabled) |
-| `GET`  | `/api/import/preview/{id}`        | re-fetch a stashed preview (403 when migration disabled)    |
-| `POST` | `/api/import/commit`              | `{preview_id, accepted_indices, adopt_server_keypair, confirm_token: "IMPORT"}` (403 when migration disabled) |
-| `GET`  | `/api/server/migration`           | `{enabled: bool}` — current importer state                  |
-| `PUT`  | `/api/server/migration`           | `{enabled: bool}` — flip importer on/off                    |
-
----
-
-## Persistence
-
-Everything mutable lives in `./data/`:
-
-```
-data/
-├── keys/
-│   ├── server_private.key   # generated once, never regenerated
-│   └── server_public.key
-├── peers/                   # one .conf per peer for re-rendering
-└── wgflow.sqlite            # everything else
-```
-
-The sqlite database has these tables: `peers`, `peer_acls`, `metrics_samples`, `dns_queries`, `dns_overrides`, `speedtest_history`, `network_settings`, `cumulative_traffic`. Migrations run automatically on container startup.
-
----
-
-## Migrating from another WireGuard manager
-
-The **migrate** tab in the peer-management panel imports peers from an existing WireGuard deployment. Upload one file; the format is auto-detected; you get a preview of what will land, with per-peer status badges; you decide what to commit.
-
-### Supported sources
-
-| Source | What to upload | Server keypair? | Peer privkeys? |
-|---|---|---|---|
-| wg-easy v1-v14 | `wg0.json` from `/etc/wireguard/` | yes | yes |
-| wg-easy v15+ | `wg-easy.db` from `/etc/wireguard/` | yes (best-effort) | yes |
-| PiVPN | `tar czf pivpn.tar.gz /etc/wireguard/` | yes | yes |
-| Bare WireGuard | `wg0.conf` | yes (if `[Interface] PrivateKey` present) | **no** |
-
-The bare-WireGuard path is lower-fidelity by design. Server-side `wg0.conf` only stores peer **public** keys; the private keys live with the clients. wgflow imports those peers with a `has_private_key=false` flag and the "download config" button is hidden for them — their existing client `.conf` files continue to work, but wgflow can't re-issue them.
-
-### What happens during import
-
-1. **Upload.** The detector sniffs file magic and routes to the right parser. Errors at this step are specific: "this looks like JSON but lacks a `clients` object", not "unknown format".
-2. **Preview.** Each parsed peer is annotated with one of: `ok`, `name-conflict`, `pubkey-conflict`, `address-conflict`, `address-out-of-range`, `invalid`. Address conflicts appear when a source IP is already used by an existing wgflow peer; out-of-range means the source IP isn't inside wgflow's subnet, in which case wgflow precomputes a free `/32` from its own pool and the preview shows `10.6.0.5 → 10.13.13.42`.
-3. **Server keypair.** If the source provided one, you'll see a side-by-side diff of the current pubkey vs the incoming one. **Adopt** is checked by default — that's the migration-friendly choice, since clients reference the source's pubkey in their `.conf` and would otherwise break. Untick to keep wgflow's existing keypair and accept that all client configs need re-issuing.
-4. **Commit.** Type `IMPORT` to confirm, click commit. The DB writes happen in one transaction. If anything fails, the DB rolls back and you see the failure with the updated preview. Server keypair file replacement (when adopted) uses tmp-file + atomic rename — a crash mid-write leaves the old keypair intact, never half-written.
-
-### What's NOT translated
-
-- **AllowedIPs → ACLs.** Source `AllowedIPs` is a routing concept; wgflow ACLs are firewall rules. The mapping isn't clean. Imported peers come in with the server's default ACL (`WGFLOW_DEFAULT_ACL`); adjust per-peer afterwards.
-- **PostUp / PostDown.** wg-easy stores these in `wg0.json`. wgflow manages its own iptables setup; source values are ignored.
-- **Source `created_at` / `updated_at`** are not preserved. The peer's wgflow `created_at` is set to the import time. The source timestamp appears in the peer's `notes` field.
-
-### Operational notes
-
-- The 8 MiB upload cap covers the largest realistic real-world dump by orders of magnitude. Tighten `_IMPORT_MAX_BYTES` in `app/main.py` if you want a smaller blast radius.
-- Previews live in process memory with a 10-minute TTL. Restart the container and pending previews are gone — re-upload, takes seconds.
-- For wg-easy v15, upstream's schema isn't fully stable. The parser tries multiple known table/column name variants. If yours isn't recognised, the cleanest workaround is wg-easy's own "back up to `wg0.json`" feature, then upload the JSON.
-
-### Disabling the importer
-
-The importer is meant for one-time-use. Once you've migrated, lock the endpoints down:
-
-- **Server tab** has an "enabled / disabled" toggle under *migration importer*. Click once.
-- **Post-commit nudge** — after every successful import, a banner on the result screen offers a one-click "disable migration" button. Easiest path.
-- **API** — `PUT /api/server/migration {"enabled": false}` from any auth-bearing client.
-
-When disabled, all three `/api/import/*` endpoints return 403 and the migrate tab disappears from the UI. Re-enable any time from the server tab.
-
-The default state on a fresh install is **enabled** (so you can find the migrate tab without configuration). Override at provision time with `WGFLOW_MIGRATION_DEFAULT_ENABLED=0` in `.env` if you want default-off; once the install creates its `network_settings` row this env var stops mattering.
-
----
-
-## Operational notes
-
-- **Hot reload.** Adding, editing, or deleting peers uses `wg syncconf`. Existing peer sessions stay connected through the change.
-- **Default deny.** The `WGFLOW_FORWARD` chain ends with `DROP`. Anything that doesn't match a per-peer rule gets dropped silently — set `WGFLOW_IPTABLES_LOG=1` to see them.
-- **Conntrack byte accounting** is needed for the inspector's "top destinations" panel. Enable on the host with `sudo sysctl -w net.netfilter.nf_conntrack_acct=1` (and persist in `/etc/sysctl.conf`).
-- **WireGuard kernel logs** are conservative by default — most useful events are errors, not routine handshakes. For richer per-handshake logging: `echo 'module wireguard +p' | sudo tee /sys/kernel/debug/dynamic_debug/control` on the host.
-- **AES-encrypted ZIP** installer requires 7-Zip on the recipient (Windows native zip UI doesn't support AES). Linux/Mac `unzip` handles it.
-- **iperf3 tool** requires `iperf3 -s` running on the target side. The button works in either direction (the target doesn't have to be a peer; it can be any reachable host).
-- **NAT loopback** — if your peers are on the same LAN as the wgflow server, the public endpoint may not work due to your router's NAT. Use the DNS override editor to map the public hostname to an internal IP.
-- **iptables LOG rule rate** — capped at 10/min, burst 5. Won't flood `kern.log` even with a misbehaving peer. Bandwidth-limit features (when added) will need stricter per-rule limits.
-- **The `↺` cumulative counter reset** affects both rx and tx together (single offset row in DB).
+It runs on the host, autodetects the NIC, and installs systemd units so the settings persist across reboots. Full rationale and the manual equivalents are in [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 
 ---
 
 ## Telemetry
 
-wgflow ships with anonymous usage telemetry **enabled by default**. The running container periodically reports a small set of aggregate counters — instance UUID, peer count, cumulative rx/tx bytes, process uptime, and wgflow version. There are no peer names, no public keys, no IPs, no DNS query history, no host identifiers, no ACL contents.
+When enabled (default), wgflow sends a small anonymous payload to `wgflow.2ps.in` roughly every 30 minutes: version, peer count, total RX/TX bytes, uptime, and a randomly-generated instance ID. **No peer identifiers, no IP addresses, no names, no config contents.** It's used to understand how the software is deployed at scale.
 
-**To opt out:** set `WGFLOW_TELEMETRY_ENABLED=0` in your `.env` (or `docker-compose.yml`) and restart the container. `setup.sh` prompts for this on initial config. The startup log line `[wgflow] telemetry DISABLED via WGFLOW_TELEMETRY_ENABLED` confirms it took effect.
-
-**Why default-on:** the project genuinely benefits from knowing how it's used in the wild — peer-count distribution drives the "we should refactor at >50 peers" decisions, version mix tells us when it's safe to drop migration paths. Default-off would be more privacy-forward but leaves the project blind. We default-on and make opt-out a single env var.
+Opt out any time: set `WGFLOW_TELEMETRY_ENABLED=0` in `.env` and restart.
 
 ---
 
-## Exposing the admin UI safely
+## Security model
 
-The admin process can rewrite iptables and WireGuard config and read peer private keys. **It must never be directly internet-facing.**
+- The admin panel is password-protected by default (`PANEL_PASSWORD`, bcrypt-hashed at startup). `setup-one-time.sh` generates a random one.
+- Peer ACLs are **default-deny capable** — a peer reaches only what its rule set allows.
+- The container runs with `NET_ADMIN` + `NET_RAW` (required for WireGuard and iptables) and nothing more.
+- Bind the panel to `127.0.0.1` and front it with a reverse proxy if you want TLS or extra auth.
+- The WireGuard server keypair and peer keys live in the SQLite database; back it up accordingly (`/data/wgflow.sqlite`).
 
-Two reasonable patterns:
+---
 
-**SSH tunnel** for occasional admin sessions:
+## Day-2 operations
+
 ```bash
-ssh -L 8080:127.0.0.1:8080 user@your-host
-# then browse http://localhost:8080
+docker compose logs -f          # watch logs
+docker compose restart          # restart
+docker compose up -d            # apply .env changes
+docker compose down             # stop
 ```
 
-**Reverse proxy** with TLS (nginx/caddy/traefik) on the same host, configured to talk to `127.0.0.1:8080`. Even with `PANEL_PASSWORD` set, putting auth at the proxy layer (mTLS, oauth2-proxy, basic auth in HA) gives you an extra ring.
+Bare-metal: replace `docker compose ...` with `systemctl ... wgflow` / `journalctl -u wgflow -f`.
 
-The compose file binds to `127.0.0.1:8080` deliberately. Don't change it to `0.0.0.0` unless you've thought about it carefully.
-
----
-
-## Troubleshooting
-
-| Symptom                                          | Where to look                                                         |
-|--------------------------------------------------|-----------------------------------------------------------------------|
-| Peer connects but no traffic                     | `docker exec wgflow iptables -L WGFLOW_FORWARD -n -v` — counters      |
-| No connection at all                             | UDP/51820 reachable from the peer's network? Check NAT/firewall       |
-| `wg-quick up` fails on container start           | `lsmod \| grep wireguard` on the host; load the kernel module         |
-| Admin UI empty / WS errors                       | `docker logs wgflow` and check the browser console                    |
-| DNS not resolving for peers                      | If `WG_LOCAL_DNS=1`, check `docker logs wgflow` for dnsmasq startup   |
-| "Top destinations" inspector panel always empty  | Enable conntrack accounting (see operational notes)                   |
-| iperf3 says "connection refused"                 | Make sure `iperf3 -s` is running on the target                        |
-| Peer ping says "no ICMP reply" but peer is online| Peer's `AllowedIPs` is split-tunnel without server subnet, OR firewall|
+Health check: `GET /healthz` returns `{"ok": true, "version": "...", "uptime_seconds": N}` — suitable for uptime-kuma, Prometheus blackbox, or a systemd watchdog.
 
 ---
 
-## Security surface
+## Contributing
 
-This container has `NET_ADMIN` and `NET_RAW`. Anyone who reaches port 8080 can:
-
-- create / delete peers (and download their private keys)
-- modify iptables rules indirectly via ACL edits
-- run arbitrary network diagnostics from the server (ping, traceroute, port scans via TCP test, iperf3)
-- read DNS query history (potential privacy leak about peers' browsing)
-
-**Mitigations:**
-- Bind to loopback (default in compose)
-- Set `PANEL_PASSWORD`
-- Put a reverse proxy with auth in front
-- Treat `data/` as secret material (peer private keys live in sqlite + in `data/peers/*.conf`)
-
----
-
-## Roadmap
-
-Things that have been discussed but aren't built:
-
-- **Per-peer bandwidth limits** via Linux `tc` HTB classes — viable up to ~50 peers before classifier maintenance gets painful
-- **Whole-VPN bandwidth cap** via a single `tc tbf` rule on `wg0` — much simpler, ~1 day of work
-- **Per-axis cumulative counter reset** (currently rx + tx reset together — needs separate offset rows in DB)
-- **WireGuard kernel-debug enable from UI** (currently a manual host-side `dynamic_debug` write)
-- **Real Ookla speedtest CLI** as an opt-in alternative to the curl-based one (more accurate, but +30MB image and Ookla telemetry)
-- **iperf3 button in the peer inspect modal** (currently only in the diagnostics panel)
-- **Multi-server / multi-interface** support (one wgflow → multiple wg interfaces) — would need significant refactoring
-
----
-
-## Requirements
-
-- Linux host with kernel ≥ 5.6 **or** the `wireguard` DKMS module loaded. Verify with `modprobe wireguard && lsmod | grep wireguard`.
-- Docker and Docker Compose.
-- `net.ipv4.ip_forward = 1` is set via compose sysctl, but your host must allow Docker to set that sysctl (the default).
+Issues and pull requests welcome. wgflow is deliberately dependency-light and the codebase is heavily commented — the comments are considered part of the deliverable. Before a structural change, open an issue to discuss; the SQLite-canonical / kernel-reconciled architecture is load-bearing and worth preserving.
 
 ---
 
 ## License
 
-"This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details."
-
----
-
-## Credits
-
-Built by [@gcblauth](https://github.com/gcblauth). Issues, PRs, and feedback welcome at [github.com/gcblauth/wgflow](https://github.com/gcblauth/wgflow).
+See [LICENSE](LICENSE).

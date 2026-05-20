@@ -12,7 +12,12 @@ services:
       net.netfilter.nf_conntrack_acct: "1"
     ports:
       - "${WG_LISTEN_PORT}:${WG_LISTEN_PORT}/udp"
-      - "${HOSTBIND_WG_PANEL}:8080/tcp"
+      # 3-part form: host_interface:hostPort:containerPort/proto.
+      # HOSTBIND_WG_PANEL is the interface only (0.0.0.0 for all
+      # interfaces, 127.0.0.1 for loopback-only behind a reverse
+      # proxy). HOSTBIND_WG_PANEL_PORT is the host-side port (the
+      # container always listens on 8080 internally).
+      - "${HOSTBIND_WG_PANEL}:${HOSTBIND_WG_PANEL_PORT:-8080}:8080/tcp"
       # v4.2-pre: federation listener (wg1 server-side) on 56969.
       # Removed in v4.2-rebuild — the asymmetric wg1 design was
       # scrapped in favor of mgmt-peers on wg0, which uses the
@@ -21,8 +26,18 @@ services:
       # leave it; nothing reads it anymore).
     volumes:
       - ./data:/data
-      # Dynamically mounts based on the .env selection
-      - ${KERNEL_LOG_PATH:-/dev/null}:${KERNEL_LOG_PATH:-/dev/null}:ro
+      # Kernel log tail (optional). The panel's "Kernel Logs" tab tails
+      # this file if mounted. Default is `/dev/null` — meaning the
+      # feature is disabled and we DON'T add a bind mount (compose
+      # would try to mount the /dev/null char device, which fails on
+      # some Docker variants).
+      #
+      # To enable, set KERNEL_LOG_PATH in .env to a host file path
+      # like /var/log/kern.log, then UNCOMMENT the line below to bind
+      # it into the container at the same path (or any path you
+      # configure the app to tail).
+      #
+      # - ${KERNEL_LOG_PATH}:${KERNEL_LOG_PATH}:ro
     environment:
       WG_INTERFACE: ${WG_INTERFACE}
       WG_LISTEN_PORT: ${WG_LISTEN_PORT}
@@ -38,10 +53,17 @@ services:
       PANEL_PASSWORD: ${PANEL_PASSWORD}
       WGFLOW_IPTABLES_LOG: ${WGFLOW_IPTABLES_LOG}
       WGFLOW_TELEMETRY_ENABLED: ${WGFLOW_TELEMETRY_ENABLED}
-      # Optional. Leave empty to use the per-instance derived secret
-      # (recommended). Set this only if you are running your own collector
-      # and have a shared key arrangement with it.
-      WGFLOW_TELEMETRY_SECRET: ${WGFLOW_TELEMETRY_SECRET:-}
+      # Show / hide the Import panel (migration from wg-easy / PiVPN /
+      # bare WG). Seeds the network_settings DB row on first install;
+      # after that, toggling via the panel sticks. Defaults to 1 (the
+      # panel exists, operator can toggle from inside).
+      WGFLOW_MIGRATION_DEFAULT_ENABLED: ${WGFLOW_MIGRATION_DEFAULT_ENABLED:-1}
+      # Community-shared HMAC key for telemetry payload signing.
+      # setup-one-time.sh writes `wgflow-community-default` — the public
+      # collector accepts that. Override only if you run your own
+      # collector with a private signing arrangement. The :- fallback
+      # here matches the app's internal default if .env omits it.
+      WGFLOW_TELEMETRY_SECRET: ${WGFLOW_TELEMETRY_SECRET:-wgflow-community-default}
       # v4.2-rebuild: multi-site federation. When enabled (default),
       # the panel shows a Multisite section where this wgflow can
       # pair with other wgflows. Symmetric design — both sides peer

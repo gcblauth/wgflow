@@ -175,8 +175,36 @@ else
 fi
 
 echo "[wgflow] handoff to uvicorn"
+
+# Parse WGFLOW_BIND into HOST + PORT. Defensive because we've seen
+# this go wrong in the wild: trailing whitespace in .env, missing
+# colon, just an IP, etc. Garbage in → uvicorn dies with confusing
+# error like "'--port': '0.0.0.0' is not a valid integer". Sanity-
+# check before invoking.
 BIND="${WGFLOW_BIND:-0.0.0.0:8080}"
+# Strip surrounding whitespace.
+BIND="${BIND#"${BIND%%[![:space:]]*}"}"
+BIND="${BIND%"${BIND##*[![:space:]]}"}"
+
+# Must contain exactly one colon separating host from port.
+if [[ "$BIND" != *:* ]]; then
+    echo "[wgflow] WGFLOW_BIND='$BIND' missing ':' — falling back to 0.0.0.0:8080"
+    BIND="0.0.0.0:8080"
+fi
+
 HOST="${BIND%:*}"
 PORT="${BIND##*:}"
+
+# Port must be a positive integer 1-65535.
+if [[ ! "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
+    echo "[wgflow] invalid port '$PORT' parsed from WGFLOW_BIND='$BIND' — using 8080"
+    PORT=8080
+fi
+# Host must be empty (= bind all) or an IPv4. Empty defaults to 0.0.0.0.
+if [[ -z "$HOST" ]]; then
+    HOST="0.0.0.0"
+fi
+
+echo "[wgflow] uvicorn bind host=$HOST port=$PORT"
 cd /srv
 exec uvicorn app.main:app --host "${HOST}" --port "${PORT}" --no-access-log

@@ -104,6 +104,24 @@ if [[ ! -f "${SCRIPT_DIR}/docker-compose.yml" ]] && [[ ! -d "${SCRIPT_DIR}/app" 
     fail "no docker-compose.yml or app/ in ${SCRIPT_DIR} — run from the wgflow repo root"
 fi
 
+# Mode-specific preflight on what we'll actually need at the build/run step.
+# Done early so missing files surface BEFORE the operator answers prompts.
+if [[ $MODE_DOCKER -eq 1 ]]; then
+    missing=()
+    [[ -f "${SCRIPT_DIR}/Dockerfile" ]]          || missing+=("Dockerfile")
+    [[ -f "${SCRIPT_DIR}/docker-compose.yml" ]]  || missing+=("docker-compose.yml")
+    [[ -f "${SCRIPT_DIR}/entrypoint.sh" ]]       || missing+=("entrypoint.sh")
+    [[ -f "${SCRIPT_DIR}/dnsmasq.conf.template" ]] || missing+=("dnsmasq.conf.template")
+    [[ -d "${SCRIPT_DIR}/app" ]]                 || missing+=("app/ directory")
+    [[ -f "${SCRIPT_DIR}/app/requirements.txt" ]] || missing+=("app/requirements.txt")
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        for m in "${missing[@]}"; do
+            warn "missing required file: $m"
+        done
+        fail "Docker mode needs the full repo layout — files above are missing"
+    fi
+fi
+
 # ---------------------------------------------------------------------------
 # Prior-install detection
 # ---------------------------------------------------------------------------
@@ -619,7 +637,7 @@ fi
 WGFLOW_BIND_VAL="${WGFLOW_BIND:-0.0.0.0:8080}"
 WGFLOW_IPTABLES_LOG_VAL="${WGFLOW_IPTABLES_LOG:-0}"
 WG_DEFAULT_ACL_VAL="${WG_DEFAULT_ACL:-10.0.0.0/8}"
-KERNEL_LOG_PATH_VAL="${KERNEL_LOG_PATH:-/dev/null}"
+KERNEL_LOG_PATH_VAL="${KERNEL_LOG_PATH:-}"
 
 # Default WG_DNS_UPSTREAMS even when DNS is off — docker-compose
 # references this variable unconditionally and will warn about
@@ -738,8 +756,10 @@ WGFLOW_BIND=${WGFLOW_BIND_VAL}
 # on busy installs.
 WGFLOW_IPTABLES_LOG=${WGFLOW_IPTABLES_LOG_VAL}
 
-# Path to mount for kernel log streaming (the panel's Logs tab can
-# tail this). Default /dev/null disables the feature.
+# Path on the HOST to a kernel log file (e.g. /var/log/kern.log). When
+# set, uncomment the matching volume line in docker-compose.yml to
+# bind-mount it into the container. The panel's Kernel Logs tab will
+# tail it. Default empty = feature off; the panel hides the tab.
 KERNEL_LOG_PATH=${KERNEL_LOG_PATH_VAL}
 EOF
 
@@ -939,5 +959,10 @@ fi)
 
   ${C_BOLD}Reconfigure:${C_RESET}
     sudo $0 --force
+
+  ${C_BOLD}Optional — tune the HOST for WireGuard throughput:${C_RESET}
+    sudo ${SCRIPT_DIR}/scripts/host-tune.sh
+    ${C_DIM}(larger UDP buffers + NIC offloads; --governor pins CPU.${C_RESET}
+    ${C_DIM} host-side, opt-in, reversible — see docs/PERFORMANCE.md)${C_RESET}
 
 EOF

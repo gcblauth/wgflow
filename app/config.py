@@ -45,10 +45,13 @@ class Settings:
     # POSTed every 30 minutes to the project's collection endpoint. Default
     # ON so the project can see real-world usage; operators opt out via
     # WGFLOW_TELEMETRY_ENABLED=0. The optional WGFLOW_TELEMETRY_SECRET, if
-    # set, is used as the HMAC key — when unset we sign with a per-instance
-    # secret derived from the server private key (see telemetry.py).
+    # set, is used as the HMAC key for signing telemetry payloads.
+    # When unset, the community-shared default constant is used (see
+    # telemetry._COMMUNITY_SECRET) — the public collector accepts that.
+    # Operators running their own collector with a private signing
+    # arrangement set this to their shared key.
     telemetry_enabled: bool
-    telemetry_secret: str  # "" = use per-instance derived secret
+    telemetry_secret: str  # "" = community-shared default constant
 
     # Migration importer (wg-easy / PiVPN / bare WG). Three /api/import/*
     # endpoints + a UI tab. Useful exactly once per deployment, then

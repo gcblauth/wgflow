@@ -5,11 +5,178 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [4.3.1] — 2026-05-19
+
+ACL alias editor brought in line with the peer ACL editor.
+
+- The alias body editor (both the create form and the edit modal)
+  now takes **one entry per line**, the same format as the peer
+  ACL editor — instead of the old comma-separated single line.
+  Easier to read and edit, and consistent across the two places
+  ACL rules are entered.
+- Alias editors now show a **live chip preview** of the parsed
+  body as you type, matching the peer ACL editor.
+- The editor explains the alias deny model explicitly: aliases are
+  **allow-only**. To deny a group, write `!@alias_name` in a
+  *peer's* ACL rules. A `!` entry typed directly into an alias
+  body is flagged in the preview (warn-colored chip + inline
+  message) and the save is blocked client-side with a clear
+  message, rather than only failing server-side with a 422.
+- Nested-alias entries (`@other` inside an alias body) are flagged
+  the same way.
+- No backend, schema, or `acl.py` changes — the alias model is
+  unchanged (allow-only bodies, deny applied at the usage site).
+  The editor converts its line-based input to the comma form the
+  API expects on the wire.
+- Throughput chart: the Y-axis now scales correctly to the real
+  data peak. Previously the axis could read a lower maximum than
+  the actual traffic (e.g. axis topped at ~0.9 MB/s while TX hit
+  2.1 MB/s), making the curve appear clipped against the top
+  edge. The axis maximum is now the data peak rounded up to a
+  clean 1024-based value with 12% headroom, ticks at quarters,
+  and a defensive clamp so the curve can never draw outside the
+  chart box.
+- `fmtBytes` no longer returns a malformed string for sub-1-byte
+  values (could produce `512.0 undefined` for a fractional tick).
+- New `scripts/host-tune.sh` — optional host-side performance
+  tuning for WireGuard throughput. Applies larger UDP socket
+  buffers (`net.core.*` sysctl), NIC hardware offloads via
+  `ethtool` (including `rx-udp-gro-forwarding`), and optionally
+  the `performance` CPU governor. Autodetects the physical NIC,
+  installs systemd units so the settings survive reboots, and is
+  fully reversible (`--revert`). Opt-in and host-side — it is NOT
+  run by `setup-one-time.sh`, only mentioned in its summary.
+  Full rationale in the new `docs/PERFORMANCE.md`.
+
 ## [4.3.0] — 2026-05-09
 
 First release with a one-shot installer. Operators run one
 script, answer a few questions, get a working wgflow. Repeat
 deployments and CI use the same script with --noninteractive.
+
+### Post-release fixes (same 4.3.0 tag, repacked)
+
+- setup-one-time.sh: `xxd` is not present on minimal Ubuntu/Debian.
+  Replaced with `od -A n -t x1 -N 32 < /dev/urandom | tr -d ' \n'`,
+  which is universally available.
+- setup-one-time.sh: ANSI color constants were defined with single-
+  quoted `\033[...]` which bash does not interpret as escapes;
+  printf/heredocs were emitting the literal six-character string.
+  Switched to `$'\033[...]'` (ANSI-C quoting), bash now interprets
+  the escape at assignment time and the terminal renders bold /
+  colors as intended.
+- setup-one-time.sh: admin password is now operator-chooseable.
+  The script generates a 32-byte random hex string and shows it as
+  the default; press Enter to accept or type your own. The
+  generated/chosen value is written to `/root/.wgflow-initial-password`
+  with chmod 600 either way. In `--noninteractive` mode the
+  generated default is used (or `WGFLOW_AUTH_PASSWORD` from env if
+  preset).
+
+- setup-one-time.sh: aligned all env var names with the canonical
+  names used by docker-compose.yml and the app config loader.
+  Previous version wrote a .env using names like `WGFLOW_TELEMETRY`,
+  `WGFLOW_AUTH_PASSWORD_FILE`, `WGFLOW_DROP_LOGGING`, `WGFLOW_BIND`
+  that the rest of the system didn't read. Now writes the actual
+  names: `WGFLOW_TELEMETRY_ENABLED`, `PANEL_PASSWORD` (plaintext —
+  bcrypt-hashed by the app at startup), `WGFLOW_IPTABLES_LOG`,
+  `HOSTBIND_WG_PANEL` (host-side port-mapping interface) /
+  `WGFLOW_BIND` (container-internal uvicorn bind), `WG_MULTISITE`,
+  `WG_FEDERATION_SUBNET`, `WG_DEFAULT_ACL`, `KERNEL_LOG_PATH`. Every
+  variable docker-compose references is now set explicitly in the
+  generated .env. The "WARN: variable not set" noise on first
+  `docker compose up` is gone.
+- setup-one-time.sh: added a Multisite federation prompt. Default
+  enable. When enabled, asks for the federation overlay subnet
+  (default 10.99.0.0/24, which must not overlap with the client
+  subnet; script refuses identical /24).
+- setup-one-time.sh: random password is now 16 bytes (32 hex chars,
+  128 bits of entropy) instead of 32 bytes (64 hex). Still
+  well-above-secure but inside bcrypt's 72-byte input limit with
+  margin. Added a warning if the operator types a password over 72
+  chars manually.
+- setup-one-time.sh: verify step sources .env before reading
+  variables, then resolves the panel URL from HOSTBIND_WG_PANEL
+  (Docker) or WGFLOW_BIND (bare-metal). Previous version referenced
+  WGFLOW_BIND unconditionally with `set -u` on, aborting with
+  "unbound variable" before the verify could probe /healthz.
+- docker-compose.yml: added `WGFLOW_MIGRATION_DEFAULT_ENABLED`
+  passthrough (the variable was read by app/config.py but never
+  forwarded from .env to the container).
+
+- docker-compose.yml: switched the panel port mapping from the
+  ambiguous 2-part form `${HOSTBIND_WG_PANEL}:8080/tcp` to the
+  unambiguous 3-part form `${HOSTBIND_WG_PANEL}:8080:8080/tcp`.
+  The 2-part form needed `HOSTBIND_WG_PANEL` to be a full
+  `host:port` string (e.g. `127.0.0.1:8080`); with just `0.0.0.0`
+  it parsed as `hostPort=0.0.0.0` and Docker errored "invalid
+  hostPort". The 3-part form takes `HOSTBIND_WG_PANEL` as the
+  host interface only — exactly what the variable's name and
+  description say it should be. setup-one-time.sh writes
+  `HOSTBIND_WG_PANEL=0.0.0.0` (or whatever the operator wants).
+  Backwards-compat: if an existing .env has the legacy host:port
+  form, setup-one-time.sh strips the :port at .env-rewrite time
+  and warns.
+
+- setup-one-time.sh: new prompt 7 asks for the host bind interface
+  (0.0.0.0 / 127.0.0.1) and host-side port. Default port is 8080
+  but if `ss -tlnH` finds something already listening there, the
+  default flips to 8081 and a warning shows which process owns the
+  port. After the operator picks a port, we re-check and refuse
+  if it's also taken (in noninteractive mode this is a fatal
+  error; in interactive mode we re-prompt).
+- docker-compose.yml: port mapping now uses `${HOSTBIND_WG_PANEL}:
+  ${HOSTBIND_WG_PANEL_PORT:-8080}:8080/tcp`. The container-side
+  port stays 8080; the host-side port is now operator-pickable.
+- setup-one-time.sh: legacy `HOSTBIND_WG_PANEL=host:port` values
+  from previous setup.sh are now split intelligently — the IP
+  becomes HOSTBIND_WG_PANEL, the port becomes
+  HOSTBIND_WG_PANEL_PORT (rather than the previous behavior of
+  silently dropping the port).
+
+- setup-one-time.sh: client subnet (WG_SUBNET) is now asked
+  BEFORE multisite federation, so the federation-subnet overlap
+  check (`if WG_FEDERATION_SUBNET_VAL == WG_SUBNET`) doesn't trip
+  `unbound variable` under `set -u`. New prompt order: endpoint,
+  DNS, client subnet, import panel, telemetry, multisite,
+  default ACL, iptables-log, bind+port.
+- setup-one-time.sh: new prompt for **default ACL** (`WG_DEFAULT_ACL`).
+  Shown with format help (CIDR, host, host:port/proto, ! for deny)
+  and two example sets — the permissive default `10.0.0.0/8` and
+  a narrow example
+  `192.168.99.7:3389/tcp,192.168.99.133/32,192.168.99.132/32`.
+  Coarse syntax validation refuses obvious garbage; the app does
+  authoritative parsing via `acl.parse_entry`.
+- setup-one-time.sh: new prompt for **iptables drop logging**
+  (`WGFLOW_IPTABLES_LOG`), default off. Explains the trade-off
+  (useful for debugging ACLs, noisy on busy installs).
+- setup-one-time.sh: **password file moved** from
+  `/root/.wgflow-initial-password` to
+  `${repo_root}/.wgflow-initial-password` (chmod 600). Lives with
+  the deployment files now; removing the deployment dir removes
+  the initial password file too.
+- setup-one-time.sh: new prompt **"build and start now? [Y/n]"**
+  before the docker-compose / install-baremetal step. If the
+  operator says no, the script prints the commands they need to
+  run later and exits 0. Lets operators inspect the .env before
+  the service starts.
+- setup-one-time.sh: docker-compose run now uses `up -d --build`,
+  forcing a build on first install (was using `up -d` without
+  --build which sometimes reused stale cached images).
+- app/config.py: corrected misleading docstring on
+  `telemetry_secret`. Empty value uses the community-shared
+  default constant (`telemetry._COMMUNITY_SECRET`), NOT a
+  per-instance derivation. The public collector at wgflow.2ps.in
+  accepts payloads signed with the community key. Operators
+  running their own collector with a private signing arrangement
+  override via `WGFLOW_TELEMETRY_SECRET`.
+
+- setup-one-time.sh: WGFLOW_TELEMETRY_SECRET is now written
+  explicitly as `wgflow-community-default` (the community-shared
+  HMAC key, matching `telemetry._COMMUNITY_SECRET`). Previously
+  written empty, which fell back to the same value but left
+  operators wondering what was being used. Explicit is clearer.
+
 
 ### Added
 
